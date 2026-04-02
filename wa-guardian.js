@@ -121,50 +121,6 @@ async function checkStatus() {
   let ws;
   try {
     ws = await createConnection();
-
-    // Check if WhatsApp channel exists and its status
-    const statusRes = await callRpc(ws, "channels.status", {});
-    const channels = (statusRes.payload || statusRes.result)?.channels || {};
-    const wa = channels.whatsapp;
-
-    if (!wa) {
-      ws.close();
-      return;
-    }
-
-    const lastError = String(wa.lastError || "").toLowerCase();
-    const recentlySaw515 = Date.now() - last515At < POST_515_NO_LOGOUT_MS;
-    const needsLogout = wa.linked && !wa.connected && !recentlySaw515 &&
-      (
-        lastError.includes("401") ||
-        lastError.includes("unauthorized") ||
-        lastError.includes("logged out") ||
-        lastError.includes("440") ||
-        lastError.includes("conflict")
-      );
-
-    if (needsLogout) {
-      console.log("[guardian] Clearing invalid WhatsApp session so a fresh QR can be used...");
-      try {
-        await callRpc(ws, "channels.logout", { channel: "whatsapp" });
-        writeResetMarker();
-        hasShownWaitMessage = false;
-        console.log("[guardian] Logged out invalid WhatsApp session.");
-      } catch (error) {
-        console.log(`[guardian] Failed to log out invalid session: ${error.message}`);
-      }
-      ws.close();
-      return;
-    }
-
-    // If connected, we are good
-    if (wa.connected) {
-      hasShownWaitMessage = false;
-      ws.close();
-      return;
-    }
-
-    // If "Ready to pair", we wait for the scan
     isWaiting = true;
     if (!hasShownWaitMessage) {
       console.log("\n[guardian] 📱 WhatsApp pairing in progress. Please scan the QR code in the Control UI.");
@@ -200,6 +156,23 @@ async function checkStatus() {
     }
 
   } catch (e) {
+    const message = e && e.message ? e.message : "";
+    if (
+      /401|unauthorized|logged out|440|conflict/i.test(message) &&
+      Date.now() - last515At >= POST_515_NO_LOGOUT_MS
+    ) {
+      console.log("[guardian] Clearing invalid WhatsApp session so a fresh QR can be used...");
+      try {
+        if (ws) {
+          await callRpc(ws, "channels.logout", { channel: "whatsapp" });
+          writeResetMarker();
+          hasShownWaitMessage = false;
+          console.log("[guardian] Logged out invalid WhatsApp session.");
+        }
+      } catch (error) {
+        console.log(`[guardian] Failed to log out invalid session: ${error.message}`);
+      }
+    }
     // Normal timeout or gateway starting up; retry on the next interval.
   } finally {
     isWaiting = false;
