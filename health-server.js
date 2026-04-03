@@ -436,6 +436,10 @@ function renderDashboard(initialData) {
             display: none;
         }
 
+        .helper-intro.hidden {
+            display: none;
+        }
+
         .helper-summary {
             margin-top: 14px;
             padding: 12px 14px;
@@ -448,6 +452,10 @@ function renderDashboard(initialData) {
 
         .helper-summary strong {
             color: var(--text);
+        }
+
+        .helper-summary.success {
+            background: rgba(16, 185, 129, 0.08);
         }
 
         .helper-toggle {
@@ -557,21 +565,16 @@ function renderDashboard(initialData) {
         <div class="stat-card helper-card">
             <span class="stat-label">Keep Space Awake</span>
             <div id="uptimerobot-public-flow">
-                <div class="helper-copy">
-                    If you use a free Hugging Face Space, it can still sleep.
-                    To keep it awake, create an external UptimeRobot monitor here.
-                    Use your <strong>Main API key</strong>.
-                </div>
-                <div class="helper-copy">
-                    Do <strong>not</strong> use the Read-only API key or a Monitor-specific API key.
-                </div>
                 <div id="uptimerobot-summary" class="helper-summary">
-                    Optional one-time setup. If you already created the monitor before, you do not need to paste the key again.
+                    One-time setup for public Spaces. Paste your UptimeRobot <strong>Main API key</strong> to create the monitor.
                 </div>
                 <button id="uptimerobot-toggle" class="helper-toggle" type="button">
                     Set Up Monitor
                 </button>
                 <div id="uptimerobot-shell" class="helper-shell hidden">
+                    <div class="helper-copy">
+                        Do <strong>not</strong> use the Read-only API key or a Monitor-specific API key.
+                    </div>
                     <div class="helper-row">
                         <input
                             id="uptimerobot-key"
@@ -590,7 +593,7 @@ function renderDashboard(initialData) {
                 </div>
             </div>
             <div id="uptimerobot-private-note" class="helper-summary hidden">
-                <strong>Not available on private Spaces.</strong> External monitors like UptimeRobot cannot reliably access a private Hugging Face Space health URL, so this setup only works on public Spaces.
+                <strong>This Space is private.</strong> External monitors cannot reliably access private HF health URLs, so keep-awake setup is only available on public Spaces.
             </div>
             <div id="uptimerobot-result" class="helper-result"></div>
         </div>
@@ -668,11 +671,13 @@ function renderDashboard(initialData) {
             const toggle = document.getElementById('uptimerobot-toggle');
 
             if (isConfigured) {
-                summary.innerHTML = '<strong>Already set up.</strong> Your monitor should keep running from UptimeRobot even after this Space restarts.';
+                summary.classList.add('success');
+                summary.innerHTML = '<strong>Already set up.</strong> Your UptimeRobot monitor should keep this public Space awake.';
                 shell.classList.add('hidden');
                 toggle.textContent = 'Set Up Again';
             } else {
-                summary.innerHTML = 'Optional one-time setup. If you already created the monitor before, you do not need to paste the key again.';
+                summary.classList.remove('success');
+                summary.innerHTML = 'One-time setup for public Spaces. Paste your UptimeRobot <strong>Main API key</strong> to create the monitor.';
                 toggle.textContent = 'Set Up Monitor';
             }
         }
