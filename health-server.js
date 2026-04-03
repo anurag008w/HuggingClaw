@@ -9,7 +9,6 @@ const GATEWAY_PORT = 7860;
 const GATEWAY_HOST = "127.0.0.1";
 const startTime = Date.now();
 const LLM_MODEL = process.env.LLM_MODEL || "Not Set";
-const SPACE_HOST = process.env.SPACE_HOST || "";
 const TELEGRAM_ENABLED = !!process.env.TELEGRAM_BOT_TOKEN;
 const WHATSAPP_ENABLED = /^true$/i.test(process.env.WHATSAPP_ENABLED || "");
 const WHATSAPP_STATUS_FILE = "/tmp/huggingclaw-wa-status.json";
@@ -31,15 +30,18 @@ function parseRequestUrl(url) {
 }
 
 function isDashboardRoute(pathname) {
-  return pathname === "/" || pathname === DASHBOARD_BASE || pathname === `${DASHBOARD_BASE}/`;
-}
-
-function isDashboardScopedPath(pathname, suffix) {
-  return pathname === `${DASHBOARD_BASE}/${suffix}`;
+  return (
+    pathname === "/" ||
+    pathname === DASHBOARD_BASE ||
+    pathname === `${DASHBOARD_BASE}/`
+  );
 }
 
 function isDashboardAppRoute(pathname) {
-  return pathname === DASHBOARD_APP_BASE || pathname.startsWith(`${DASHBOARD_APP_BASE}/`);
+  return (
+    pathname === DASHBOARD_APP_BASE ||
+    pathname.startsWith(`${DASHBOARD_APP_BASE}/`)
+  );
 }
 
 function isAppRoute(pathname) {
@@ -58,14 +60,13 @@ function isLocalRoute(pathname) {
   );
 }
 
-function stripDashboardAppPrefix(path) {
-  if (path === DASHBOARD_APP_BASE) return "/";
+function mapAppProxyPath(path) {
+  if (path === DASHBOARD_APP_BASE) return APP_BASE;
   if (path.startsWith(`${DASHBOARD_APP_BASE}/`)) {
-    return path.slice(DASHBOARD_APP_BASE.length) || "/";
+    return `${APP_BASE}${path.slice(DASHBOARD_APP_BASE.length)}`;
   }
-  if (path === APP_BASE) return "/";
-  if (path.startsWith(`${APP_BASE}/`)) {
-    return path.slice(APP_BASE.length) || "/";
+  if (path === APP_BASE || path.startsWith(`${APP_BASE}/`)) {
+    return path;
   }
   return path;
 }
@@ -144,7 +145,7 @@ function renderSyncBadge(syncData) {
   let badgeClass = "status-offline";
   let pulseHtml = "";
 
-  if (syncData.status === "success") {
+  if (syncData.status === "success" || syncData.status === "configured") {
     badgeClass = "status-online";
     pulseHtml = '<div class="pulse"></div>';
   } else if (syncData.status === "syncing") {
@@ -156,7 +157,7 @@ function renderSyncBadge(syncData) {
 }
 
 function renderDashboard(initialData) {
-  const controlUiHref = `${DASHBOARD_APP_BASE}/`;
+  const controlUiHref = `${APP_BASE}/`;
   return `
 <!DOCTYPE html>
 <html lang="en">
@@ -334,6 +335,18 @@ function renderDashboard(initialData) {
 
         #sync-msg { color: var(--text); display: block; margin-top: 4px; }
 
+        .card-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 8px;
+        }
+
+        .card-header .stat-label {
+            margin-bottom: 0;
+        }
+
         .helper-card {
             width: 100%;
             margin-top: 20px;
@@ -486,6 +499,11 @@ function renderDashboard(initialData) {
                 padding: 16px;
             }
 
+            .card-header {
+                align-items: flex-start;
+                flex-direction: column;
+            }
+
             .helper-row {
                 flex-direction: column;
             }
@@ -516,18 +534,20 @@ function renderDashboard(initialData) {
             </div>
             <div class="stat-card">
                 <span class="stat-label">WhatsApp</span>
-                <span id="wa-status">${renderChannelBadge(initialData.whatsapp, 'Ready to pair')}</span>
+                <span id="wa-status">${renderChannelBadge(initialData.whatsapp, "Ready to pair")}</span>
             </div>
             <div class="stat-card">
                 <span class="stat-label">Telegram</span>
-                <span id="tg-status">${renderChannelBadge(initialData.telegram, 'Configured')}</span>
+                <span id="tg-status">${renderChannelBadge(initialData.telegram, "Configured")}</span>
             </div>
             <a href="${controlUiHref}" id="control-ui-link" class="stat-btn">Open Control UI</a>
         </div>
 
         <div class="stat-card" style="width: 100%;">
-            <span class="stat-label">Workspace Sync Status</span>
-            <div id="sync-badge-container">${renderSyncBadge(initialData.sync)}</div>
+            <div class="card-header">
+                <span class="stat-label">Workspace Sync Status</span>
+                <div id="sync-badge-container">${renderSyncBadge(initialData.sync)}</div>
+            </div>
             <div class="sync-info">
                 Last Sync Activity: <span id="sync-time">${initialData.sync.timestamp || "Never"}</span>
                 <span id="sync-msg">${initialData.sync.message || "Waiting for first sync..."}</span>
@@ -612,7 +632,7 @@ function renderDashboard(initialData) {
                 let badgeClass = 'status-offline';
                 let pulseHtml = '';
 
-                if (syncData.status === 'success') {
+                if (syncData.status === 'success' || syncData.status === 'configured') {
                     badgeClass = 'status-online';
                     pulseHtml = '<div class="pulse"></div>';
                 } else if (syncData.status === 'syncing') {
@@ -886,7 +906,13 @@ function serializeUpgradeHeaders(req, remoteAddress) {
   return forwardedHeaders;
 }
 
-function proxyUpgrade(req, socket, head, proxyPath = req.url, proxyPort = GATEWAY_PORT) {
+function proxyUpgrade(
+  req,
+  socket,
+  head,
+  proxyPath = req.url,
+  proxyPort = GATEWAY_PORT,
+) {
   const proxySocket = net.connect(proxyPort, GATEWAY_HOST);
 
   proxySocket.on("connect", () => {
@@ -958,7 +984,10 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  if (pathname === "/uptimerobot/setup" || pathname === DASHBOARD_UPTIMEROBOT_PATH) {
+  if (
+    pathname === "/uptimerobot/setup" ||
+    pathname === DASHBOARD_UPTIMEROBOT_PATH
+  ) {
     if (req.method !== "POST") {
       res.writeHead(405, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ message: "Method not allowed" }));
@@ -1018,8 +1047,7 @@ const server = http.createServer((req, res) => {
   }
 
   if (isDashboardAppRoute(pathname) || isAppRoute(pathname)) {
-    const proxyPath =
-      stripDashboardAppPrefix(pathname) + (parsedUrl.search || "");
+    const proxyPath = mapAppProxyPath(pathname) + (parsedUrl.search || "");
     proxyHttp(req, res, proxyPath, GATEWAY_PORT);
     return;
   }
@@ -1036,8 +1064,7 @@ server.on("upgrade", (req, socket, head) => {
 
   if (isDashboardAppRoute(pathname) || isAppRoute(pathname)) {
     const parsedUrl = parseRequestUrl(req.url || "/");
-    const proxyPath =
-      stripDashboardAppPrefix(pathname) + (parsedUrl.search || "");
+    const proxyPath = mapAppProxyPath(pathname) + (parsedUrl.search || "");
     proxyUpgrade(req, socket, head, proxyPath, GATEWAY_PORT);
     return;
   }
