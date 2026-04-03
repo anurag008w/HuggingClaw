@@ -6,7 +6,6 @@ const net = require("net");
 
 const PORT = 7861;
 const GATEWAY_PORT = 7860;
-const BROWSER_PORT = 7862;
 const GATEWAY_HOST = "127.0.0.1";
 const startTime = Date.now();
 const LLM_MODEL = process.env.LLM_MODEL || "Not Set";
@@ -1015,7 +1014,7 @@ const server = http.createServer((req, res) => {
   if (isDashboardAppRoute(pathname) || isAppRoute(pathname)) {
     const proxyPath =
       stripDashboardAppPrefix(pathname) + (parsedUrl.search || "");
-    proxyHttp(req, res, proxyPath, BROWSER_PORT);
+    proxyHttp(req, res, proxyPath, GATEWAY_PORT);
     return;
   }
 
@@ -1033,7 +1032,7 @@ server.on("upgrade", (req, socket, head) => {
     const parsedUrl = parseRequestUrl(req.url || "/");
     const proxyPath =
       stripDashboardAppPrefix(pathname) + (parsedUrl.search || "");
-    proxyUpgrade(req, socket, head, proxyPath, BROWSER_PORT);
+    proxyUpgrade(req, socket, head, proxyPath, GATEWAY_PORT);
     return;
   }
 

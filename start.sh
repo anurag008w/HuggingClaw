@@ -193,7 +193,8 @@ CONFIG_JSON=$(cat <<'CONFIGEOF'
       "token": ""
     },
     "controlUi": {
-      "allowInsecureAuth": true
+      "allowInsecureAuth": true,
+      "basePath": "/app"
     },
     "trustedProxies": ["127.0.0.1/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
   },
