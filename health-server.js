@@ -13,11 +13,14 @@ const SPACE_HOST = process.env.SPACE_HOST || "";
 const TELEGRAM_ENABLED = !!process.env.TELEGRAM_BOT_TOKEN;
 const WHATSAPP_ENABLED = /^true$/i.test(process.env.WHATSAPP_ENABLED || "");
 const WHATSAPP_STATUS_FILE = "/tmp/huggingclaw-wa-status.json";
+const HF_BACKUP_ENABLED = !!(process.env.HF_USERNAME && process.env.HF_TOKEN);
+const SYNC_INTERVAL = process.env.SYNC_INTERVAL || "600";
 const DASHBOARD_BASE = "/dashboard";
 const DASHBOARD_STATUS_PATH = `${DASHBOARD_BASE}/status`;
 const DASHBOARD_HEALTH_PATH = `${DASHBOARD_BASE}/health`;
 const DASHBOARD_UPTIMEROBOT_PATH = `${DASHBOARD_BASE}/uptimerobot/setup`;
 const DASHBOARD_APP_BASE = `${DASHBOARD_BASE}/app`;
+const APP_BASE = "/app";
 
 function parseRequestUrl(url) {
   try {
@@ -39,6 +42,10 @@ function isDashboardAppRoute(pathname) {
   return pathname === DASHBOARD_APP_BASE || pathname.startsWith(`${DASHBOARD_APP_BASE}/`);
 }
 
+function isAppRoute(pathname) {
+  return pathname === APP_BASE || pathname.startsWith(`${APP_BASE}/`);
+}
+
 function isLocalRoute(pathname) {
   return (
     pathname === "/health" ||
@@ -55,6 +62,10 @@ function stripDashboardAppPrefix(path) {
   if (path === DASHBOARD_APP_BASE) return "/";
   if (path.startsWith(`${DASHBOARD_APP_BASE}/`)) {
     return path.slice(DASHBOARD_APP_BASE.length) || "/";
+  }
+  if (path === APP_BASE) return "/";
+  if (path.startsWith(`${APP_BASE}/`)) {
+    return path.slice(APP_BASE.length) || "/";
   }
   return path;
 }
@@ -86,6 +97,12 @@ function readSyncStatus() {
       return JSON.parse(fs.readFileSync("/tmp/sync-status.json", "utf8"));
     }
   } catch {}
+  if (HF_BACKUP_ENABLED) {
+    return {
+      status: "configured",
+      message: `Backup is enabled. Waiting for the next sync window (${SYNC_INTERVAL}s).`,
+    };
+  }
   return { status: "unknown", message: "No sync data yet" };
 }
 
@@ -139,7 +156,7 @@ function renderSyncBadge(syncData) {
 }
 
 function renderDashboard(initialData) {
-  const controlUiHref = SPACE_HOST ? `https://${SPACE_HOST}` : `${DASHBOARD_APP_BASE}/`;
+  const controlUiHref = `${DASHBOARD_APP_BASE}/`;
   return `
 <!DOCTYPE html>
 <html lang="en">
@@ -687,6 +704,7 @@ function renderDashboard(initialData) {
         updateStats();
         setInterval(updateStats, 10000);
         restoreMonitorUiState();
+        document.getElementById('control-ui-link').setAttribute('href', getDashboardBase() + '/app/');
         document.getElementById('uptimerobot-btn').addEventListener('click', setupUptimeRobot);
         document.getElementById('uptimerobot-toggle').addEventListener('click', toggleMonitorSetup);
     </script>
@@ -993,7 +1011,7 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  if (isDashboardAppRoute(pathname)) {
+  if (isDashboardAppRoute(pathname) || isAppRoute(pathname)) {
     const proxyPath =
       stripDashboardAppPrefix(pathname) + (parsedUrl.search || "");
     proxyHttp(req, res, proxyPath);
@@ -1010,7 +1028,7 @@ server.on("upgrade", (req, socket, head) => {
     return;
   }
 
-  if (isDashboardAppRoute(pathname)) {
+  if (isDashboardAppRoute(pathname) || isAppRoute(pathname)) {
     const parsedUrl = parseRequestUrl(req.url || "/");
     const proxyPath =
       stripDashboardAppPrefix(pathname) + (parsedUrl.search || "");

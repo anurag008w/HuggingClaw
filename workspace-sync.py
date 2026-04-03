@@ -196,6 +196,12 @@ def main():
         return
 
     # Give the gateway a short head start before the first sync probe.
+    if use_hf_hub:
+        write_sync_status("configured", f"Backup enabled. Waiting for next sync in {INTERVAL}s.")
+    else:
+        write_sync_status("configured", f"Git sync enabled. Waiting for next sync in {INTERVAL}s.")
+
+    # Give the gateway a short head start before the first sync probe.
     time.sleep(INITIAL_DELAY)
 
     snapshot_state_into_workspace()
