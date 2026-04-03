@@ -556,36 +556,41 @@ function renderDashboard(initialData) {
 
         <div class="stat-card helper-card">
             <span class="stat-label">Keep Space Awake</span>
-            <div class="helper-copy">
-                If you use a free Hugging Face Space, it can still sleep.
-                To keep it awake, create an external UptimeRobot monitor here.
-                Use your <strong>Main API key</strong>.
-            </div>
-            <div class="helper-copy">
-                Do <strong>not</strong> use the Read-only API key or a Monitor-specific API key.
-            </div>
-            <div id="uptimerobot-summary" class="helper-summary">
-                Optional one-time setup. If you already created the monitor before, you do not need to paste the key again.
-            </div>
-            <button id="uptimerobot-toggle" class="helper-toggle" type="button">
-                Set Up Monitor
-            </button>
-            <div id="uptimerobot-shell" class="helper-shell hidden">
-                <div class="helper-row">
-                    <input
-                        id="uptimerobot-key"
-                        class="helper-input"
-                        type="password"
-                        placeholder="Paste your UptimeRobot Main API key"
-                        autocomplete="off"
-                    />
-                    <button id="uptimerobot-btn" class="helper-button" type="button">
-                        Create Monitor
-                    </button>
+            <div id="uptimerobot-public-flow">
+                <div class="helper-copy">
+                    If you use a free Hugging Face Space, it can still sleep.
+                    To keep it awake, create an external UptimeRobot monitor here.
+                    Use your <strong>Main API key</strong>.
                 </div>
-                <div class="helper-note">
-                    One-time setup. Your key is only used to create the monitor for this Space.
+                <div class="helper-copy">
+                    Do <strong>not</strong> use the Read-only API key or a Monitor-specific API key.
                 </div>
+                <div id="uptimerobot-summary" class="helper-summary">
+                    Optional one-time setup. If you already created the monitor before, you do not need to paste the key again.
+                </div>
+                <button id="uptimerobot-toggle" class="helper-toggle" type="button">
+                    Set Up Monitor
+                </button>
+                <div id="uptimerobot-shell" class="helper-shell hidden">
+                    <div class="helper-row">
+                        <input
+                            id="uptimerobot-key"
+                            class="helper-input"
+                            type="password"
+                            placeholder="Paste your UptimeRobot Main API key"
+                            autocomplete="off"
+                        />
+                        <button id="uptimerobot-btn" class="helper-button" type="button">
+                            Create Monitor
+                        </button>
+                    </div>
+                    <div class="helper-note">
+                        One-time setup. Your key is only used to create the monitor for this Space.
+                    </div>
+                </div>
+            </div>
+            <div id="uptimerobot-private-note" class="helper-summary hidden">
+                <strong>Not available on private Spaces.</strong> External monitors like UptimeRobot cannot reliably access a private Hugging Face Space health URL, so this setup only works on public Spaces.
             </div>
             <div id="uptimerobot-result" class="helper-result"></div>
         </div>
@@ -651,6 +656,11 @@ function renderDashboard(initialData) {
         }
 
         const monitorStateKey = 'huggingclaw_uptimerobot_setup_v1';
+
+        function isPrivateSignedView() {
+            const params = new URLSearchParams(window.location.search || '');
+            return params.has('__sign');
+        }
 
         function setMonitorUiState(isConfigured) {
             const summary = document.getElementById('uptimerobot-summary');
@@ -731,8 +741,13 @@ function renderDashboard(initialData) {
         setInterval(updateStats, 10000);
         restoreMonitorUiState();
         document.getElementById('control-ui-link').setAttribute('href', getDashboardBase() + '/app/' + getCurrentSearch());
-        document.getElementById('uptimerobot-btn').addEventListener('click', setupUptimeRobot);
-        document.getElementById('uptimerobot-toggle').addEventListener('click', toggleMonitorSetup);
+        if (isPrivateSignedView()) {
+            document.getElementById('uptimerobot-public-flow').classList.add('hidden');
+            document.getElementById('uptimerobot-private-note').classList.remove('hidden');
+        } else {
+            document.getElementById('uptimerobot-btn').addEventListener('click', setupUptimeRobot);
+            document.getElementById('uptimerobot-toggle').addEventListener('click', toggleMonitorSetup);
+        }
     </script>
 </body>
 </html>

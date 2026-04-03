@@ -128,7 +128,7 @@ For persistent chat history and configuration, HuggingClaw can sync your workspa
 
 ## 💓 Staying Alive *(Recommended on Free HF Spaces)*
 
-Free Hugging Face Spaces can still sleep. HuggingClaw does not rely on internal self-pings anymore. To help keep your Space awake, set up an external UptimeRobot monitor from the dashboard.
+Free Hugging Face Spaces can still sleep. HuggingClaw does not rely on internal self-pings anymore. To help keep a public Space awake, set up an external UptimeRobot monitor from the dashboard.
 
 Use the **Main API key** from UptimeRobot.
 Do **not** use the `Read-only API key` or a `Monitor-specific API key`.
@@ -147,6 +147,11 @@ What happens next:
 - You only need to do this once
 
 You do **not** need to add this key to Hugging Face Space Secrets.
+
+Note:
+
+- This works for **public** Spaces.
+- It does **not** work reliably for **private** Spaces, because external monitors cannot access private HF health URLs.
 
 ## 🔔 Webhooks *(Optional)*
 
