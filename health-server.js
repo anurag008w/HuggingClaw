@@ -436,10 +436,6 @@ function renderDashboard(initialData) {
             display: none;
         }
 
-        .helper-intro.hidden {
-            display: none;
-        }
-
         .helper-summary {
             margin-top: 14px;
             padding: 12px 14px;
@@ -660,9 +656,23 @@ function renderDashboard(initialData) {
 
         const monitorStateKey = 'huggingclaw_uptimerobot_setup_v1';
 
-        function isPrivateSignedView() {
+        async function detectPrivateSpace() {
             const params = new URLSearchParams(window.location.search || '');
-            return params.has('__sign');
+
+            if (!params.has('__sign')) {
+                return false;
+            }
+
+            try {
+                const res = await fetch(getDashboardBase(), {
+                    method: 'GET',
+                    cache: 'no-store',
+                    credentials: 'same-origin'
+                });
+                return !res.ok;
+            } catch {
+                return true;
+            }
         }
 
         function setMonitorUiState(isConfigured) {
@@ -746,13 +756,18 @@ function renderDashboard(initialData) {
         setInterval(updateStats, 10000);
         restoreMonitorUiState();
         document.getElementById('control-ui-link').setAttribute('href', getDashboardBase() + '/app/' + getCurrentSearch());
-        if (isPrivateSignedView()) {
-            document.getElementById('uptimerobot-public-flow').classList.add('hidden');
-            document.getElementById('uptimerobot-private-note').classList.remove('hidden');
-        } else {
+        detectPrivateSpace().then((isPrivate) => {
+            if (isPrivate) {
+                document.getElementById('uptimerobot-public-flow').classList.add('hidden');
+                document.getElementById('uptimerobot-private-note').classList.remove('hidden');
+                document.getElementById('uptimerobot-result').className = 'helper-result';
+                document.getElementById('uptimerobot-result').textContent = '';
+                return;
+            }
+
             document.getElementById('uptimerobot-btn').addEventListener('click', setupUptimeRobot);
             document.getElementById('uptimerobot-toggle').addEventListener('click', toggleMonitorSetup);
-        }
+        });
     </script>
 </body>
 </html>
