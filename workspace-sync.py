@@ -28,7 +28,7 @@ EXCLUDED_STATE_NAMES = {
 WHATSAPP_CREDS_DIR = Path("/home/node/.openclaw/credentials/whatsapp/default")
 WHATSAPP_BACKUP_DIR = STATE_DIR / "credentials" / "whatsapp" / "default"
 RESET_MARKER = WORKSPACE / ".reset_credentials"
-INTERVAL = int(os.environ.get("SYNC_INTERVAL", "600"))
+INTERVAL = int(os.environ.get("SYNC_INTERVAL", "180"))
 INITIAL_DELAY = int(os.environ.get("SYNC_START_DELAY", "10"))
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
 HF_USERNAME = os.environ.get("HF_USERNAME", "")
@@ -209,6 +209,44 @@ def sync_with_git():
         return False
 
 
+def run_sync_pass(use_hf_hub: bool) -> None:
+    """Snapshot state and push it if anything changed."""
+    snapshot_state_into_workspace()
+
+    if not has_changes():
+        return
+
+    ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    write_sync_status("syncing", f"Starting sync at {ts}")
+
+    if use_hf_hub:
+        if sync_with_hf_hub():
+            print(f"🔄 Workspace sync (hf_hub): pushed changes ({ts})")
+            write_sync_status("success", "Successfully pushed to HF Hub")
+            return
+
+        if sync_with_git():
+            print(f"🔄 Workspace sync (git fallback): pushed changes ({ts})")
+            write_sync_status("success", "Successfully pushed via git fallback")
+            return
+
+        msg = f"Workspace sync: failed ({ts}), will retry"
+        print(f"🔄 {msg}")
+        write_sync_status("error", msg)
+        trigger_webhook("sync", "error", msg)
+        return
+
+    if sync_with_git():
+        print(f"🔄 Workspace sync (git): pushed changes ({ts})")
+        write_sync_status("success", "Successfully pushed via git")
+        return
+
+    msg = f"Workspace sync: push failed ({ts}), will retry"
+    print(f"🔄 {msg}")
+    write_sync_status("error", msg)
+    trigger_webhook("sync", "error", msg)
+
+
 def main():
     if "--snapshot-once" in sys.argv:
         snapshot_state_into_workspace()
@@ -279,50 +317,19 @@ def main():
     # Give the gateway a short head start before the first sync probe.
     time.sleep(INITIAL_DELAY)
 
-    snapshot_state_into_workspace()
-
     if use_hf_hub:
         print(f"🔄 Workspace sync started (huggingface_hub): every {INTERVAL}s → {HF_USERNAME}/{BACKUP_DATASET}")
     else:
         print(f"🔄 Workspace sync started (git): every {INTERVAL}s")
+
+    run_sync_pass(use_hf_hub)
 
     while running:
         time.sleep(INTERVAL)
         if not running:
             break
 
-        snapshot_state_into_workspace()
-
-        if not has_changes():
-            continue
-
-        ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        
-        write_sync_status("syncing", f"Starting sync at {ts}")
-
-        if use_hf_hub:
-            if sync_with_hf_hub():
-                print(f"🔄 Workspace sync (hf_hub): pushed changes ({ts})")
-                write_sync_status("success", "Successfully pushed to HF Hub")
-            else:
-                # Fallback to git
-                if sync_with_git():
-                    print(f"🔄 Workspace sync (git fallback): pushed changes ({ts})")
-                    write_sync_status("success", "Successfully pushed via git fallback")
-                else:
-                    msg = f"Workspace sync: failed ({ts}), will retry"
-                    print(f"🔄 {msg}")
-                    write_sync_status("error", msg)
-                    trigger_webhook("sync", "error", msg)
-        else:
-            if sync_with_git():
-                print(f"🔄 Workspace sync (git): pushed changes ({ts})")
-                write_sync_status("success", "Successfully pushed via git")
-            else:
-                msg = f"Workspace sync: push failed ({ts}), will retry"
-                print(f"🔄 {msg}")
-                write_sync_status("error", msg)
-                trigger_webhook("sync", "error", msg)
+        run_sync_pass(use_hf_hub)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ set -e
 OPENCLAW_VERSION="${OPENCLAW_VERSION:-latest}"
 WHATSAPP_ENABLED="${WHATSAPP_ENABLED:-false}"
 WHATSAPP_ENABLED_NORMALIZED=$(printf '%s' "$WHATSAPP_ENABLED" | tr '[:upper:]' '[:lower:]')
+SYNC_INTERVAL="${SYNC_INTERVAL:-180}"
 echo ""
 echo "  ╔══════════════════════════════════════════╗"
 echo "  ║          🦞 HuggingClaw Gateway          ║"
@@ -385,7 +386,7 @@ printf "  │  %-40s │\n" "Dashboard: https://${SPACE_HOST}"
 fi
 SYNC_STATUS="❌ disabled"
 if [ -n "$HF_USERNAME" ] && [ -n "$HF_TOKEN" ]; then
-  SYNC_STATUS="✅ every ${SYNC_INTERVAL:-600}s"
+  SYNC_STATUS="✅ every ${SYNC_INTERVAL:-180}s"
 fi
 printf "  │  %-40s │\n" "Auto-sync: $SYNC_STATUS"
 if [ -n "$WEBHOOK_URL" ]; then

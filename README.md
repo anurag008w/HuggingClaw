@@ -120,7 +120,7 @@ For persistent chat history and configuration, HuggingClaw can sync your workspa
 | `HF_USERNAME` | — | Your HuggingFace username |
 | `HF_TOKEN` | — | HF token with write access |
 | `BACKUP_DATASET_NAME` | `huggingclaw-backup` | Dataset name for backup repo |
-| `SYNC_INTERVAL` | `600` | Sync interval in seconds |
+| `SYNC_INTERVAL` | `180` | Sync interval in seconds |
 | `WORKSPACE_GIT_USER` | `openclaw@example.com` | Git commit email for syncs |
 | `WORKSPACE_GIT_NAME` | `OpenClaw Bot` | Git commit name for syncs |
 
