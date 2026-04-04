@@ -42,6 +42,7 @@ license: mit
 - 🔌 **Any LLM:** Use Claude, OpenAI GPT, Google Gemini, Grok, DeepSeek, Qwen, and 40+ providers (set `LLM_API_KEY` and `LLM_MODEL` accordingly).
 - ⚡ **Zero Config:** Duplicate this Space and set **just three** secrets (LLM_API_KEY, LLM_MODEL, GATEWAY_TOKEN) – no other setup needed.
 - 🐳 **Fast Builds:** Uses a pre-built OpenClaw Docker image to deploy in minutes.
+- 🌐 **Built-In Browser:** Headless Chromium is included in the Space, so browser actions work from the start.
 - 💾 **Workspace Backup:** Chats, settings, and WhatsApp session state sync to a private HF Dataset via the `huggingface_hub` (Git fallback), preserving data automatically.
 - ⏰ **External Keep-Alive:** Set up a one-time UptimeRobot monitor from the dashboard to help keep free HF Spaces awake.
 - 👥 **Multi-User Messaging:** Support for Telegram (multi-user) and WhatsApp (pairing).
@@ -60,7 +61,7 @@ Watch a quick walkthrough on YouTube: [Deploying HuggingClaw on HF Spaces](https
 
 [![Duplicate this Space](https://huggingface.co/datasets/huggingface/badges/resolve/main/duplicate-this-space-xl.svg)](https://huggingface.co/spaces/somratpro/HuggingClaw?duplicate=true)
 
-Click the button above to duplicate the template. 
+Click the button above to duplicate the template.
 
 ### Step 2: Add Your Secrets
 

@@ -236,6 +236,31 @@ CONFIG_JSON=$(echo "$CONFIG_JSON" | jq ".gateway.auth.token = \"$GATEWAY_TOKEN\"
 # Model configuration at top level
 CONFIG_JSON=$(echo "$CONFIG_JSON" | jq ".agents.defaults.model = \"$LLM_MODEL\"")
 
+# Browser configuration (managed local Chromium in HF/Docker)
+BROWSER_EXECUTABLE_PATH=""
+for candidate in /usr/bin/chromium /usr/bin/chromium-browser /snap/bin/chromium; do
+  if [ -x "$candidate" ]; then
+    BROWSER_EXECUTABLE_PATH="$candidate"
+    break
+  fi
+done
+
+BROWSER_SHOULD_ENABLE=false
+if [ -n "$BROWSER_EXECUTABLE_PATH" ] && [ -x "$BROWSER_EXECUTABLE_PATH" ]; then
+  BROWSER_SHOULD_ENABLE=true
+fi
+
+if [ "$BROWSER_SHOULD_ENABLE" = "true" ]; then
+  CONFIG_JSON=$(echo "$CONFIG_JSON" | jq \
+    ".browser = {
+      \"enabled\": true,
+      \"defaultProfile\": \"openclaw\",
+      \"headless\": true,
+      \"noSandbox\": true,
+      \"executablePath\": \"$BROWSER_EXECUTABLE_PATH\"
+    } | .agents.defaults.sandbox.browser.allowHostControl = true")
+fi
+
 # Control UI origin (allow HF Space URL for web UI access)
 if [ -n "$SPACE_HOST" ]; then
   CONFIG_JSON=$(echo "$CONFIG_JSON" | jq ".gateway.controlUi.allowedOrigins = [\"https://${SPACE_HOST}\"]")
@@ -344,6 +369,11 @@ if [ "$WHATSAPP_ENABLED_NORMALIZED" = "true" ]; then
 printf "  │  %-40s │\n" "WhatsApp: ✅ enabled"
 else
 printf "  │  %-40s │\n" "WhatsApp: ❌ disabled"
+fi
+if [ "$BROWSER_SHOULD_ENABLE" = "true" ]; then
+printf "  │  %-40s │\n" "Browser: ✅ ${BROWSER_EXECUTABLE_PATH}"
+else
+printf "  │  %-40s │\n" "Browser: ❌ unavailable"
 fi
 if [ -n "$HF_USERNAME" ] && [ -n "$HF_TOKEN" ]; then
 printf "  │  %-40s │\n" "Backup: ✅ ${HF_USERNAME}/${BACKUP_DATASET:-huggingclaw-backup}"
