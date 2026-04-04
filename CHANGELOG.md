@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.0] - 2026-04-04
+
+### Added
+
+- **Built-in browser support** — HuggingClaw now includes headless Chromium support in the Docker image, with automatic startup detection and a warmed managed browser profile for first-run browser actions
+- **Full OpenClaw state backup** — backup sync now stores and restores broader hidden OpenClaw state, including agent/session data, so restarts can recover more than just the visible workspace
+- **Shutdown sync path** — graceful shutdown now runs a real one-shot backup sync before exit instead of relying only on the periodic sync loop
+
+### Changed
+
+- **Workspace sync hardened** — startup now restores saved OpenClaw state, periodic sync runs an immediate first pass after startup, and the default sync interval is now `180s`
+- **Workspace sync card improved** — the dashboard now shows a clearer configured state, better alignment, and more accurate backup status messaging
+- **Keep-awake card simplified** — dashboard messaging now changes based on public/private Space state and whether UptimeRobot setup was already completed
+
+### Fixed
+
+- **Private Space dashboard loading** — fixed dashboard status fetching and Control UI linking for HF private Spaces where signed URLs and routed paths behave differently
+- **Backup snapshot failures from live browser locks** — excluded transient Chromium runtime files from state backup so browser lock/socket files no longer break sync
+
 ## [1.2.0] - 2026-04-03
 
 ### Added
