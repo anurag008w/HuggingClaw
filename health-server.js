@@ -57,8 +57,7 @@ function isLocalRoute(pathname) {
     pathname === "/uptimerobot/setup" ||
     pathname === DASHBOARD_HEALTH_PATH ||
     pathname === DASHBOARD_STATUS_PATH ||
-    pathname === DASHBOARD_UPTIMEROBOT_PATH ||
-    isDashboardRoute(pathname)
+    pathname === DASHBOARD_UPTIMEROBOT_PATH
   );
 }
 
