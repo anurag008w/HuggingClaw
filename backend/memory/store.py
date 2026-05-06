@@ -1,12 +1,16 @@
 from pathlib import Path
 import json
+from backend.core.config import settings
+
 
 class MemoryStore:
-    def __init__(self, file: str = "/divya/memory/long_term.json"):
+    def __init__(self, file: str | None = None):
         self.short_term: dict[str, list[str]] = {}
-        self.file = Path(file)
+        default_file = Path(settings.data_root) / "memory" / "long_term.json"
+        self.file = Path(file) if file else default_file
         self.file.parent.mkdir(parents=True, exist_ok=True)
-        if not self.file.exists(): self.file.write_text("{}", encoding="utf-8")
+        if not self.file.exists():
+            self.file.write_text("{}", encoding="utf-8")
 
     def store_memory(self, session_id: str, text: str):
         self.short_term.setdefault(session_id, []).append(text)

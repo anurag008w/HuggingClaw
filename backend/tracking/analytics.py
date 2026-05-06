@@ -1,14 +1,17 @@
 import time
 from pathlib import Path
 import json
+from backend.core.config import settings
+
 
 class Tracker:
-    def __init__(self, log_file: str = "/divya/logs/actions.jsonl"):
+    def __init__(self, log_file: str | None = None):
         self.start = time.time()
         self.app_usage: dict[str, int] = {}
         self.commands: list[str] = []
         self.file_activity: list[str] = []
-        self.log_file = Path(log_file)
+        default_log = Path(settings.data_root) / "logs" / "actions.jsonl"
+        self.log_file = Path(log_file) if log_file else default_log
         self.log_file.parent.mkdir(parents=True, exist_ok=True)
 
     def log_action(self, action: str, permission: str, args: dict):
