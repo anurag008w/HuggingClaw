@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Any, Literal
 
 class AIAction(BaseModel):
@@ -8,7 +8,7 @@ class AIAction(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str
-    session_id: str = "default"
+    session_id: str = 'default'
     confirm_dangerous: bool = False
 
 class ExecuteRequest(BaseModel):
@@ -17,7 +17,7 @@ class ExecuteRequest(BaseModel):
     confirm_dangerous: bool = False
 
 class MemorySearchRequest(BaseModel):
-    session_id: str = "default"
+    session_id: str = 'default'
     query: str
 
 class ScheduleRequest(BaseModel):
@@ -26,6 +26,20 @@ class ScheduleRequest(BaseModel):
     minute: int
     action: str
     args: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator('hour')
+    @classmethod
+    def validate_hour(cls, v: int) -> int:
+        if v < 0 or v > 23:
+            raise ValueError('hour must be 0..23')
+        return v
+
+    @field_validator('minute')
+    @classmethod
+    def validate_minute(cls, v: int) -> int:
+        if v < 0 or v > 59:
+            raise ValueError('minute must be 0..59')
+        return v
 
 class TriggerRequest(BaseModel):
     event: str
@@ -37,5 +51,5 @@ class ToolResult(BaseModel):
 
 class ActionLog(BaseModel):
     action: str
-    permission: Literal["SAFE", "MEDIUM", "DANGEROUS"]
+    permission: Literal['SAFE', 'MEDIUM', 'DANGEROUS']
     args: dict[str, Any] = Field(default_factory=dict)

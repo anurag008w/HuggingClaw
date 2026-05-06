@@ -20,7 +20,7 @@ executor = Executor(registry, tracker)
 memory = MemoryStore()
 model = ModelManager(base_url=settings.base_url, api_key=settings.api_key, model_id=settings.model_id)
 orchestrator = Orchestrator(planner, model, executor, memory)
-automation = AutomationEngine(); automation.start()
+automation = AutomationEngine()
 
 @router.post('/chat')
 def chat(req: ChatRequest):
@@ -46,9 +46,9 @@ def analytics():
 @router.get('/system/snapshot')
 def system_snapshot():
     t = TerminalTool()
-    cpu = t.run(command="uptime")
-    disk = t.run(command="df -h")
-    mem = t.run(command="free -h")
+    cpu = t.run(command='uptime')
+    disk = t.run(command='df -h')
+    mem = t.run(command='free -h')
     return {'cpu': cpu['stdout'], 'disk': disk['stdout'], 'memory': mem['stdout']}
 
 @router.post('/automation/schedule')
