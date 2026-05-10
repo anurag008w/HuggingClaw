@@ -1,0 +1,408 @@
+---
+title: HuggingClaw
+emoji: 🦞
+colorFrom: blue
+colorTo: purple
+sdk: docker
+app_port: 7861
+pinned: true
+license: mit
+secrets:
+  - name: LLM_API_KEY
+    description: "Your LLM provider API key (e.g. Anthropic, OpenAI, Google, OpenRouter)."
+  - name: LLM_MODEL
+    description: "Model ID to use, e.g. google/gemini-2.5-flash or openai/gpt-4o."
+  - name: GATEWAY_TOKEN
+    description: "Strong token to secure your OpenClaw Control UI (generate: openssl rand -hex 32)."
+  - name: CLOUDFLARE_WORKERS_TOKEN
+    description: "Cloudflare API token — auto-creates a Worker proxy and KeepAlive monitor."
+  - name: TELEGRAM_ALLOWED_USERS
+    description: "Comma-separated Telegram user IDs for access"
+  - name: TELEGRAM_BOT_TOKEN
+    description: "Telegram bot token from BotFather"
+---
+
+<!-- Badges -->
+[![GitHub Stars](https://img.shields.io/github/stars/somratpro/huggingclaw?style=flat-square)](https://github.com/somratpro/huggingclaw)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](https://opensource.org/licenses/MIT)
+[![HF Space](https://img.shields.io/badge/🤗%20HuggingFace-Space-blue?style=flat-square)](https://huggingface.co/spaces)
+[![OpenClaw](https://img.shields.io/badge/OpenClaw-Gateway-red?style=flat-square)](https://github.com/openclaw/openclaw)
+
+**Your always-on AI assistant — free, no server needed.** HuggingClaw runs [OpenClaw](https://openclaw.ai) on HuggingFace Spaces, giving you a 24/7 AI chat assistant on Telegram and WhatsApp. It works with *any* large language model (LLM) – Claude, ChatGPT, Gemini, etc. – and even supports custom models via [OpenRouter](https://openrouter.ai). Deploy in minutes on the free HF Spaces tier (2 vCPU, 16GB RAM, 50GB) with automatic workspace backup to a HuggingFace Dataset so your chat history and settings persist across restarts.
+
+## Table of Contents
+
+- [✨ Features](#-features)
+- [🎥 Video Tutorial](#-video-tutorial)
+- [🚀 Quick Start](#-quick-start)
+- [📱 Telegram Setup *(Optional)*](#-telegram-setup-optional)
+- [🌐 Cloudflare Proxy](#-cloudflare-proxy-setup)
+- [💬 WhatsApp Setup *(Optional)*](#-whatsapp-setup-optional)
+- [💾 Workspace Backup *(Optional)*](#-workspace-backup-optional)
+- [🔔 Webhooks *(Optional)*](#-webhooks-optional)
+- [🔐 Security & Advanced *(Optional)*](#-security-advanced-optional)
+- [🤖 LLM Providers](#-llm-providers)
+- [🔑 API Key Rotation & Multi-Provider Mode](#-api-key-rotation-multi-provider-mode)
+- [💻 Local Development](#-local-development)
+- [🔗 CLI Access](#-cli-access)
+- [🏗️ Architecture](#-architecture)
+- [💓 Staying Alive](#-staying-alive-recommended-on-free-hf-spaces)
+- [🐛 Troubleshooting](#-troubleshooting)
+- [📚 Links](#-links)
+- [🤝 Contributing](#-contributing)
+- [📄 License](#-license)
+
+## ✨ Features
+
+- 🔌 **Any LLM:** Use Claude, OpenAI GPT, Google Gemini, Grok, DeepSeek, Qwen, and 40+ providers (set `LLM_API_KEY` and `LLM_MODEL` accordingly).
+- 🔑 **API Key Rotation:** Add comma-separated `*_API_KEYS` pools for supported providers and HuggingClaw rotates keys round-robin per provider at runtime.
+- 🌐 **Multi-Provider Mode:** Keep one default `LLM_MODEL`, then expose extra providers in OpenClaw by adding their native provider keys directly as secrets.
+- ⚡ **Zero Config:** Duplicate this Space and set **just three** secrets (LLM_API_KEY, LLM_MODEL, GATEWAY_TOKEN) – no other setup needed.
+- 🐳 **Fast Builds:** Uses a pre-built OpenClaw Docker image to deploy in minutes.
+- 🌐 **Cloudflare Outbound Proxy:** HuggingClaw can automatically provision a Cloudflare Worker proxy for blocked outbound traffic such as Telegram API requests.
+- 💾 **Workspace Backup:** Chats, settings, and WhatsApp session state sync to a private HF Dataset via the `huggingface_hub`, preserving data automatically without storing your HF token in a git remote.
+- ⏰ **Easy Keep-Alive:** Uses `CLOUDFLARE_WORKERS_TOKEN` to automatically set up a cron-triggered keep-awake worker at boot.
+- 👥 **Multi-User Messaging:** Support for Telegram (multi-user) and WhatsApp (pairing).
+- 📊 **Visual Dashboard:** Beautiful Web UI to monitor uptime, sync status, and active models.
+- 🔔 **Webhooks:** Get notified on restarts or backup failures via standard webhooks.
+- 🔐 **Flexible Auth:** Secure the Control UI with either a gateway token or password.
+- 🏠 **100% HF-Native:** Runs entirely on HuggingFace’s free infrastructure (2 vCPU, 16GB RAM).
+
+## 🎥 Video Tutorial
+
+Watch a quick walkthrough on YouTube: [Deploying HuggingClaw on HF Spaces](https://www.youtube.com/watch?v=S6pl7NmjX7g&t=73s).
+
+## 🚀 Quick Start
+
+### Step 1: Duplicate this Space
+
+[![Duplicate this Space](https://huggingface.co/datasets/huggingface/badges/resolve/main/duplicate-this-space-xl.svg)](https://huggingface.co/spaces/somratpro/HuggingClaw?duplicate=true)
+
+Click the button above to duplicate the template.
+
+### Step 2: Add Your Secrets
+
+Navigate to your new Space's **Settings**, scroll down to the **Variables and secrets** section, and add the following three under **Secrets**:
+
+- `LLM_API_KEY` – Your provider API key (e.g., Anthropic, OpenAI, OpenRouter).
+- `LLM_MODEL` – The model ID string you wish to use (e.g., `openai/gpt-4o` or `google/gemini-2.5-flash`).
+- `GATEWAY_TOKEN` – A custom password or token to secure your Control UI. *(You can use any strong password, or generate one with `openssl rand -hex 32` if you prefer).*
+
+> [!TIP]
+> HuggingClaw is completely flexible! You only need these three secrets to get started. You can set other secrets later.
+
+Optional: if you want to pin a specific OpenClaw release instead of `latest`, add `OPENCLAW_VERSION` under **Variables** in your Space settings. For Docker Spaces, HF passes Variables as build args during image build, so this should be a Variable, not a Secret.
+
+### Step 3: Deploy & Run
+
+That's it! The Space will build the container and start up automatically. You can monitor the build process in the **Logs** tab.
+
+### Step 4: Monitor & Manage
+
+HuggingClaw features a built-in dashboard to track:
+
+- **Uptime:** Real-time uptime monitoring.
+- **Sync Status:** Visual indicators for workspace backup operations.
+- **Chat Status:** Real-time connection status for WhatsApp and Telegram.
+- **Model Info:** See which LLM is currently powering your assistant.
+
+## 📱 Telegram Setup *(Optional)*
+
+To chat via Telegram:
+
+1. Create a bot via [@BotFather](https://t.me/BotFather): send `/newbot`, follow prompts, and copy the bot token.
+2. Find your Telegram user ID with [@userinfobot](https://t.me/userinfobot).
+3. Add `CLOUDFLARE_WORKERS_TOKEN` in Space secrets to let HuggingClaw auto-provision the outbound proxy, or set `CLOUDFLARE_PROXY_URL` manually if you already have a Worker.
+4. Add these secrets in Settings → Secrets. After restarting, the bot should appear online on Telegram.
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `TELEGRAM_BOT_TOKEN` | — | Telegram bot token from BotFather |
+| `TELEGRAM_ALLOWED_USERS` | — | Comma-separated Telegram user IDs for access |
+
+## 🌐 Cloudflare Proxy Setup
+
+Hugging Face Free Tier often restricts outbound connections to services like Telegram, Discord, and WhatsApp. HuggingClaw solves this with a **Transparent Outbound Proxy** via Cloudflare Workers.
+
+### ⚡ Automatic Setup (Recommended)
+
+This is the easiest way. HuggingClaw will handle the deployment for you.
+
+1. Create a **Cloudflare API Token**:
+   - Go to [API Tokens](https://dash.cloudflare.com/profile/api-tokens).
+   - Create Token -> **Edit Cloudflare Workers** template.
+   - Ensure it has `Account: Workers Scripts: Edit` permissions.
+2. Add the token as a secret named `CLOUDFLARE_WORKERS_TOKEN` in your Space Settings.
+
+**What happens next?**
+
+- HuggingClaw automatically creates a Worker named after your Space host.
+- It generates a secure, private `CLOUDFLARE_PROXY_SECRET`.
+- All restricted outbound traffic is automatically routed through this Worker.
+
+## 💬 WhatsApp Setup *(Optional)*
+
+To use WhatsApp, enable the channel and scan the QR code from the Control UI (**Channels** → **WhatsApp** → **Login**):
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `WHATSAPP_ENABLED` | `false` | Enable WhatsApp pairing support |
+
+## 💾 Workspace Backup *(Optional)*
+
+HuggingClaw automatically syncs your workspace (chats, settings, sessions) to a private HF Dataset named `huggingclaw-backup`.
+
+- **Persistence:** Survived restarts and restores your state on boot.
+- **WhatsApp:** Stores session credentials so you don't have to scan the QR code every time.
+- **Interval:** Syncs every 3 minutes by default.
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `HF_TOKEN` | — | HF token with **Write** access |
+| `SYNC_INTERVAL` | `180` | Backup frequency in seconds |
+
+## 💓 Staying Alive *(Recommended on Free HF Spaces)*
+
+Your Space will automatically be kept awake by a background Cloudflare Worker when you configure the `CLOUDFLARE_WORKERS_TOKEN` secret. The worker uses a cron trigger to regularly ping your Space's `/health` endpoint. The dashboard displays the current keep-alive worker status.
+
+## 🔔 Webhooks *(Optional)*
+
+Get notified when your Space restarts or if a backup fails:
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `WEBHOOK_URL` | — | Endpoint URL for POST JSON notifications |
+
+## 🔐 Security & Advanced *(Optional)*
+
+Configure password access and network restrictions:
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `OPENCLAW_PASSWORD` | — | Enable simple password auth instead of token |
+| `TRUSTED_PROXIES` | — | Comma-separated IPs of HF proxies |
+| `ALLOWED_ORIGINS` | — | Comma-separated allowed origins for Control UI |
+| `CLOUDFLARE_KEEPALIVE_ENABLED` | `true` | Set to `false` to disable the automatic Cloudflare KeepAlive worker |
+
+## 🤖 LLM Providers
+
+HuggingClaw supports **all providers** from OpenClaw. Set `LLM_MODEL=<provider/model>` and the provider is auto-detected.
+
+<details>
+<summary><b>Click to see supported providers and examples</b></summary>
+
+| Provider | Prefix | Example Model |
+| :--- | :--- | :--- |
+| **Anthropic** | `anthropic/` | `anthropic/claude-3-5-sonnet-latest` |
+| **OpenAI** | `openai/` | `openai/gpt-4o` |
+| **Google** | `google/` | `google/gemini-2.0-flash` |
+| **DeepSeek** | `deepseek/` | `deepseek/deepseek-chat` |
+| **xAI (Grok)** | `xai/` | `xai/grok-2-latest` |
+| **Mistral** | `mistral/` | `mistral/mistral-large-latest` |
+| **HuggingFace** | `huggingface/` | `huggingface/deepseek-ai/DeepSeek-R1` |
+| **OpenRouter** | `openrouter/` | `openrouter/anthropic/claude-3.5-sonnet` |
+
+*And many more: Cohere, Groq, NVIDIA, Mistral, Moonshot, etc.*
+</details>
+
+### Any Other Provider
+
+You can also use any custom provider:
+
+```bash
+LLM_API_KEY=your_api_key
+LLM_MODEL=provider/model-name
+```
+
+The provider prefix in `LLM_MODEL` tells HuggingClaw how to call it. See [OpenClaw Model Providers](https://docs.openclaw.ai/concepts/model-providers) for the full list.
+
+### Custom OpenAI-Compatible Provider
+
+Register a custom endpoint at startup without modifying the CLI.
+
+| Variable | Description | Default |
+| :--- | :--- | :--- |
+| `CUSTOM_PROVIDER_NAME` | Unique provider prefix (e.g., `modal`) | **Required** |
+| `CUSTOM_BASE_URL` | API base URL (e.g., `https://.../v1`) | **Required** |
+| `CUSTOM_MODEL_ID` | Model ID on the server | **Required** |
+| `LLM_MODEL` | Must match `{CUSTOM_PROVIDER_NAME}/{CUSTOM_MODEL_ID}` | **Required** |
+| `CUSTOM_API_KEY` | Provider-specific key | `LLM_API_KEY` |
+| `CUSTOM_CONTEXT_WINDOW` | Context limit | `128000` |
+| `CUSTOM_MAX_TOKENS` | Max output tokens for the registered model | `500` |
+
+> [!TIP]
+> `CUSTOM_PROVIDER_NAME` cannot override built-in providers (openai, anthropic, etc.).
+
+**Example (Modal):**
+
+```bash
+CUSTOM_PROVIDER_NAME=modal
+CUSTOM_BASE_URL=https://api.us-west-2.modal.direct/v1
+CUSTOM_MODEL_ID=zai-org/GLM-5.1-FP8
+LLM_MODEL=modal/zai-org/GLM-5.1-FP8
+```
+
+## 🔑 API Key Rotation & Multi-Provider Mode
+
+HuggingClaw now includes a universal key rotator that patches OpenClaw's outbound `fetch`, `http`, and `https` calls. For each supported provider, you can provide a comma-separated key pool and HuggingClaw will rotate through those keys independently on every matching provider request.
+
+### Per-provider key pools
+
+Use the plural environment variable for the provider you want to rotate:
+
+```bash
+LLM_MODEL=anthropic/claude-sonnet-4-5
+LLM_API_KEY=sk-ant-default
+ANTHROPIC_API_KEYS=sk-ant-key1,sk-ant-key2,sk-ant-key3
+```
+
+Key lookup order is:
+
+1. Provider-specific plural pool, for example `ANTHROPIC_API_KEYS` or `OPENAI_API_KEYS`.
+2. Provider-specific singular key, for example `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`.
+3. `LLM_API_KEY` as the final fallback.
+
+Common rotation variables include `ANTHROPIC_API_KEYS`, `OPENAI_API_KEYS`, `GEMINI_API_KEYS`, `DEEPSEEK_API_KEYS`, `OPENROUTER_API_KEYS`, `OPENCODE_API_KEYS`, `ZAI_API_KEYS`, `MOONSHOT_API_KEYS`, `MINIMAX_API_KEYS`, `MISTRAL_API_KEYS`, `XAI_API_KEYS`, `NVIDIA_API_KEYS`, `GROQ_API_KEYS`, `COHERE_API_KEYS`, `TOGETHER_API_KEYS`, `CEREBRAS_API_KEYS`, and `HUGGINGFACE_HUB_TOKENS`. See `.env.example` for the full commented list.
+
+### Enable multiple providers at once
+
+`LLM_MODEL` still controls the default model. To make additional providers available in the Control UI, add their native API-key secrets directly:
+
+```bash
+LLM_MODEL=anthropic/claude-sonnet-4-6
+LLM_API_KEY=sk-ant-default
+
+OPENAI_API_KEY=sk-openai-extra
+OPENAI_API_KEYS=sk-openai-key1,sk-openai-key2
+
+GROQ_API_KEY=gsk-extra
+GROQ_API_KEYS=gsk-key1,gsk-key2,gsk-key3
+```
+
+This lets you keep a safe default model while switching to other configured providers from OpenClaw when needed.
+
+### Runtime and plugin controls
+
+For Hugging Face Spaces, HuggingClaw defaults to quieter logs and disables optional browser/ACP plugins unless explicitly enabled. For local runs, those plugins remain in auto mode. Advanced users can override the defaults with:
+
+| Variable | Default on HF Spaces | Default locally | Description |
+| :--- | :--- | :--- | :--- |
+| `OPENCLAW_CONSOLE_LOG_LEVEL` | `warn` | `info` | Console log verbosity |
+| `OPENCLAW_FILE_LOG_LEVEL` | `info` | `info` | Gateway log-file verbosity |
+| `OPENCLAW_CONSOLE_LOG_STYLE` | `compact` | `pretty` | Console log formatting |
+| `BROWSER_PLUGIN_MODE` | `disabled` | `auto` | Set `enabled`, `disabled`, or `auto` for managed Chromium/browser tools |
+| `ACP_PLUGIN_MODE` | `disabled` | `auto` | Set `enabled`, `disabled`, or `auto` for the ACP plugin |
+| `GATEWAY_VERBOSE` | `0` | `0` | Set to `1` to add OpenClaw gateway verbose logging |
+
+## 💻 Local Development
+
+```bash
+git clone https://github.com/somratpro/huggingclaw.git
+cd huggingclaw
+cp .env.example .env
+# Edit .env with your secret values
+```
+
+**With Docker:**
+
+```bash
+docker build --build-arg OPENCLAW_VERSION=latest -t huggingclaw .
+docker run -p 7861:7861 --env-file .env huggingclaw
+```
+
+**Without Docker:**
+
+```bash
+npm install -g openclaw@latest
+export $(cat .env | xargs)
+bash start.sh
+```
+
+## 🔗 CLI Access
+
+After deploying, you can connect via the OpenClaw CLI (e.g., to onboard channels or run agents):
+
+```bash
+npm install -g openclaw@latest
+openclaw channels login --gateway https://YOUR_SPACE_NAME.hf.space
+# When prompted, enter your GATEWAY_TOKEN
+```
+
+## 🏗️ Architecture
+
+HuggingClaw uses a multi-layered approach to ensure stability and persistence on Hugging Face's ephemeral infrastructure.
+
+<details>
+<summary><b>Click to view technical details</b></summary>
+
+- **Dashboard (`/`)**: Management, monitoring, and keep-alive tools.
+- **Control UI (`/gateway`)**: Secure interface for managing agents and channels.
+- **Health Check (`/health`)**: Endpoint for uptime monitoring and readiness probes.
+- **Sync Engine**: Python background process managing HF Dataset persistence.
+- **Transparent Proxy**: Interceptor for requests to blocked domains (Telegram, etc.).
+- **Key Rotator**: Node preload that rotates provider API keys without changing OpenClaw code.
+
+**Startup sequence:**
+
+1. Validate required secrets and check HF token.
+2. Resolve backup namespace and restore workspace from HF Dataset.
+3. Generate `openclaw.json` configuration.
+4. Launch background tasks (auto-sync, channel helpers).
+5. Start OpenClaw gateway and listen for connections.
+
+</details>
+
+## 🐛 Troubleshooting
+
+- **Missing secrets:** Ensure `LLM_API_KEY`, `LLM_MODEL`, and `GATEWAY_TOKEN` are set in your Space **Settings → Secrets**.
+- **Telegram bot issues:** Verify your `TELEGRAM_BOT_TOKEN`. Add `CLOUDFLARE_WORKERS_TOKEN` or `CLOUDFLARE_PROXY_URL` if outbound Telegram API calls are blocked.
+- **Backup restore failing:** Make sure `HF_TOKEN` is valid and has write access to your HF account dataset. Set `HF_USERNAME` only if auto-detection is not available in your environment.
+- **Space keeps sleeping:** Add `CLOUDFLARE_WORKERS_TOKEN` as a Space secret to enable automatic keep-awake monitoring via Cloudflare Workers.
+- **Auth errors / proxy:** If you see reverse-proxy auth errors, add the logged IPs under `TRUSTED_PROXIES` (from logs `remote=x.x.x.x`).
+- **Control UI says too many failed authentication attempts:** Wait for the retry window to expire, then open the Space in an incognito window or clear site storage for your Space before logging in again with `GATEWAY_TOKEN`.
+- **WhatsApp lost its session after restart:** Make sure `HF_TOKEN` is configured so the hidden session backup can be restored on boot.
+- **UI blocked (CORS):** Set `ALLOWED_ORIGINS=https://your-space-name.hf.space`.
+- **Version mismatches:** Pin a specific OpenClaw build with the `OPENCLAW_VERSION` Variable in HF Spaces, or `--build-arg OPENCLAW_VERSION=...` locally.
+- **Rotation is not using the expected key:** Make sure you set the plural provider pool (for example `OPENAI_API_KEYS`) as a Space secret, separated only by commas; the rotator falls back to the singular provider key and then `LLM_API_KEY`.
+- **Browser/ACP tools are missing on HF Spaces:** Set `BROWSER_PLUGIN_MODE=enabled` or `ACP_PLUGIN_MODE=enabled` if you intentionally need those optional plugins.
+
+## 🌟 More Projects
+
+Similar projects by [@somratpro](https://github.com/somratpro) — all free, one-click deploy on HF Spaces:
+
+| Project | What it runs | HF Space | GitHub |
+| :--- | :--- | :--- | :--- |
+| **HuggingFlow** | DeerFlow — deep research agent | [Space](https://huggingface.co/spaces/somratpro/HuggingFlow) | [Repo](https://github.com/somratpro/HuggingFlow) |
+| **HuggingMes** | Hermes — Self-hosted agent gateway | [Space](https://huggingface.co/spaces/somratpro/HuggingMes) | [Repo](https://github.com/somratpro/huggingmes) |
+| **Hugging8n** | n8n — workflow & automation platform | [Space](https://huggingface.co/spaces/somratpro/Hugging8n) | [Repo](https://github.com/somratpro/hugging8n) |
+| **HuggingClip** | Paperclip — AI agent orchestration platform | [Space](https://huggingface.co/spaces/somratpro/HuggingClip) | [Repo](https://github.com/somratpro/huggingclip) |
+| **HuggingPost** | Postiz — social media scheduler | [Space](https://huggingface.co/spaces/somratpro/HuggingPost) | [Repo](https://github.com/somratpro/HuggingPost) |
+
+## 📚 Links
+
+- [OpenClaw Docs](https://docs.openclaw.ai)  
+- [OpenClaw GitHub](https://github.com/openclaw/openclaw)  
+- [HuggingFace Spaces Docs](https://huggingface.co/docs/hub/spaces)  
+
+## ❤️ Support
+
+If HuggingClaw saves you time, consider buying me a coffee to keep the projects alive!
+
+**USDT (TRC-20 / TRON network only)**
+
+```
+TELx8TJz1W1h7n6SgpgGNNGZXpJCEUZrdB
+```
+
+> [!WARNING]
+> Send **USDT on TRC-20 network only**. Sending other tokens or using a different network will result in permanent loss.
+
+## 🤝 Contributing
+
+Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+## 📄 License
+
+MIT — see [LICENSE](LICENSE) for details.
+
+*Made with ❤️ by [@somratpro](https://github.com/somratpro) for the OpenClaw community.*  
