@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.0] - 2026-05-10
+
+### Added
+
+- **Universal multi-provider API key rotation** — replaced the NVIDIA-only rotator with `multi-provider-key-rotator.cjs`, supporting round-robin key pools such as `ANTHROPIC_API_KEYS`, `OPENAI_API_KEYS`, `GEMINI_API_KEYS`, `OPENROUTER_API_KEYS`, `GROQ_API_KEYS`, `NVIDIA_API_KEYS`, and other provider-specific plural variables
+- **Multi-provider setup documentation** — expanded `.env.example` and README guidance so users can keep one default `LLM_MODEL` while enabling extra providers with native provider key secrets
+- **Runtime plugin controls** — documented `BROWSER_PLUGIN_MODE`, `ACP_PLUGIN_MODE`, OpenClaw log-level overrides, and `GATEWAY_VERBOSE` for advanced deployments
+
+### Changed
+
+- **Key rotation generalized** — HuggingClaw now preloads one provider-aware rotator that patches `fetch`, `http`, and `https` requests for all supported provider hostnames instead of only handling NVIDIA traffic
+- **Startup defaults tuned for HF Spaces** — Spaces default to compact warning-level console logs and disabled browser/ACP plugins, while local runs keep friendlier auto/pretty defaults
+- **Playwright dependency isolation** — browser support dependencies are installed in a sidecar `browser-deps` directory so the bundled OpenClaw app dependency tree is not mutated
+
+### Fixed
+
+- **Provider key fallback consistency** — provider-specific rotation pools now fall back to the singular provider key and then `LLM_API_KEY`, making single-key and multi-key setups behave consistently
+- **Documentation drift** — README now matches the latest `.env.example`, Docker preload, and startup behavior for key rotation, multiple providers, and optional plugin controls
+
 ## [1.4.0] - 2026-04-25
 
 ### Added

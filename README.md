@@ -36,16 +36,17 @@ secrets:
 - [🎥 Video Tutorial](#-video-tutorial)
 - [🚀 Quick Start](#-quick-start)
 - [📱 Telegram Setup *(Optional)*](#-telegram-setup-optional)
-- [🌐 Cloudflare Proxy *(Optional)*](#-cloudflare-proxy-optional)
+- [🌐 Cloudflare Proxy](#-cloudflare-proxy-setup)
 - [💬 WhatsApp Setup *(Optional)*](#-whatsapp-setup-optional)
 - [💾 Workspace Backup *(Optional)*](#-workspace-backup-optional)
 - [🔔 Webhooks *(Optional)*](#-webhooks-optional)
-- [🔐 Security & Advanced *(Optional)*](#-security--advanced-optional)
+- [🔐 Security & Advanced *(Optional)*](#-security-advanced-optional)
 - [🤖 LLM Providers](#-llm-providers)
+- [🔑 API Key Rotation & Multi-Provider Mode](#-api-key-rotation-multi-provider-mode)
 - [💻 Local Development](#-local-development)
 - [🔗 CLI Access](#-cli-access)
 - [🏗️ Architecture](#-architecture)
-- [💓 Staying Alive](#-staying-alive)
+- [💓 Staying Alive](#-staying-alive-recommended-on-free-hf-spaces)
 - [🐛 Troubleshooting](#-troubleshooting)
 - [📚 Links](#-links)
 - [🤝 Contributing](#-contributing)
@@ -54,6 +55,8 @@ secrets:
 ## ✨ Features
 
 - 🔌 **Any LLM:** Use Claude, OpenAI GPT, Google Gemini, Grok, DeepSeek, Qwen, and 40+ providers (set `LLM_API_KEY` and `LLM_MODEL` accordingly).
+- 🔑 **API Key Rotation:** Add comma-separated `*_API_KEYS` pools for supported providers and HuggingClaw rotates keys round-robin per provider at runtime.
+- 🌐 **Multi-Provider Mode:** Keep one default `LLM_MODEL`, then expose extra providers in OpenClaw by adding their native provider keys directly as secrets.
 - ⚡ **Zero Config:** Duplicate this Space and set **just three** secrets (LLM_API_KEY, LLM_MODEL, GATEWAY_TOKEN) – no other setup needed.
 - 🐳 **Fast Builds:** Uses a pre-built OpenClaw Docker image to deploy in minutes.
 - 🌐 **Cloudflare Outbound Proxy:** HuggingClaw can automatically provision a Cloudflare Worker proxy for blocked outbound traffic such as Telegram API requests.
@@ -225,6 +228,7 @@ Register a custom endpoint at startup without modifying the CLI.
 | `LLM_MODEL` | Must match `{CUSTOM_PROVIDER_NAME}/{CUSTOM_MODEL_ID}` | **Required** |
 | `CUSTOM_API_KEY` | Provider-specific key | `LLM_API_KEY` |
 | `CUSTOM_CONTEXT_WINDOW` | Context limit | `128000` |
+| `CUSTOM_MAX_TOKENS` | Max output tokens for the registered model | `500` |
 
 > [!TIP]
 > `CUSTOM_PROVIDER_NAME` cannot override built-in providers (openai, anthropic, etc.).
@@ -237,6 +241,58 @@ CUSTOM_BASE_URL=https://api.us-west-2.modal.direct/v1
 CUSTOM_MODEL_ID=zai-org/GLM-5.1-FP8
 LLM_MODEL=modal/zai-org/GLM-5.1-FP8
 ```
+
+## 🔑 API Key Rotation & Multi-Provider Mode
+
+HuggingClaw now includes a universal key rotator that patches OpenClaw's outbound `fetch`, `http`, and `https` calls. For each supported provider, you can provide a comma-separated key pool and HuggingClaw will rotate through those keys independently on every matching provider request.
+
+### Per-provider key pools
+
+Use the plural environment variable for the provider you want to rotate:
+
+```bash
+LLM_MODEL=anthropic/claude-sonnet-4-5
+LLM_API_KEY=sk-ant-default
+ANTHROPIC_API_KEYS=sk-ant-key1,sk-ant-key2,sk-ant-key3
+```
+
+Key lookup order is:
+
+1. Provider-specific plural pool, for example `ANTHROPIC_API_KEYS` or `OPENAI_API_KEYS`.
+2. Provider-specific singular key, for example `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`.
+3. `LLM_API_KEY` as the final fallback.
+
+Common rotation variables include `ANTHROPIC_API_KEYS`, `OPENAI_API_KEYS`, `GEMINI_API_KEYS`, `DEEPSEEK_API_KEYS`, `OPENROUTER_API_KEYS`, `OPENCODE_API_KEYS`, `ZAI_API_KEYS`, `MOONSHOT_API_KEYS`, `MINIMAX_API_KEYS`, `MISTRAL_API_KEYS`, `XAI_API_KEYS`, `NVIDIA_API_KEYS`, `GROQ_API_KEYS`, `COHERE_API_KEYS`, `TOGETHER_API_KEYS`, `CEREBRAS_API_KEYS`, and `HUGGINGFACE_HUB_TOKENS`. See `.env.example` for the full commented list.
+
+### Enable multiple providers at once
+
+`LLM_MODEL` still controls the default model. To make additional providers available in the Control UI, add their native API-key secrets directly:
+
+```bash
+LLM_MODEL=anthropic/claude-sonnet-4-6
+LLM_API_KEY=sk-ant-default
+
+OPENAI_API_KEY=sk-openai-extra
+OPENAI_API_KEYS=sk-openai-key1,sk-openai-key2
+
+GROQ_API_KEY=gsk-extra
+GROQ_API_KEYS=gsk-key1,gsk-key2,gsk-key3
+```
+
+This lets you keep a safe default model while switching to other configured providers from OpenClaw when needed.
+
+### Runtime and plugin controls
+
+For Hugging Face Spaces, HuggingClaw defaults to quieter logs and disables optional browser/ACP plugins unless explicitly enabled. For local runs, those plugins remain in auto mode. Advanced users can override the defaults with:
+
+| Variable | Default on HF Spaces | Default locally | Description |
+| :--- | :--- | :--- | :--- |
+| `OPENCLAW_CONSOLE_LOG_LEVEL` | `warn` | `info` | Console log verbosity |
+| `OPENCLAW_FILE_LOG_LEVEL` | `info` | `info` | Gateway log-file verbosity |
+| `OPENCLAW_CONSOLE_LOG_STYLE` | `compact` | `pretty` | Console log formatting |
+| `BROWSER_PLUGIN_MODE` | `disabled` | `auto` | Set `enabled`, `disabled`, or `auto` for managed Chromium/browser tools |
+| `ACP_PLUGIN_MODE` | `disabled` | `auto` | Set `enabled`, `disabled`, or `auto` for the ACP plugin |
+| `GATEWAY_VERBOSE` | `0` | `0` | Set to `1` to add OpenClaw gateway verbose logging |
 
 ## 💻 Local Development
 
@@ -284,6 +340,7 @@ HuggingClaw uses a multi-layered approach to ensure stability and persistence on
 - **Health Check (`/health`)**: Endpoint for uptime monitoring and readiness probes.
 - **Sync Engine**: Python background process managing HF Dataset persistence.
 - **Transparent Proxy**: Interceptor for requests to blocked domains (Telegram, etc.).
+- **Key Rotator**: Node preload that rotates provider API keys without changing OpenClaw code.
 
 **Startup sequence:**
 
@@ -298,7 +355,7 @@ HuggingClaw uses a multi-layered approach to ensure stability and persistence on
 ## 🐛 Troubleshooting
 
 - **Missing secrets:** Ensure `LLM_API_KEY`, `LLM_MODEL`, and `GATEWAY_TOKEN` are set in your Space **Settings → Secrets**.
-- **Telegram bot issues:** Verify your `TELEGRAM_BOT_TOKEN`. Check Space logs for lines like `📱 Enabling Telegram`.
+- **Telegram bot issues:** Verify your `TELEGRAM_BOT_TOKEN`. Add `CLOUDFLARE_WORKERS_TOKEN` or `CLOUDFLARE_PROXY_URL` if outbound Telegram API calls are blocked.
 - **Backup restore failing:** Make sure `HF_TOKEN` is valid and has write access to your HF account dataset. Set `HF_USERNAME` only if auto-detection is not available in your environment.
 - **Space keeps sleeping:** Add `CLOUDFLARE_WORKERS_TOKEN` as a Space secret to enable automatic keep-awake monitoring via Cloudflare Workers.
 - **Auth errors / proxy:** If you see reverse-proxy auth errors, add the logged IPs under `TRUSTED_PROXIES` (from logs `remote=x.x.x.x`).
@@ -306,6 +363,8 @@ HuggingClaw uses a multi-layered approach to ensure stability and persistence on
 - **WhatsApp lost its session after restart:** Make sure `HF_TOKEN` is configured so the hidden session backup can be restored on boot.
 - **UI blocked (CORS):** Set `ALLOWED_ORIGINS=https://your-space-name.hf.space`.
 - **Version mismatches:** Pin a specific OpenClaw build with the `OPENCLAW_VERSION` Variable in HF Spaces, or `--build-arg OPENCLAW_VERSION=...` locally.
+- **Rotation is not using the expected key:** Make sure you set the plural provider pool (for example `OPENAI_API_KEYS`) as a Space secret, separated only by commas; the rotator falls back to the singular provider key and then `LLM_API_KEY`.
+- **Browser/ACP tools are missing on HF Spaces:** Set `BROWSER_PLUGIN_MODE=enabled` or `ACP_PLUGIN_MODE=enabled` if you intentionally need those optional plugins.
 
 ## 🌟 More Projects
 
