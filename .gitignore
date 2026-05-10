@@ -1,0 +1,31 @@
+# Environment files
+.env
+.env.*
+
+# GitHub workflows/secrets
+.github/
+.gitignore
+
+# Node modules
+node_modules/
+
+# Logs
+*.log
+
+# SQLite temp files
+*.sqlite-wal
+*.sqlite-shm
+
+# Python cache
+__pycache__/
+*.pyc
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# HuggingClaw state
+.huggingclaw-state/
+
+# Cache
+.cache/
