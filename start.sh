@@ -107,7 +107,7 @@ case "$LLM_PROVIDER" in
   qianfan)                      export QIANFAN_API_KEY="$LLM_API_KEY" ;;
   # ── Western Providers ──
   mistral|mistralai)            export MISTRAL_API_KEY="$LLM_API_KEY" ;;
-  xai|x-ai)                    export XAI_API_KEY="$LLM_API_KEY" ;;
+  xai|x-ai)                     export XAI_API_KEY="$LLM_API_KEY" ;;
   nvidia)                       export NVIDIA_API_KEY="$LLM_API_KEY" ;;
   cohere)                       export COHERE_API_KEY="$LLM_API_KEY" ;;
   groq)                         export GROQ_API_KEY="$LLM_API_KEY" ;;
@@ -420,12 +420,39 @@ if [ "$WHATSAPP_ENABLED_NORMALIZED" = "true" ]; then
 fi
 
 # Write config
-echo "$CONFIG_JSON" > "/home/node/.openclaw/openclaw.json"
-chmod 600 /home/node/.openclaw/openclaw.json
+EXISTING_CONFIG="/home/node/.openclaw/openclaw.json"
+if [ -f "$EXISTING_CONFIG" ]; then
+  echo "Restored config found — patching required fields only..."
+  PATCHED=$(jq \
+    --arg token "$GATEWAY_TOKEN" \
+    --arg model "$LLM_MODEL" \
+    --arg fileLevel "$OPENCLAW_FILE_LOG_LEVEL" \
+    --arg consoleLevel "$OPENCLAW_CONSOLE_LOG_LEVEL" \
+    --arg consoleStyle "$OPENCLAW_CONSOLE_LOG_STYLE" \
+    '.gateway.auth.token = $token
+     | .agents.defaults.model = $model
+     | .logging.level = $fileLevel
+     | .logging.consoleLevel = $consoleLevel
+     | .logging.consoleStyle = $consoleStyle' \
+    "$EXISTING_CONFIG" 2>/dev/null)
+
+  if [ -n "$PATCHED" ]; then
+    echo "$PATCHED" > "$EXISTING_CONFIG.tmp" \
+      && mv "$EXISTING_CONFIG.tmp" "$EXISTING_CONFIG"
+    echo "Config patched successfully."
+  else
+    echo "Patch failed — writing fresh config."
+    echo "$CONFIG_JSON" > "$EXISTING_CONFIG"
+  fi
+else
+  echo "No restored config — writing fresh config..."
+  echo "$CONFIG_JSON" > "$EXISTING_CONFIG"
+fi
+chmod 600 "$EXISTING_CONFIG"
 
 # ── Enable Gateway Preload Fixes ──
 # This preload script keeps iframe embedding working on HF Spaces.
-export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--require /home/node/app/iframe-fix.cjs"
+export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--require /home/node/app/iframe-fix.cjs --require /home/node/app/multi-provider-key-rotator.cjs"
 
 # ── Startup Summary ──
 echo ""
@@ -497,6 +524,7 @@ warmup_browser() {
   ) &
 }
 
+
 # ── Start background services ──
 export LLM_MODEL="$LLM_MODEL"
 # 10. Start Health Server & Dashboard
@@ -506,6 +534,63 @@ HEALTH_PID=$!
 if [ -n "${CLOUDFLARE_WORKERS_TOKEN:-}" ]; then
   echo "Setting up Cloudflare KeepAlive monitor..."
   python3 /home/node/app/cloudflare-keepalive-setup.py || true
+fi
+
+# ── Write shell capture wrappers to .bashrc ──
+STARTUP_FILE="/home/node/.openclaw/workspace/startup.sh"
+cat > /home/node/.bashrc << 'BASHRC'
+STARTUP_FILE="/home/node/.openclaw/workspace/startup.sh"
+_hc_append() {
+  local line="$*"
+  grep -qxF "$line" "$STARTUP_FILE" 2>/dev/null || echo "$line" >> "$STARTUP_FILE"
+}
+apt-get() {
+  command apt-get "$@"
+  [[ "$1" == "install" ]] && _hc_append "apt-get install -y ${@:2}"
+}
+apt() {
+  command apt "$@"
+  [[ "$1" == "install" ]] && _hc_append "apt-get install -y ${@:2}"
+}
+pip() { command pip "$@"; [[ "$1" == "install" ]] && _hc_append "pip install ${@:2}"; }
+pip3() { command pip3 "$@"; [[ "$1" == "install" ]] && _hc_append "pip3 install ${@:2}"; }
+npm() { command npm "$@"; [[ "$1" == "install" && "$2" == "-g" ]] && _hc_append "npm install -g ${@:3}"; }
+openclaw() { command openclaw "$@"; [[ "$1" == "plugins" && "$2" == "install" ]] && _hc_append "openclaw plugins install ${@:3}"; }
+BASHRC
+echo "Shell capture wrappers ready."
+
+# ── Re-install previously installed plugins ──
+EXISTING_CONFIG="/home/node/.openclaw/openclaw.json"
+if [ -f "$EXISTING_CONFIG" ]; then
+  INSTALLS=$(jq -r '.plugins.installs // {} | keys[]' "$EXISTING_CONFIG" 2>/dev/null || echo "")
+  if [ -n "$INSTALLS" ]; then
+    echo "Re-installing plugins from config..."
+    while IFS= read -r pkg; do
+      [ -z "$pkg" ] && continue
+      # Try short name first, then @openclaw/ prefix
+      if openclaw plugins install "$pkg" 2>/dev/null; then
+        echo "  Installed: $pkg"
+      elif openclaw plugins install "@openclaw/$pkg" 2>/dev/null; then
+        echo "  Installed: @openclaw/$pkg"
+      else
+        echo "  Warning: could not install $pkg"
+      fi
+    done <<< "$INSTALLS"
+    echo "Plugins done."
+  fi
+fi
+
+# ── Run workspace startup script ──
+STARTUP_FILE="/home/node/.openclaw/workspace/startup.sh"
+if [ ! -f "$STARTUP_FILE" ]; then
+  touch "$STARTUP_FILE"
+  chmod +x "$STARTUP_FILE"
+  echo "Created workspace/startup.sh"
+fi
+if [ -s "$STARTUP_FILE" ]; then
+  echo "Running workspace/startup.sh..."
+  bash "$STARTUP_FILE" || echo "Warning: startup.sh had errors, continuing..."
+  echo "Startup script complete."
 fi
 
 # ── Launch gateway ──
