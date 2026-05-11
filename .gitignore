@@ -1,0 +1,44 @@
+# personal workflows
+.github/workflows/
+.git*
+# env/secrets
+.env
+.env.*
+*.pem
+*.key
+
+# node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# logs
+logs/
+*.log
+
+# local configs
+.vscode/
+.idea/
+
+# build/cache
+dist/
+build/
+.cache/
+
+# temp
+tmp/
+temp/
+
+# os junk
+.DS_Store
+Thumbs.db
+
+# gitignore itself
+.gitignore
