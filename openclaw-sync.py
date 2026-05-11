@@ -388,23 +388,23 @@ def sync_once(
 
     write_status("syncing", f"Uploading workspace to {repo_id}")
     snapshot_dir = create_snapshot_dir(WORKSPACE)
-try:
-    HF_API.upload_large_folder(
-        repo_id=repo_id,
-        repo_type="dataset",
-        folder_path=str(snapshot_dir),
-        num_workers=2,
-        print_report=False,
-    )
-except (AttributeError, TypeError):   # ← TypeError bhi add karo
-    upload_folder(
-        folder_path=str(snapshot_dir),
-        repo_id=repo_id,
-        repo_type="dataset",
-        token=HF_TOKEN,
-        commit_message=f"HuggingClaw sync {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
-        ignore_patterns=[".git/*", ".git"],
-    )
+    try:
+        HF_API.upload_large_folder(
+            repo_id=repo_id,
+            repo_type="dataset",
+            folder_path=str(snapshot_dir),
+            num_workers=2,
+            print_report=False,
+        )
+    except (AttributeError, TypeError):
+        upload_folder(
+            folder_path=str(snapshot_dir),
+            repo_id=repo_id,
+            repo_type="dataset",
+            token=HF_TOKEN,
+            commit_message=f"HuggingClaw sync {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
+            ignore_patterns=[".git/*", ".git"],
+        )
     finally:
         shutil.rmtree(snapshot_dir, ignore_errors=True)
 

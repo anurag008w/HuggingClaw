@@ -49,7 +49,7 @@ fi
 if [ -n "$ERRORS" ]; then
   echo "Missing required secrets:"
   echo -e "$ERRORS"
-echo "Add them in HF Spaces → Settings → Secrets"
+  echo "Add them in HF Spaces → Settings → Secrets"
   exit 1
 fi
 

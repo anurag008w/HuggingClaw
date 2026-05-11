@@ -32,7 +32,7 @@ RUN apt-get update && apt-get install -y \
     libx11-6 \
     libxext6 \
     libxfixes3 \
-    libasound2t64 \
+    libasound2 \
     fonts-dejavu-core \
     fonts-liberation \
     fonts-noto-color-emoji \
