@@ -87,20 +87,33 @@ def count_files(path: Path) -> int:
 def snapshot_state_into_workspace() -> None:
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        if OPENCLAW_STATE_BACKUP_DIR.exists():
-            shutil.rmtree(OPENCLAW_STATE_BACKUP_DIR, ignore_errors=True)
-        OPENCLAW_STATE_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        # Atomic snapshot: copy to a staging dir first, then rename.
+        # This prevents a half-written (or empty) backup if we crash mid-copy,
+        # which would otherwise be uploaded and overwrite the real HF backup.
+        staging_dir = STATE_DIR / ".openclaw-staging"
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir, ignore_errors=True)
+        staging_dir.mkdir(parents=True, exist_ok=True)
 
         for source_path in OPENCLAW_HOME.iterdir():
             if source_path.name in EXCLUDED_STATE_NAMES:
                 continue
 
-            backup_path = OPENCLAW_STATE_BACKUP_DIR / source_path.name
+            backup_path = staging_dir / source_path.name
             if source_path.is_dir():
                 shutil.copytree(source_path, backup_path)
             elif source_path.is_file():
                 shutil.copy2(source_path, backup_path)
+
+        # Atomically swap staging → real backup dir
+        if OPENCLAW_STATE_BACKUP_DIR.exists():
+            shutil.rmtree(OPENCLAW_STATE_BACKUP_DIR, ignore_errors=True)
+        staging_dir.rename(OPENCLAW_STATE_BACKUP_DIR)
     except Exception as exc:
+        # Clean up staging on failure so it doesn't interfere next time
+        staging_dir = STATE_DIR / ".openclaw-staging"
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir, ignore_errors=True)
         print(f"Warning: could not snapshot OpenClaw state: {exc}")
 
     try:
@@ -135,6 +148,23 @@ def snapshot_state_into_workspace() -> None:
 
 def restore_embedded_state() -> None:
     state_backup_root = STATE_DIR / "openclaw"
+
+    # Migration fix: old backups stored state in ".huggingclaw-state/openclaw"
+    # (hidden dir). If new path doesn't exist but old hidden path does, use it
+    # and migrate it to the new path so future syncs write to the right place.
+    if not state_backup_root.is_dir():
+        legacy_state = WORKSPACE / ".huggingclaw-state" / "openclaw"
+        if legacy_state.is_dir():
+            print("Found legacy state backup at .huggingclaw-state/; migrating to huggingclaw-state/...")
+            try:
+                STATE_DIR.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(legacy_state, state_backup_root)
+                legacy_root = WORKSPACE / ".huggingclaw-state"
+                shutil.rmtree(legacy_root, ignore_errors=True)
+                print("Legacy state migrated and .huggingclaw-state/ removed.")
+            except Exception as exc:
+                print(f"Warning: could not migrate legacy state: {exc}")
+
     if state_backup_root.is_dir():
         for source_path in state_backup_root.iterdir():
             name = source_path.name
@@ -401,8 +431,14 @@ def loop() -> int:
     time.sleep(INITIAL_DELAY)
     print(f"Workspace sync started: every {INTERVAL}s -> {repo_id}")
 
-    last_fingerprint, last_marker = sync_once()
-    print("Initial sync complete.")
+    # Take a fingerprint of the workspace AS RESTORED (after snapshotting state)
+    # so the first loop iteration only uploads if something genuinely changed.
+    # Previously this was None, which forced an unconditional upload every restart
+    # — even when restore had failed silently and the workspace was empty.
+    snapshot_state_into_workspace()
+    last_fingerprint = fingerprint_dir(WORKSPACE)
+    last_marker = metadata_marker(WORKSPACE)
+    print("Initial workspace fingerprint captured.")
 
     while not STOP_EVENT.is_set():
         try:
