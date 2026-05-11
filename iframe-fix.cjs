@@ -1,3 +1,7 @@
+process.on('uncaughtException', function(err) {
+  if (err.code === 'EPIPE') return;
+  throw err;
+});
 /**
  * iframe-fix.cjs — Node.js preload script
  *
