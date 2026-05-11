@@ -80,6 +80,7 @@ COPY --chown=1000:1000 start.sh /home/node/app/start.sh
 COPY --chown=1000:1000 wa-guardian.js /home/node/app/wa-guardian.js
 COPY --chown=1000:1000 cloudflare-keepalive-setup.py /home/node/app/cloudflare-keepalive-setup.py
 COPY --chown=1000:1000 openclaw-sync.py /home/node/app/openclaw-sync.py
+COPY --chown=1000:1000 config-persist.js /home/node/app/config-persist.js
 RUN chmod +x /home/node/app/start.sh /home/node/app/cloudflare-proxy-setup.py /home/node/app/cloudflare-keepalive-setup.py /home/node/app/openclaw-sync.py
 COPY --chown=1000:1000 multi-provider-key-rotator.cjs /home/node/app/multi-provider-key-rotator.cjs
 RUN chmod +x /home/node/app/start.sh /home/node/app/cloudflare-proxy-setup.py /home/node/app/cloudflare-keepalive-setup.py /home/node/app/openclaw-sync.py /home/node/app/multi-provider-key-rotator.cjs

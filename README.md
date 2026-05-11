@@ -157,6 +157,8 @@ HuggingClaw automatically syncs your workspace (chats, settings, sessions) to a 
 | :--- | :--- | :--- |
 | `HF_TOKEN` | — | HF token with **Write** access |
 | `SYNC_INTERVAL` | `180` | Backup frequency in seconds |
+| `CONFIG_PERSIST_INTERVAL` | `10` | Interval (seconds) for persisting runtime WebUI config changes back through gateway RPC |
+| `CONFIG_PERSIST_PATH` | `/home/node/.openclaw/openclaw.json` | Target file path for writing persisted runtime config snapshots |
 
 ## 💓 Staying Alive *(Recommended on Free HF Spaces)*
 
@@ -303,6 +305,7 @@ HuggingClaw uses a multi-layered approach to ensure stability and persistence on
 - **Space keeps sleeping:** Add `CLOUDFLARE_WORKERS_TOKEN` as a Space secret to enable automatic keep-awake monitoring via Cloudflare Workers.
 - **Auth errors / proxy:** If you see reverse-proxy auth errors, add the logged IPs under `TRUSTED_PROXIES` (from logs `remote=x.x.x.x`).
 - **Control UI says too many failed authentication attempts:** Wait for the retry window to expire, then open the Space in an incognito window or clear site storage for your Space before logging in again with `GATEWAY_TOKEN`.
+- **WebUI toggle changes not visible in `openclaw.json`:** ensure the gateway config persistence helper is running; tune `CONFIG_PERSIST_INTERVAL` (default `10s`) if you want faster writes.
 - **WhatsApp lost its session after restart:** Make sure `HF_TOKEN` is configured so the hidden session backup can be restored on boot.
 - **UI blocked (CORS):** Set `ALLOWED_ORIGINS=https://your-space-name.hf.space`.
 - **Version mismatches:** Pin a specific OpenClaw build with the `OPENCLAW_VERSION` Variable in HF Spaces, or `--build-arg OPENCLAW_VERSION=...` locally.

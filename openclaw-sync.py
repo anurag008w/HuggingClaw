@@ -365,15 +365,21 @@ def restore_workspace() -> bool:
 def sync_once(
     last_fingerprint: str | None = None,
     last_marker: tuple[int, int, int] | None = None,
+    wait_for_lock: bool = False,
 ) -> tuple[str, tuple[int, int, int]]:
     if not HF_TOKEN:
         write_status("disabled", "HF_TOKEN is not configured.")
         return (last_fingerprint or "", last_marker or (0, 0, 0))
 
     # ── Concurrent sync prevention ──
+    # wait_for_lock=True is used for explicit sync-once calls (e.g. shutdown)
+    # so they wait instead of getting skipped during an active periodic sync.
     lock_fd = open(SYNC_LOCK_FILE, "w")
     try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if wait_for_lock:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        else:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         write_status("synced", "Sync already in progress, skipping.")
         lock_fd.close()
@@ -473,7 +479,7 @@ def main() -> int:
         return 0 if restore_workspace() else 1
     if command == "sync-once":
         try:
-            sync_once()
+            sync_once(wait_for_lock=True)
             return 0
         except Exception as exc:
             write_status("error", f"Shutdown sync failed: {exc}")
