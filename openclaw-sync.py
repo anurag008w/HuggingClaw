@@ -48,7 +48,7 @@ WHATSAPP_ENABLED = os.environ.get("WHATSAPP_ENABLED", "").strip().lower() == "tr
 EXCLUDED_SYNC_DIRS = {
     "node_modules", ".git", "__pycache__", ".venv", "venv",
     ".npm", ".cache", ".yarn", "dist", "build", ".next", ".nuxt",
-    ".turbo", ".parcel-cache", "target", ".gradle", ".mvn",
+    ".turbo", ".parcel-cache", "target", ".gradle", ".mvn",".openclaw-staging",
 }
 MAX_FILE_SIZE_BYTES = int(os.environ.get("SYNC_MAX_FILE_BYTES", str(50 * 1024 * 1024)))
 
@@ -87,34 +87,30 @@ def count_files(path: Path) -> int:
 
 
 def snapshot_state_into_workspace() -> None:
+    staging_dir: Path | None = None
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        # Atomic snapshot: copy to a staging dir first, then rename.
-        # This prevents a half-written (or empty) backup if we crash mid-copy,
-        # which would otherwise be uploaded and overwrite the real HF backup.
-        staging_dir = STATE_DIR / ".openclaw-staging"
-        if staging_dir.exists():
-            shutil.rmtree(staging_dir, ignore_errors=True)
-        staging_dir.mkdir(parents=True, exist_ok=True)
+        # Staging dir /tmp mein banao — OPENCLAW_HOME ke BAHAR.
+        # Pehle yeh STATE_DIR ke andar banta tha jisse OPENCLAW_HOME par
+        # inotify events fire hote the aur gateway "config changed" error deta tha.
+        staging_dir = Path(tempfile.mkdtemp(prefix="openclaw-snapshot-"))
 
         for source_path in OPENCLAW_HOME.iterdir():
             if source_path.name in EXCLUDED_STATE_NAMES:
                 continue
-
             backup_path = staging_dir / source_path.name
             if source_path.is_dir():
                 shutil.copytree(source_path, backup_path)
             elif source_path.is_file():
                 shutil.copy2(source_path, backup_path)
 
-        # Atomically swap staging → real backup dir
+        # /tmp se WORKSPACE mein move karo — shutil.move cross-device bhi handle karta hai
         if OPENCLAW_STATE_BACKUP_DIR.exists():
             shutil.rmtree(OPENCLAW_STATE_BACKUP_DIR, ignore_errors=True)
-        staging_dir.rename(OPENCLAW_STATE_BACKUP_DIR)
+        shutil.move(str(staging_dir), str(OPENCLAW_STATE_BACKUP_DIR))
+        staging_dir = None  # ownership transfer ho gayi
     except Exception as exc:
-        # Clean up staging on failure so it doesn't interfere next time
-        staging_dir = STATE_DIR / ".openclaw-staging"
-        if staging_dir.exists():
+        if staging_dir is not None and staging_dir.exists():
             shutil.rmtree(staging_dir, ignore_errors=True)
         print(f"Warning: could not snapshot OpenClaw state: {exc}")
 
