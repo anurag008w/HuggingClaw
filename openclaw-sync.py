@@ -398,11 +398,11 @@ def loop() -> int:
         print(f"Workspace sync error: {exc}")
         return 1
 
-    last_fingerprint = fingerprint_dir(WORKSPACE)
-    last_marker = metadata_marker(WORKSPACE)
-
     time.sleep(INITIAL_DELAY)
     print(f"Workspace sync started: every {INTERVAL}s -> {repo_id}")
+
+    last_fingerprint, last_marker = sync_once()
+    print("Initial sync complete.")
 
     while not STOP_EVENT.is_set():
         try:
@@ -415,7 +415,6 @@ def loop() -> int:
             break
 
     return 0
-
 
 def main() -> int:
     WORKSPACE.mkdir(parents=True, exist_ok=True)
