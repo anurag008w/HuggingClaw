@@ -6,7 +6,7 @@ This keeps OpenClaw workspace data, app state, and optional WhatsApp
 credentials inside a private HF dataset without embedding HF tokens in git
 remotes or requiring a manual HF_USERNAME secret.
 """
-
+import fcntl
 import hashlib
 import json
 import logging
@@ -18,6 +18,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+SYNC_LOCK_FILE = Path("/tmp/huggingclaw-sync.lock")
 
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 # huggingface_hub reads HF_HUB_VERBOSITY at import time and overrides any
@@ -373,43 +374,56 @@ def sync_once(
         write_status("disabled", "HF_TOKEN is not configured.")
         return (last_fingerprint or "", last_marker or (0, 0, 0))
 
-    snapshot_state_into_workspace()
-    repo_id = ensure_repo_exists()
-    current_marker = metadata_marker(WORKSPACE)
-
-    if last_marker is not None and current_marker == last_marker:
-        write_status("synced", "No workspace changes detected.")
-        return (last_fingerprint or "", current_marker)
-
-    current_fingerprint = fingerprint_dir(WORKSPACE)
-    if last_fingerprint is not None and current_fingerprint == last_fingerprint:
-        write_status("synced", "No workspace changes detected.")
-        return (last_fingerprint, current_marker)
-
-    write_status("syncing", f"Uploading workspace to {repo_id}")
-    snapshot_dir = create_snapshot_dir(WORKSPACE)
+    # ── Concurrent sync prevention ──
+    lock_fd = open(SYNC_LOCK_FILE, "w")
     try:
-        HF_API.upload_large_folder(
-            repo_id=repo_id,
-            repo_type="dataset",
-            folder_path=str(snapshot_dir),
-            num_workers=2,
-            print_report=False,
-        )
-    except (AttributeError, TypeError):
-        upload_folder(
-            folder_path=str(snapshot_dir),
-            repo_id=repo_id,
-            repo_type="dataset",
-            token=HF_TOKEN,
-            commit_message=f"HuggingClaw sync {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
-            ignore_patterns=[".git/*", ".git"],
-        )
-    finally:
-        shutil.rmtree(snapshot_dir, ignore_errors=True)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        write_status("synced", "Sync already in progress, skipping.")
+        lock_fd.close()
+        return (last_fingerprint or "", last_marker or (0, 0, 0))
 
-    write_status("success", f"Uploaded workspace to {repo_id}")
-    return (current_fingerprint, current_marker)
+    try:
+        snapshot_state_into_workspace()
+        repo_id = ensure_repo_exists()
+        current_marker = metadata_marker(WORKSPACE)
+
+        if last_marker is not None and current_marker == last_marker:
+            write_status("synced", "No workspace changes detected.")
+            return (last_fingerprint or "", current_marker)
+
+        current_fingerprint = fingerprint_dir(WORKSPACE)
+        if last_fingerprint is not None and current_fingerprint == last_fingerprint:
+            write_status("synced", "No workspace changes detected.")
+            return (last_fingerprint, current_marker)
+
+        write_status("syncing", f"Uploading workspace to {repo_id}")
+        snapshot_dir = create_snapshot_dir(WORKSPACE)
+        try:
+            HF_API.upload_large_folder(
+                repo_id=repo_id,
+                repo_type="dataset",
+                folder_path=str(snapshot_dir),
+                num_workers=2,
+                print_report=False,
+            )
+        except (AttributeError, TypeError):
+            upload_folder(
+                folder_path=str(snapshot_dir),
+                repo_id=repo_id,
+                repo_type="dataset",
+                token=HF_TOKEN,
+                commit_message=f"HuggingClaw sync {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
+                ignore_patterns=[".git/*", ".git"],
+            )
+        finally:
+            shutil.rmtree(snapshot_dir, ignore_errors=True)
+
+        write_status("success", f"Uploaded workspace to {repo_id}")
+        return (current_fingerprint, current_marker)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        lock_fd.close()
 
 
 def handle_signal(_sig, _frame) -> None:
