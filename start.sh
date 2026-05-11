@@ -107,9 +107,8 @@ case "$LLM_PROVIDER" in
   qianfan)                      export QIANFAN_API_KEY="$LLM_API_KEY" ;;
   # ── Western Providers ──
   mistral|mistralai)            export MISTRAL_API_KEY="$LLM_API_KEY" ;;
-  xai|x-ai)                    export XAI_API_KEY="$LLM_API_KEY" ;;
+  xai|x-ai)                     export XAI_API_KEY="$LLM_API_KEY" ;;
   nvidia)                       export NVIDIA_API_KEY="$LLM_API_KEY"
-                                export NVIDIA_API_KEYS="${NVIDIA_API_KEYS:-$LLM_API_KEY}";;
   cohere)                       export COHERE_API_KEY="$LLM_API_KEY" ;;
   groq)                         export GROQ_API_KEY="$LLM_API_KEY" ;;
   together)                     export TOGETHER_API_KEY="$LLM_API_KEY" ;;
