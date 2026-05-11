@@ -634,6 +634,7 @@ pip3() {
     command pip3 "$@"
     return $?
   fi
+  return $rc
 }
 pipx()    { command pipx "$@"; local rc=$?; [ $rc -eq 0 ] && [[ "$1" == "install" ]] && _hc_append "pipx install ${@:2}"; return $rc; }
 python() {
