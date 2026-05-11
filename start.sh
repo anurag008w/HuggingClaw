@@ -536,6 +536,29 @@ if [ -n "${CLOUDFLARE_WORKERS_TOKEN:-}" ]; then
   python3 /home/node/app/cloudflare-keepalive-setup.py || true
 fi
 
+# ── Write shell capture wrappers to .bashrc ──
+STARTUP_FILE="/home/node/.openclaw/workspace/startup.sh"
+cat > /home/node/.bashrc << 'BASHRC'
+STARTUP_FILE="/home/node/.openclaw/workspace/startup.sh"
+_hc_append() {
+  local line="$*"
+  grep -qxF "$line" "$STARTUP_FILE" 2>/dev/null || echo "$line" >> "$STARTUP_FILE"
+}
+apt-get() {
+  command apt-get "$@"
+  [[ "$1" == "install" ]] && _hc_append "apt-get install -y ${@:2}"
+}
+apt() {
+  command apt "$@"
+  [[ "$1" == "install" ]] && _hc_append "apt-get install -y ${@:2}"
+}
+pip() { command pip "$@"; [[ "$1" == "install" ]] && _hc_append "pip install ${@:2}"; }
+pip3() { command pip3 "$@"; [[ "$1" == "install" ]] && _hc_append "pip3 install ${@:2}"; }
+npm() { command npm "$@"; [[ "$1" == "install" && "$2" == "-g" ]] && _hc_append "npm install -g ${@:3}"; }
+openclaw() { command openclaw "$@"; [[ "$1" == "plugins" && "$2" == "install" ]] && _hc_append "openclaw plugins install ${@:3}"; }
+BASHRC
+echo "Shell capture wrappers ready."
+
 # ── Re-install previously installed plugins ──
 EXISTING_CONFIG="/home/node/.openclaw/openclaw.json"
 if [ -f "$EXISTING_CONFIG" ]; then
@@ -555,6 +578,19 @@ if [ -f "$EXISTING_CONFIG" ]; then
     done <<< "$INSTALLS"
     echo "Plugins done."
   fi
+fi
+
+# ── Run workspace startup script ──
+STARTUP_FILE="/home/node/.openclaw/workspace/startup.sh"
+if [ ! -f "$STARTUP_FILE" ]; then
+  touch "$STARTUP_FILE"
+  chmod +x "$STARTUP_FILE"
+  echo "Created workspace/startup.sh"
+fi
+if [ -s "$STARTUP_FILE" ]; then
+  echo "Running workspace/startup.sh..."
+  bash "$STARTUP_FILE" || echo "Warning: startup.sh had errors, continuing..."
+  echo "Startup script complete."
 fi
 
 # ── Launch gateway ──
