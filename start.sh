@@ -538,7 +538,9 @@ fi
 
 # ── Write shell capture wrappers ──
 STARTUP_FILE="/home/node/.openclaw/workspace/startup.sh"
-cat > /etc/profile.d/huggingclaw-capture.sh << 'PROFILE'
+HC_CAPTURE_SCRIPT="/home/node/.openclaw/huggingclaw-capture.sh"
+mkdir -p "$(dirname "$HC_CAPTURE_SCRIPT")"
+cat > "$HC_CAPTURE_SCRIPT" << 'PROFILE'
 STARTUP_FILE="/home/node/.openclaw/workspace/startup.sh"
 _hc_append() {
   local line="$*"
@@ -561,10 +563,12 @@ conda()   { command conda "$@";   [[ "$1" == "install" ]] && _hc_append "conda i
 mamba()   { command mamba "$@";   [[ "$1" == "install" ]] && _hc_append "mamba install -y ${@:2}"; }
 openclaw() { command openclaw "$@"; [[ "$1" == "plugins" && "$2" == "install" ]] && _hc_append "openclaw plugins install ${@:3}"; }
 PROFILE
-chmod +x /etc/profile.d/huggingclaw-capture.sh
-echo 'source /etc/profile.d/huggingclaw-capture.sh' > /home/node/.bashrc
+chmod +x "$HC_CAPTURE_SCRIPT"
+echo "source $HC_CAPTURE_SCRIPT" > /home/node/.bashrc
+echo "source $HC_CAPTURE_SCRIPT" >> /home/node/.profile
+echo "[ -f $HC_CAPTURE_SCRIPT ] && source $HC_CAPTURE_SCRIPT" >> /home/node/.bash_profile
+source "$HC_CAPTURE_SCRIPT"
 echo "Shell capture wrappers ready."
-
 # ── Re-install previously installed plugins ──
 EXISTING_CONFIG="/home/node/.openclaw/openclaw.json"
 if [ -f "$EXISTING_CONFIG" ]; then
