@@ -536,27 +536,33 @@ if [ -n "${CLOUDFLARE_WORKERS_TOKEN:-}" ]; then
   python3 /home/node/app/cloudflare-keepalive-setup.py || true
 fi
 
-# ── Write shell capture wrappers to .bashrc ──
+# ── Write shell capture wrappers ──
 STARTUP_FILE="/home/node/.openclaw/workspace/startup.sh"
-cat > /home/node/.bashrc << 'BASHRC'
+cat > /etc/profile.d/huggingclaw-capture.sh << 'PROFILE'
 STARTUP_FILE="/home/node/.openclaw/workspace/startup.sh"
 _hc_append() {
   local line="$*"
   grep -qxF "$line" "$STARTUP_FILE" 2>/dev/null || echo "$line" >> "$STARTUP_FILE"
 }
-apt-get() {
-  command apt-get "$@"
-  [[ "$1" == "install" ]] && _hc_append "apt-get install -y ${@:2}"
-}
-apt() {
-  command apt "$@"
-  [[ "$1" == "install" ]] && _hc_append "apt-get install -y ${@:2}"
-}
-pip() { command pip "$@"; [[ "$1" == "install" ]] && _hc_append "pip install ${@:2}"; }
-pip3() { command pip3 "$@"; [[ "$1" == "install" ]] && _hc_append "pip3 install ${@:2}"; }
-npm() { command npm "$@"; [[ "$1" == "install" && "$2" == "-g" ]] && _hc_append "npm install -g ${@:3}"; }
+apt-get() { command apt-get "$@"; [[ "$1" == "install" ]] && _hc_append "apt-get install -y ${@:2}"; }
+apt()     { command apt "$@";     [[ "$1" == "install" ]] && _hc_append "apt-get install -y ${@:2}"; }
+pip()     { command pip "$@";     [[ "$1" == "install" ]] && _hc_append "pip install ${@:2}"; }
+pip3()    { command pip3 "$@";    [[ "$1" == "install" ]] && _hc_append "pip3 install ${@:2}"; }
+pipx()    { command pipx "$@";    [[ "$1" == "install" ]] && _hc_append "pipx install ${@:2}"; }
+npm()     { command npm "$@";     [[ "$1" == "install" && "$2" == "-g" ]] && _hc_append "npm install -g ${@:3}"; }
+yarn()    { command yarn "$@";    [[ "$1" == "global" && "$2" == "add" ]] && _hc_append "yarn global add ${@:3}"; }
+pnpm()    { command pnpm "$@";    [[ "$1" == "install" && "$2" == "-g" ]] && _hc_append "pnpm install -g ${@:3}"; [[ "$1" == "add" && "$2" == "-g" ]] && _hc_append "pnpm add -g ${@:3}"; }
+brew()    { command brew "$@";    [[ "$1" == "install" ]] && _hc_append "brew install ${@:2}"; }
+gem()     { command gem "$@";     [[ "$1" == "install" ]] && _hc_append "gem install ${@:2}"; }
+cargo()   { command cargo "$@";   [[ "$1" == "install" ]] && _hc_append "cargo install ${@:2}"; }
+go()      { command go "$@";      [[ "$1" == "install" ]] && _hc_append "go install ${@:2}"; }
+snap()    { command snap "$@";    [[ "$1" == "install" ]] && _hc_append "snap install ${@:2}"; }
+conda()   { command conda "$@";   [[ "$1" == "install" ]] && _hc_append "conda install -y ${@:2}"; }
+mamba()   { command mamba "$@";   [[ "$1" == "install" ]] && _hc_append "mamba install -y ${@:2}"; }
 openclaw() { command openclaw "$@"; [[ "$1" == "plugins" && "$2" == "install" ]] && _hc_append "openclaw plugins install ${@:3}"; }
-BASHRC
+PROFILE
+chmod +x /etc/profile.d/huggingclaw-capture.sh
+echo 'source /etc/profile.d/huggingclaw-capture.sh' > /home/node/.bashrc
 echo "Shell capture wrappers ready."
 
 # ── Re-install previously installed plugins ──
