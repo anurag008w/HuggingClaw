@@ -91,7 +91,7 @@ ENV HOME=/home/node \
     PATH=/home/node/.npm-global/bin:/home/node/.local/bin:/usr/local/bin:$PATH \
     NODE_PATH=/home/node/browser-deps/node_modules \
     NODE_OPTIONS="--require /opt/cloudflare-proxy.js"
-
+    BASH_ENV=/home/node/.openclaw/huggingclaw-capture.sh
 WORKDIR /home/node/app
 
 EXPOSE 7861
