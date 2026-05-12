@@ -7,6 +7,7 @@ credentials inside a private HF dataset without embedding HF tokens in git
 remotes or requiring a manual HF_USERNAME secret.
 """
 
+import fcntl
 import hashlib
 import json
 import logging
@@ -37,6 +38,7 @@ OPENCLAW_HOME = Path("/home/node/.openclaw")
 OPENCLAW_CONFIG_FILE = OPENCLAW_HOME / "openclaw.json"
 WORKSPACE = OPENCLAW_HOME / "workspace"
 STATUS_FILE = Path("/tmp/sync-status.json")
+SYNC_LOCK_FILE = Path("/tmp/huggingclaw-sync.lock")
 INTERVAL = int(os.environ.get("SYNC_INTERVAL", "180"))
 INITIAL_DELAY = int(os.environ.get("SYNC_START_DELAY", "10"))
 CONFIG_WATCH_INTERVAL = max(
@@ -392,7 +394,7 @@ def restore_workspace() -> bool:
         return False
 
 
-def sync_once(
+def _sync_once_unlocked(
     last_fingerprint: str | None = None,
     last_marker: tuple[int, int, int] | None = None,
 ) -> tuple[str, tuple[int, int, int]]:
@@ -438,6 +440,19 @@ def sync_once(
 
     write_status("success", f"Uploaded workspace to {repo_id}")
     return (current_fingerprint, current_marker)
+
+
+def sync_once(
+    last_fingerprint: str | None = None,
+    last_marker: tuple[int, int, int] | None = None,
+) -> tuple[str, tuple[int, int, int]]:
+    SYNC_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with SYNC_LOCK_FILE.open("w", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle, fcntl.LOCK_EX)
+        try:
+            return _sync_once_unlocked(last_fingerprint, last_marker)
+        finally:
+            fcntl.flock(lock_handle, fcntl.LOCK_UN)
 
 
 def handle_signal(_sig, _frame) -> None:
@@ -582,6 +597,17 @@ def main() -> int:
         except Exception as exc:
             write_status("error", f"Shutdown sync failed: {exc}")
             print(f"Workspace sync: shutdown sync failed: {exc}")
+            return 1
+    if command == "sync-once-settled":
+        try:
+            trigger, _ = wait_for_config_settle(file_marker(OPENCLAW_CONFIG_FILE))
+            if trigger == "stopped":
+                return 1
+            sync_once()
+            return 0
+        except Exception as exc:
+            write_status("error", f"Settled sync failed: {exc}")
+            print(f"Workspace sync: settled sync failed: {exc}")
             return 1
     if command == "loop":
         return loop()
