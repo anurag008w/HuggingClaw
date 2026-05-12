@@ -19,6 +19,11 @@
 const http  = require('node:http');
 const https = require('node:https');
 
+// This file is preloaded through NODE_OPTIONS, so it also runs inside npm and
+// OpenClaw helper subprocesses that may emit machine-readable JSON on stdout.
+// Keep rotator diagnostics on stderr to avoid corrupting those stdout streams.
+const log = (...args) => console.error(...args);
+
 // ─── Provider definitions ────────────────────────────────────────────────────
 //
 // hostname  – regex tested against the request hostname (case-insensitive)
@@ -185,7 +190,7 @@ const providerState = PROVIDERS.map(p => {
     : normalizeKeys(process.env.LLM_API_KEY || '');
 
   if (hasDedicated) {
-    console.log(`[key-rotator] ${p.name}: ${keys.length} key${keys.length === 1 ? '' : 's'}`);
+    log(`[key-rotator] ${p.name}: ${keys.length} key${keys.length === 1 ? '' : 's'}`);
   } else if (!keys.length) {
     console.warn(`[key-rotator] No keys for provider "${p.name}"`);
   }
@@ -202,7 +207,7 @@ const fallbackCount = providerState.filter(p => {
   return dedicated.length === 0 && p.keys.length > 0;
 }).length;
 if (fallbackCount > 0) {
-  console.log(`[key-rotator] ${fallbackCount} provider(s) using LLM_API_KEY fallback`);
+  log(`[key-rotator] ${fallbackCount} provider(s) using LLM_API_KEY fallback`);
 }
 
 // ─── Runtime helpers ─────────────────────────────────────────────────────────
@@ -332,4 +337,4 @@ patchFetch();
 patchHttpModule(http);
 patchHttpModule(https);
 
-console.log('[key-rotator] loaded — all providers active');
+log('[key-rotator] loaded — all providers active');

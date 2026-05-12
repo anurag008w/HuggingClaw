@@ -11,6 +11,14 @@ umask 0077
 OPENCLAW_VERSION="${OPENCLAW_VERSION:-latest}"
 OPENCLAW_APP_DIR="/home/node/.openclaw/openclaw-app"
 OPENCLAW_RUNTIME_VERSION=""
+OPENCLAW_FILE_LOG_LEVEL_CONFIGURED=false
+OPENCLAW_CONSOLE_LOG_LEVEL_CONFIGURED=false
+OPENCLAW_CONSOLE_LOG_STYLE_CONFIGURED=false
+WHATSAPP_ENABLED_CONFIGURED=false
+[ "${OPENCLAW_FILE_LOG_LEVEL+x}" = "x" ] && OPENCLAW_FILE_LOG_LEVEL_CONFIGURED=true
+[ "${OPENCLAW_CONSOLE_LOG_LEVEL+x}" = "x" ] && OPENCLAW_CONSOLE_LOG_LEVEL_CONFIGURED=true
+[ "${OPENCLAW_CONSOLE_LOG_STYLE+x}" = "x" ] && OPENCLAW_CONSOLE_LOG_STYLE_CONFIGURED=true
+[ "${WHATSAPP_ENABLED+x}" = "x" ] && WHATSAPP_ENABLED_CONFIGURED=true
 WHATSAPP_ENABLED="${WHATSAPP_ENABLED:-false}"
 WHATSAPP_ENABLED_NORMALIZED=$(printf '%s' "$WHATSAPP_ENABLED" | tr '[:upper:]' '[:lower:]')
 SYNC_INTERVAL="${SYNC_INTERVAL:-180}"
@@ -445,22 +453,32 @@ if [ -f "$EXISTING_CONFIG" ]; then
     --arg consoleLevel "$OPENCLAW_CONSOLE_LOG_LEVEL" \
     --arg consoleStyle "$OPENCLAW_CONSOLE_LOG_STYLE" \
     --argjson desired "$CONFIG_JSON" \
+    --argjson fileLogConfigured "$OPENCLAW_FILE_LOG_LEVEL_CONFIGURED" \
+    --argjson consoleLogConfigured "$OPENCLAW_CONSOLE_LOG_LEVEL_CONFIGURED" \
+    --argjson consoleStyleConfigured "$OPENCLAW_CONSOLE_LOG_STYLE_CONFIGURED" \
+    --argjson whatsappConfigured "$WHATSAPP_ENABLED_CONFIGURED" \
     --argjson whatsappEnabled "$WHATSAPP_CONFIG_ENABLED" \
-    '.gateway.auth.token = $token
+    '(.channels.whatsapp // {}) as $existingWhatsapp
+     | .gateway.auth.token = $token
      | .agents.defaults.model = $model
-     | .logging.level = $fileLevel
-     | .logging.consoleLevel = $consoleLevel
-     | .logging.consoleStyle = $consoleStyle
+     | if $fileLogConfigured then .logging.level = $fileLevel else . end
+     | if $consoleLogConfigured then .logging.consoleLevel = $consoleLevel else . end
+     | if $consoleStyleConfigured then .logging.consoleStyle = $consoleStyle else . end
      | .channels = ((.channels // {}) * ($desired.channels // {}))
      | .plugins.allow = (((.plugins.allow // []) + ($desired.plugins.allow // [])) | unique)
      | .plugins.deny = (((.plugins.deny // []) + ($desired.plugins.deny // [])) | unique)
-     | .plugins.entries = ((.plugins.entries // {}) * ($desired.plugins.entries // {}))
+     | .plugins.entries = (($desired.plugins.entries // {}) * (.plugins.entries // {}))
      | if $whatsappEnabled then
-         .plugins.entries.whatsapp.enabled = true
-         | .channels.whatsapp = ($desired.channels.whatsapp // {"dmPolicy": "pairing"})
-       else
+         ($desired.channels.whatsapp // {"dmPolicy": "pairing"}) as $desiredWhatsapp
+         | .plugins.entries.whatsapp.enabled = true
+         | .channels.whatsapp = (($existingWhatsapp * $desiredWhatsapp)
+             | if ($existingWhatsapp | has("dmPolicy")) then .dmPolicy = $existingWhatsapp.dmPolicy else . end
+             | if ($existingWhatsapp | has("allowFrom")) then .allowFrom = $existingWhatsapp.allowFrom else . end)
+       elif $whatsappConfigured then
          .plugins.entries.whatsapp.enabled = false
          | del(.channels.whatsapp)
+       else
+         .
        end' \
     "$EXISTING_CONFIG" 2>/dev/null)
 
