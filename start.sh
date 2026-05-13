@@ -131,6 +131,48 @@ case "$LLM_PROVIDER" in
     ;;
 esac
 
+# Ensure OpenClaw provider discovery can see per-provider keys even when users
+# configure only *_API_KEYS pools. Mirror first pool key into singular env.
+promote_first_pool_key() {
+  local singular_var="$1"
+  local pool_var="$2"
+  local singular_val="${!singular_var:-}"
+  local pool_val="${!pool_var:-}"
+
+  [ -n "$singular_val" ] && return 0
+  [ -n "$pool_val" ] || return 0
+
+  local first
+  first=$(printf '%s' "$pool_val" | tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | awk 'NF{print; exit}')
+  [ -n "$first" ] || return 0
+  export "${singular_var}=$first"
+}
+
+promote_first_pool_key "ANTHROPIC_API_KEY" "ANTHROPIC_API_KEYS"
+promote_first_pool_key "OPENAI_API_KEY" "OPENAI_API_KEYS"
+promote_first_pool_key "GEMINI_API_KEY" "GEMINI_API_KEYS"
+promote_first_pool_key "DEEPSEEK_API_KEY" "DEEPSEEK_API_KEYS"
+promote_first_pool_key "OPENROUTER_API_KEY" "OPENROUTER_API_KEYS"
+promote_first_pool_key "KILOCODE_API_KEY" "KILOCODE_API_KEYS"
+promote_first_pool_key "OPENCODE_API_KEY" "OPENCODE_API_KEYS"
+promote_first_pool_key "ZAI_API_KEY" "ZAI_API_KEYS"
+promote_first_pool_key "MOONSHOT_API_KEY" "MOONSHOT_API_KEYS"
+promote_first_pool_key "MINIMAX_API_KEY" "MINIMAX_API_KEYS"
+promote_first_pool_key "XIAOMI_API_KEY" "XIAOMI_API_KEYS"
+promote_first_pool_key "VOLCANO_ENGINE_API_KEY" "VOLCANO_ENGINE_API_KEYS"
+promote_first_pool_key "BYTEPLUS_API_KEY" "BYTEPLUS_API_KEYS"
+promote_first_pool_key "QIANFAN_API_KEY" "QIANFAN_API_KEYS"
+promote_first_pool_key "MODELSTUDIO_API_KEY" "MODELSTUDIO_API_KEYS"
+promote_first_pool_key "KIMI_API_KEY" "KIMI_API_KEYS"
+promote_first_pool_key "MISTRAL_API_KEY" "MISTRAL_API_KEYS"
+promote_first_pool_key "XAI_API_KEY" "XAI_API_KEYS"
+promote_first_pool_key "NVIDIA_API_KEY" "NVIDIA_API_KEYS"
+promote_first_pool_key "GROQ_API_KEY" "GROQ_API_KEYS"
+promote_first_pool_key "COHERE_API_KEY" "COHERE_API_KEYS"
+promote_first_pool_key "TOGETHER_API_KEY" "TOGETHER_API_KEYS"
+promote_first_pool_key "CEREBRAS_API_KEY" "CEREBRAS_API_KEYS"
+promote_first_pool_key "HUGGINGFACE_HUB_TOKEN" "HUGGINGFACE_HUB_TOKENS"
+
 # ── Setup directories ──
 mkdir -p /home/node/.openclaw/agents/main/sessions
 mkdir -p /home/node/.openclaw/credentials
@@ -284,6 +326,67 @@ if [ -n "$CUSTOM_PROVIDER_NAME" ] || [ -n "$CUSTOM_BASE_URL" ] || [ -n "$CUSTOM_
     fi
   fi
 fi
+
+# Optional: explicitly expose provider model lists in Control UI when
+# provider keys are configured. Format:
+#   NVIDIA_MODELS=model1,model2
+#   OPENAI_MODELS=gpt-4o-mini,gpt-4.1
+# This helps when provider auto-discovery does not populate models reliably.
+inject_provider_models_from_env() {
+  local provider="$1"
+  local models_env="$2"
+  local key_env_single="$3"
+  local key_env_pool="$4"
+  local models_csv="${!models_env:-}"
+  local single_key="${!key_env_single:-}"
+  local pool_keys="${!key_env_pool:-}"
+
+  # Only inject when both:
+  # 1) provider has at least one configured key
+  # 2) explicit model list env is provided
+  if [ -z "$models_csv" ] || { [ -z "$single_key" ] && [ -z "$pool_keys" ]; }; then
+    return 0
+  fi
+
+  local models_json
+  models_json=$(printf '%s' "$models_csv" \
+    | tr ',' '\n' \
+    | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+    | awk 'NF' \
+    | jq -R . \
+    | jq -s 'map({id: ., name: .}) | unique_by(.id)')
+
+  CONFIG_JSON=$(jq \
+    --arg provider "$provider" \
+    --argjson models "$models_json" \
+    '.models.mode = "merge"
+     | .models.providers[$provider] = ((.models.providers[$provider] // {}) + {models: $models})' <<<"$CONFIG_JSON")
+}
+
+# Built-in provider model envs (optional)
+inject_provider_models_from_env "anthropic" "ANTHROPIC_MODELS" "ANTHROPIC_API_KEY" "ANTHROPIC_API_KEYS"
+inject_provider_models_from_env "openai" "OPENAI_MODELS" "OPENAI_API_KEY" "OPENAI_API_KEYS"
+inject_provider_models_from_env "google" "GEMINI_MODELS" "GEMINI_API_KEY" "GEMINI_API_KEYS"
+inject_provider_models_from_env "deepseek" "DEEPSEEK_MODELS" "DEEPSEEK_API_KEY" "DEEPSEEK_API_KEYS"
+inject_provider_models_from_env "openrouter" "OPENROUTER_MODELS" "OPENROUTER_API_KEY" "OPENROUTER_API_KEYS"
+inject_provider_models_from_env "kilocode" "KILOCODE_MODELS" "KILOCODE_API_KEY" "KILOCODE_API_KEYS"
+inject_provider_models_from_env "opencode" "OPENCODE_MODELS" "OPENCODE_API_KEY" "OPENCODE_API_KEYS"
+inject_provider_models_from_env "zai" "ZAI_MODELS" "ZAI_API_KEY" "ZAI_API_KEYS"
+inject_provider_models_from_env "moonshot" "MOONSHOT_MODELS" "MOONSHOT_API_KEY" "MOONSHOT_API_KEYS"
+inject_provider_models_from_env "kimi-coding" "KIMI_MODELS" "KIMI_API_KEY" "KIMI_API_KEYS"
+inject_provider_models_from_env "minimax" "MINIMAX_MODELS" "MINIMAX_API_KEY" "MINIMAX_API_KEYS"
+inject_provider_models_from_env "modelstudio" "MODELSTUDIO_MODELS" "MODELSTUDIO_API_KEY" "MODELSTUDIO_API_KEYS"
+inject_provider_models_from_env "xiaomi" "XIAOMI_MODELS" "XIAOMI_API_KEY" "XIAOMI_API_KEYS"
+inject_provider_models_from_env "volcengine" "VOLCANO_ENGINE_MODELS" "VOLCANO_ENGINE_API_KEY" "VOLCANO_ENGINE_API_KEYS"
+inject_provider_models_from_env "byteplus" "BYTEPLUS_MODELS" "BYTEPLUS_API_KEY" "BYTEPLUS_API_KEYS"
+inject_provider_models_from_env "qianfan" "QIANFAN_MODELS" "QIANFAN_API_KEY" "QIANFAN_API_KEYS"
+inject_provider_models_from_env "groq" "GROQ_MODELS" "GROQ_API_KEY" "GROQ_API_KEYS"
+inject_provider_models_from_env "mistral" "MISTRAL_MODELS" "MISTRAL_API_KEY" "MISTRAL_API_KEYS"
+inject_provider_models_from_env "xai" "XAI_MODELS" "XAI_API_KEY" "XAI_API_KEYS"
+inject_provider_models_from_env "nvidia" "NVIDIA_MODELS" "NVIDIA_API_KEY" "NVIDIA_API_KEYS"
+inject_provider_models_from_env "cohere" "COHERE_MODELS" "COHERE_API_KEY" "COHERE_API_KEYS"
+inject_provider_models_from_env "together" "TOGETHER_MODELS" "TOGETHER_API_KEY" "TOGETHER_API_KEYS"
+inject_provider_models_from_env "cerebras" "CEREBRAS_MODELS" "CEREBRAS_API_KEY" "CEREBRAS_API_KEYS"
 
 # Browser configuration (managed local Chromium in HF/Docker)
 BROWSER_EXECUTABLE_PATH=""
@@ -540,10 +643,15 @@ fi
 # ── Trap SIGTERM for graceful shutdown ──
 graceful_shutdown() {
   echo "Shutting down..."
-  if [ -f "/home/node/app/openclaw-sync.py" ]; then
+  if [ -f "/home/node/app/openclaw-sync.py" ] && [ -n "${HF_TOKEN:-}" ]; then
     echo "Saving state before exit..."
+    timeout 8s python3 /home/node/app/openclaw-sync.py sync-once-settled || \
+      echo "Warning: could not complete settled shutdown sync"
+    sleep 1
     python3 /home/node/app/openclaw-sync.py sync-once || \
-      echo "Warning: could not complete shutdown sync"
+      echo "Warning: could not complete final shutdown sync"
+  elif [ -f "/home/node/app/openclaw-sync.py" ]; then
+    echo "HF_TOKEN not set; skipping shutdown backup sync."
   fi
   kill $(jobs -p) 2>/dev/null
   exit 0
