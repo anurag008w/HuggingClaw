@@ -11,6 +11,14 @@ umask 0077
 OPENCLAW_VERSION="${OPENCLAW_VERSION:-latest}"
 OPENCLAW_APP_DIR="/home/node/.openclaw/openclaw-app"
 OPENCLAW_RUNTIME_VERSION=""
+OPENCLAW_FILE_LOG_LEVEL_CONFIGURED=false
+OPENCLAW_CONSOLE_LOG_LEVEL_CONFIGURED=false
+OPENCLAW_CONSOLE_LOG_STYLE_CONFIGURED=false
+WHATSAPP_ENABLED_CONFIGURED=false
+[ "${OPENCLAW_FILE_LOG_LEVEL+x}" = "x" ] && OPENCLAW_FILE_LOG_LEVEL_CONFIGURED=true
+[ "${OPENCLAW_CONSOLE_LOG_LEVEL+x}" = "x" ] && OPENCLAW_CONSOLE_LOG_LEVEL_CONFIGURED=true
+[ "${OPENCLAW_CONSOLE_LOG_STYLE+x}" = "x" ] && OPENCLAW_CONSOLE_LOG_STYLE_CONFIGURED=true
+[ "${WHATSAPP_ENABLED+x}" = "x" ] && WHATSAPP_ENABLED_CONFIGURED=true
 WHATSAPP_ENABLED="${WHATSAPP_ENABLED:-false}"
 WHATSAPP_ENABLED_NORMALIZED=$(printf '%s' "$WHATSAPP_ENABLED" | tr '[:upper:]' '[:lower:]')
 SYNC_INTERVAL="${SYNC_INTERVAL:-180}"
@@ -445,22 +453,32 @@ if [ -f "$EXISTING_CONFIG" ]; then
     --arg consoleLevel "$OPENCLAW_CONSOLE_LOG_LEVEL" \
     --arg consoleStyle "$OPENCLAW_CONSOLE_LOG_STYLE" \
     --argjson desired "$CONFIG_JSON" \
+    --argjson fileLogConfigured "$OPENCLAW_FILE_LOG_LEVEL_CONFIGURED" \
+    --argjson consoleLogConfigured "$OPENCLAW_CONSOLE_LOG_LEVEL_CONFIGURED" \
+    --argjson consoleStyleConfigured "$OPENCLAW_CONSOLE_LOG_STYLE_CONFIGURED" \
+    --argjson whatsappConfigured "$WHATSAPP_ENABLED_CONFIGURED" \
     --argjson whatsappEnabled "$WHATSAPP_CONFIG_ENABLED" \
-    '.gateway.auth.token = $token
+    '(.channels.whatsapp // {}) as $existingWhatsapp
+     | .gateway.auth.token = $token
      | .agents.defaults.model = $model
-     | .logging.level = $fileLevel
-     | .logging.consoleLevel = $consoleLevel
-     | .logging.consoleStyle = $consoleStyle
+     | if $fileLogConfigured then .logging.level = $fileLevel else . end
+     | if $consoleLogConfigured then .logging.consoleLevel = $consoleLevel else . end
+     | if $consoleStyleConfigured then .logging.consoleStyle = $consoleStyle else . end
      | .channels = ((.channels // {}) * ($desired.channels // {}))
      | .plugins.allow = (((.plugins.allow // []) + ($desired.plugins.allow // [])) | unique)
      | .plugins.deny = (((.plugins.deny // []) + ($desired.plugins.deny // [])) | unique)
-     | .plugins.entries = ((.plugins.entries // {}) * ($desired.plugins.entries // {}))
+     | .plugins.entries = (($desired.plugins.entries // {}) * (.plugins.entries // {}))
      | if $whatsappEnabled then
-         .plugins.entries.whatsapp.enabled = true
-         | .channels.whatsapp = ($desired.channels.whatsapp // {"dmPolicy": "pairing"})
-       else
+         ($desired.channels.whatsapp // {"dmPolicy": "pairing"}) as $desiredWhatsapp
+         | .plugins.entries.whatsapp.enabled = true
+         | .channels.whatsapp = (($existingWhatsapp * $desiredWhatsapp)
+             | if ($existingWhatsapp | has("dmPolicy")) then .dmPolicy = $existingWhatsapp.dmPolicy else . end
+             | if ($existingWhatsapp | has("allowFrom")) then .allowFrom = $existingWhatsapp.allowFrom else . end)
+       elif $whatsappConfigured then
          .plugins.entries.whatsapp.enabled = false
          | del(.channels.whatsapp)
+       else
+         .
        end' \
     "$EXISTING_CONFIG" 2>/dev/null)
 
@@ -522,10 +540,15 @@ fi
 # ── Trap SIGTERM for graceful shutdown ──
 graceful_shutdown() {
   echo "Shutting down..."
-  if [ -f "/home/node/app/openclaw-sync.py" ]; then
+  if [ -f "/home/node/app/openclaw-sync.py" ] && [ -n "${HF_TOKEN:-}" ]; then
     echo "Saving state before exit..."
+    timeout 8s python3 /home/node/app/openclaw-sync.py sync-once-settled || \
+      echo "Warning: could not complete settled shutdown sync"
+    sleep 1
     python3 /home/node/app/openclaw-sync.py sync-once || \
-      echo "Warning: could not complete shutdown sync"
+      echo "Warning: could not complete final shutdown sync"
+  elif [ -f "/home/node/app/openclaw-sync.py" ]; then
+    echo "HF_TOKEN not set; skipping shutdown backup sync."
   fi
   kill $(jobs -p) 2>/dev/null
   exit 0
@@ -1000,59 +1023,108 @@ hc_finish_startup_commands
 sync_installed_plugins_into_allow
 
 # ── Launch gateway ──
-echo "Launching OpenClaw gateway on port 7860..."
+GATEWAY_RESTART_DELAY="${GATEWAY_RESTART_DELAY:-2}"
+GATEWAY_MAX_RESTARTS="${GATEWAY_MAX_RESTARTS:-0}"
+GATEWAY_RESTART_COUNT=0
+SYNC_LOOP_PID=""
+GUARDIAN_PID=""
 
-GATEWAY_ARGS=(gateway run --port 7860 --bind lan)
-if [ "${GATEWAY_VERBOSE:-0}" = "1" ]; then
-  GATEWAY_ARGS+=(--verbose)
-  echo "Gateway verbose logging enabled (GATEWAY_VERBOSE=1)"
-fi
+sync_before_gateway_restart() {
+  [ -n "${HF_TOKEN:-}" ] || return 0
+  [ -f "/home/node/app/openclaw-sync.py" ] || return 0
 
-# Use stdbuf -oL -eL to ensure logs are not buffered and appear immediately
-# in the console. NOTE: $! captures the LAST pipeline element (tee), not
-# openclaw — fine for passing to `wait` (waits for the whole pipeline to
-# finish), but kill -0 on it is uninformative. We probe TCP instead.
-stdbuf -oL -eL openclaw "${GATEWAY_ARGS[@]}" 2>&1 | tee -a /home/node/.openclaw/gateway.log &
-GATEWAY_PID=$!
+  echo "Gateway stopped; saving latest OpenClaw state before restart..."
+  python3 /home/node/app/openclaw-sync.py sync-once-settled || \
+    echo "Warning: could not sync settled state before gateway restart"
+}
 
-# Poll for the gateway to start listening on 7860. OpenClaw can take 20-30s
-# on cold start (plugin install + auto-restore). Bail out early if the
-# pipeline died.
-GATEWAY_READY_TIMEOUT="${GATEWAY_READY_TIMEOUT:-90}"
-ready=false
-for ((i=0; i<GATEWAY_READY_TIMEOUT; i++)); do
-  if (echo > /dev/tcp/127.0.0.1/7860) 2>/dev/null; then
-    ready=true
-    break
+start_background_sync_once() {
+  [ -n "${HF_TOKEN:-}" ] || return 0
+
+  if [ -n "$SYNC_LOOP_PID" ] && kill -0 "$SYNC_LOOP_PID" 2>/dev/null; then
+    return 0
   fi
-  if ! kill -0 "$GATEWAY_PID" 2>/dev/null; then
-    break
+
+  python3 -u /home/node/app/openclaw-sync.py loop &
+  SYNC_LOOP_PID=$!
+}
+
+start_guardian_once() {
+  [ "$WHATSAPP_ENABLED_NORMALIZED" = "true" ] || return 0
+
+  if [ -n "$GUARDIAN_PID" ] && kill -0 "$GUARDIAN_PID" 2>/dev/null; then
+    return 0
   fi
-  sleep 1
-done
 
-if [ "$ready" != "true" ]; then
-  echo ""
-  echo "Gateway failed to start. Last 30 lines of log:"
-  echo "────────────────────────────────────────────"
-  tail -30 /home/node/.openclaw/gateway.log
-  exit 1
-fi
-
-# 11. Start WhatsApp Guardian after the gateway is accepting connections
-if [ "$WHATSAPP_ENABLED_NORMALIZED" = "true" ]; then
   node /home/node/app/wa-guardian.js &
   GUARDIAN_PID=$!
   echo "WhatsApp Guardian started (PID: $GUARDIAN_PID)"
-fi
+}
 
-# 11.5 Warm up the managed browser so first browser actions have a live tab
-warmup_browser
+while true; do
+  echo "Launching OpenClaw gateway on port 7860..."
 
-# 12. Start Workspace Sync after startup settles
-if [ -n "${HF_TOKEN:-}" ]; then
-  python3 -u /home/node/app/openclaw-sync.py loop &
-fi
+  GATEWAY_ARGS=(gateway run --port 7860 --bind lan)
+  if [ "${GATEWAY_VERBOSE:-0}" = "1" ]; then
+    GATEWAY_ARGS+=(--verbose)
+    echo "Gateway verbose logging enabled (GATEWAY_VERBOSE=1)"
+  fi
 
-# Wait for gateway (allows trap to fire)
-wait $GATEWAY_PID
+  # Use stdbuf -oL -eL to ensure logs are not buffered and appear immediately
+  # in the console. NOTE: $! captures the LAST pipeline element (tee), not
+  # openclaw — fine for passing to `wait` (waits for the whole pipeline to
+  # finish), but kill -0 on it is uninformative. We probe TCP instead.
+  stdbuf -oL -eL openclaw "${GATEWAY_ARGS[@]}" 2>&1 | tee -a /home/node/.openclaw/gateway.log &
+  GATEWAY_PID=$!
+
+  # Poll for the gateway to start listening on 7860. OpenClaw can take 20-30s
+  # on cold start (plugin install + auto-restore). Bail out early if the
+  # pipeline died.
+  GATEWAY_READY_TIMEOUT="${GATEWAY_READY_TIMEOUT:-90}"
+  ready=false
+  for ((i=0; i<GATEWAY_READY_TIMEOUT; i++)); do
+    if (echo > /dev/tcp/127.0.0.1/7860) 2>/dev/null; then
+      ready=true
+      break
+    fi
+    if ! kill -0 "$GATEWAY_PID" 2>/dev/null; then
+      break
+    fi
+    sleep 1
+  done
+
+  if [ "$ready" != "true" ]; then
+    echo ""
+    echo "Gateway failed to start. Last 30 lines of log:"
+    echo "────────────────────────────────────────────"
+    tail -30 /home/node/.openclaw/gateway.log
+    exit 1
+  fi
+
+  # 11. Start WhatsApp Guardian after the gateway is accepting connections
+  start_guardian_once
+
+  # 11.5 Warm up the managed browser so first browser actions have a live tab
+  warmup_browser
+
+  # 12. Start Workspace Sync after startup settles. Keep only one loop active;
+  # config edits can make OpenClaw exit/reload, and the gateway loop below will
+  # relaunch it without rerunning all startup code.
+  start_background_sync_once
+
+  set +e
+  wait "$GATEWAY_PID"
+  GATEWAY_EXIT_CODE=$?
+  set -e
+
+  sync_before_gateway_restart
+
+  GATEWAY_RESTART_COUNT=$((GATEWAY_RESTART_COUNT + 1))
+  if [ "$GATEWAY_MAX_RESTARTS" != "0" ] && [ "$GATEWAY_RESTART_COUNT" -ge "$GATEWAY_MAX_RESTARTS" ]; then
+    echo "Gateway exited with code ${GATEWAY_EXIT_CODE}; restart limit (${GATEWAY_MAX_RESTARTS}) reached."
+    exit "$GATEWAY_EXIT_CODE"
+  fi
+
+  echo "Gateway exited with code ${GATEWAY_EXIT_CODE}; restarting in ${GATEWAY_RESTART_DELAY}s..."
+  sleep "$GATEWAY_RESTART_DELAY"
+done
