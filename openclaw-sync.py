@@ -375,12 +375,12 @@ def prune_remote_deleted_files(repo_id: str, snapshot_dir: Path) -> None:
         path for path in remote_files
         if path not in local_files and path not in {".gitattributes"}
     ]
-    for stale_path in stale_files:
-        HF_API.delete_file(
-            path_in_repo=stale_path,
+    if stale_files:
+        HF_API.delete_files(
+            delete_patterns=stale_files,
             repo_id=repo_id,
             repo_type="dataset",
-            commit_message=f"Delete stale file {stale_path}",
+            commit_message="Prune stale files after workspace sync",
         )
 
 
