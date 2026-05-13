@@ -2,6 +2,44 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.0] - 2026-05-13
+
+### Added
+
+- **NVIDIA key-rotation support** — added `nvidia-key-rotator.cjs` wiring and startup integration so deployments can rotate NVIDIA credentials similarly to other provider key-rotation flows.
+- **Cloudflare keep-alive automation** — added/expanded `cloudflare-keepalive-setup.py` flow and startup wiring to provision keep-alive through Cloudflare Worker automation instead of the older UptimeRobot-first approach.
+- **Sync metadata marker model** — introduced a structured workspace marker `(file_count, total_size, newest_mtime, metadata_hash)` to support stronger change introspection in sync code.
+
+### Changed
+
+- **Workspace sync script rename finalized** — `workspace-sync.py` flow was migrated to `openclaw-sync.py` in Docker/startup/docs so restore/sync behavior is centralized under one script.
+- **Sync trigger behavior hardened for config churn** — OpenClaw config sync now debounces until JSON settles before immediate sync, reducing false/partial syncs during rapid config writes.
+- **Gateway restart flow now saves state first** — restart path was updated to run a pre-restart one-shot state sync so gateway reloads are less likely to drop recent state.
+- **Shutdown backup now uses a two-step pass** — graceful shutdown now attempts `sync-once-settled` then a final `sync-once` pass to better capture last-second writes.
+- **Telegram allowlist simplified** — consolidated Telegram allowlist into `TELEGRAM_ALLOWED_USERS` and aligned docs/examples.
+- **Plugin startup behavior aligned** — startup-installed plugins are synced into `plugins.allow` before gateway launch so runtime-installed plugins are recognized cleanly.
+- **Cloudflare proxy path matured** — multiple iterations improved fetch/proxy behavior (header handling, endpoint scoping, API root routing, URL parsing, and logging noise reduction), then simplified unstable undici patching paths.
+- **Health dashboard polish** — sync timestamps now show local time, footer credits were corrected, and status rendering/docs were updated for the Cloudflare keep-alive model.
+- **CI workflow churn documented** — GitHub workflow files for HF sync were added/renamed/cleaned multiple times as space/repo naming stabilized.
+
+### Fixed
+
+- **Missed rapid backup updates** — sync logic now relies on content fingerprint checks for no-op decisions so same-second or quick successive changes are less likely to be skipped.
+- **Non-deterministic metadata hashing** — metadata hashing now iterates paths deterministically to avoid hash jitter from traversal order.
+- **Transient file race sync failures** — sync fingerprinting/snapshot copy paths now tolerate transient `OSError` (file rotated/deleted mid-scan) instead of aborting the whole sync pass.
+- **State restore migration edge cases** — restore flow includes migration/cleanup behavior for legacy hidden state paths and stale backup entries.
+- **Startup/env robustness** — fixed shell export formatting/syntax issues (e.g., NVIDIA/XAI lines) and unbound-variable pitfalls in startup scripts.
+- **Proxy runtime errors and noise** — fixed specific proxy runtime issues (including `UND_ERR_INVALID_ARG`, fetch duplex handling, and upstream error visibility) and reduced noisy stdout logs that interfered with clean process output.
+- **HF workflow/repo reference mismatches** — corrected and later cleaned workflow repository references during repo migration/restructure.
+
+### Docs
+
+- README/.env/security docs were refreshed across multiple commits to reflect:
+  - Cloudflare keep-alive replacing UptimeRobot setup path,
+  - updated secrets and startup environment behavior,
+  - provider/key-rotation options,
+  - backup/sync behavior and troubleshooting guidance.
+
 ## [1.4.0] - 2026-04-25
 
 ### Added
