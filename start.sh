@@ -540,10 +540,15 @@ fi
 # ── Trap SIGTERM for graceful shutdown ──
 graceful_shutdown() {
   echo "Shutting down..."
-  if [ -f "/home/node/app/openclaw-sync.py" ]; then
+  if [ -f "/home/node/app/openclaw-sync.py" ] && [ -n "${HF_TOKEN:-}" ]; then
     echo "Saving state before exit..."
+    timeout 8s python3 /home/node/app/openclaw-sync.py sync-once-settled || \
+      echo "Warning: could not complete settled shutdown sync"
+    sleep 1
     python3 /home/node/app/openclaw-sync.py sync-once || \
-      echo "Warning: could not complete shutdown sync"
+      echo "Warning: could not complete final shutdown sync"
+  elif [ -f "/home/node/app/openclaw-sync.py" ]; then
+    echo "HF_TOKEN not set; skipping shutdown backup sync."
   fi
   kill $(jobs -p) 2>/dev/null
   exit 0
