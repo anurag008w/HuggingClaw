@@ -18,6 +18,7 @@ import sys
 import tempfile
 import threading
 import time
+from typing import TypeAlias
 from pathlib import Path
 
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
@@ -69,6 +70,7 @@ EXCLUDED_STATE_NAMES = {
     "openclaw-app",
     "gateway.log",
     "browser",
+    "npm",
 }
 WHATSAPP_CREDS_DIR = OPENCLAW_HOME / "credentials" / "whatsapp" / "default"
 WHATSAPP_BACKUP_DIR = STATE_DIR / "credentials" / "whatsapp" / "default"
@@ -76,6 +78,7 @@ RESET_MARKER = WORKSPACE / ".reset_credentials"
 HF_API = HfApi(token=HF_TOKEN) if HF_TOKEN else None
 STOP_EVENT = threading.Event()
 _REPO_ID_CACHE: str | None = None
+WorkspaceMarker: TypeAlias = tuple[int, int, int, str]
 
 
 def write_status(status: str, message: str) -> None:
@@ -280,14 +283,15 @@ def file_marker(path: Path) -> tuple[int, int, int]:
     return (1, int(stat.st_size), int(stat.st_mtime_ns))
 
 
-def metadata_marker(root: Path) -> tuple[int, int, int]:
+def metadata_marker(root: Path) -> WorkspaceMarker:
     if not root.exists():
-        return (0, 0, 0)
+        return (0, 0, 0, "")
 
     file_count = 0
     total_size = 0
     newest_mtime = 0
-    for path in root.rglob("*"):
+    metadata_hasher = hashlib.sha256()
+    for path in sorted(root.rglob("*")):
         if not path.is_file():
             continue
         rel = path.relative_to(root).as_posix()
@@ -298,9 +302,17 @@ def metadata_marker(root: Path) -> tuple[int, int, int]:
         except OSError:
             continue
         file_count += 1
-        total_size += int(stat.st_size)
-        newest_mtime = max(newest_mtime, int(stat.st_mtime_ns))
-    return (file_count, total_size, newest_mtime)
+        size = int(stat.st_size)
+        mtime_ns = int(stat.st_mtime_ns)
+        total_size += size
+        newest_mtime = max(newest_mtime, mtime_ns)
+        metadata_hasher.update(rel.encode("utf-8"))
+        metadata_hasher.update(b"\0")
+        metadata_hasher.update(str(size).encode("ascii"))
+        metadata_hasher.update(b"\0")
+        metadata_hasher.update(str(mtime_ns).encode("ascii"))
+        metadata_hasher.update(b"\0")
+    return (file_count, total_size, newest_mtime, metadata_hasher.hexdigest())
 
 
 def fingerprint_dir(root: Path) -> str:
@@ -313,9 +325,16 @@ def fingerprint_dir(root: Path) -> str:
         if _should_exclude(rel, path):
             continue
         hasher.update(rel.encode("utf-8"))
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                hasher.update(chunk)
+        try:
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    hasher.update(chunk)
+        except (FileNotFoundError, IsADirectoryError, NotADirectoryError):
+            # Fingerprint must represent a complete view of the workspace.
+            # Retry next sync pass instead of silently hashing a partial tree.
+            raise RuntimeError(
+                f"Workspace changed while hashing {rel}; retrying next sync pass."
+            )
     return hasher.hexdigest()
 
 
@@ -331,7 +350,13 @@ def create_snapshot_dir(source_root: Path) -> Path:
             target.mkdir(parents=True, exist_ok=True)
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, target)
+        try:
+            shutil.copy2(path, target)
+        except (FileNotFoundError, IsADirectoryError, NotADirectoryError):
+            # Do not upload a partial snapshot; let caller retry on next loop.
+            raise RuntimeError(
+                f"Snapshot changed while copying {rel_posix}; retrying next sync pass."
+            )
     return staging_root
 
 
@@ -396,16 +421,15 @@ def restore_workspace() -> bool:
 
 def _sync_once_unlocked(
     last_fingerprint: str | None = None,
-    last_marker: tuple[int, int, int] | None = None,
-) -> tuple[str, tuple[int, int, int]]:
+    last_marker: WorkspaceMarker | None = None,
+) -> tuple[str, WorkspaceMarker]:
     if not HF_TOKEN:
         write_status("disabled", "HF_TOKEN is not configured.")
-        return (last_fingerprint or "", last_marker or (0, 0, 0))
+        return (last_fingerprint or "", last_marker or (0, 0, 0, ""))
 
     snapshot_state_into_workspace()
     repo_id = ensure_repo_exists()
     current_marker = metadata_marker(WORKSPACE)
-
     if last_marker is not None and current_marker == last_marker:
         write_status("synced", "No workspace changes detected.")
         return (last_fingerprint or "", current_marker)
@@ -444,8 +468,8 @@ def _sync_once_unlocked(
 
 def sync_once(
     last_fingerprint: str | None = None,
-    last_marker: tuple[int, int, int] | None = None,
-) -> tuple[str, tuple[int, int, int]]:
+    last_marker: WorkspaceMarker | None = None,
+) -> tuple[str, WorkspaceMarker]:
     SYNC_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
     with SYNC_LOCK_FILE.open("w", encoding="utf-8") as lock_handle:
         fcntl.flock(lock_handle, fcntl.LOCK_EX)
