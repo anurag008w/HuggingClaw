@@ -75,6 +75,9 @@ Full list:
 - `XIAOMI_API_KEYS`
 - `VOLCANO_ENGINE_API_KEYS`
 - `BYTEPLUS_API_KEYS`
+- `QIANFAN_API_KEYS`
+- `MODELSTUDIO_API_KEYS`
+- `KIMI_API_KEYS`
 - `MISTRAL_API_KEYS`
 - `XAI_API_KEYS`
 - `NVIDIA_API_KEYS`
@@ -83,6 +86,38 @@ Full list:
 - `TOGETHER_API_KEYS`
 - `CEREBRAS_API_KEYS`
 - `HUGGINGFACE_HUB_TOKENS`
+
+### Provider model lists (optional, for Control UI visibility)
+Format: comma-separated model IDs; used only when that provider has key(s) configured.
+Examples:
+- `NVIDIA_MODELS=meta/llama-3.1-70b-instruct,nvidia/llama-3.1-nemotron-70b-instruct`
+- `OPENAI_MODELS=gpt-4o-mini,gpt-4.1`
+- `GROQ_MODELS=llama-3.3-70b-versatile,deepseek-r1-distill-llama-70b`
+
+Supported:
+- `ANTHROPIC_MODELS`
+- `OPENAI_MODELS`
+- `GEMINI_MODELS`
+- `DEEPSEEK_MODELS`
+- `OPENROUTER_MODELS`
+- `KILOCODE_MODELS`
+- `OPENCODE_MODELS`
+- `ZAI_MODELS`
+- `MOONSHOT_MODELS`
+- `KIMI_MODELS`
+- `MINIMAX_MODELS`
+- `MODELSTUDIO_MODELS`
+- `XIAOMI_MODELS`
+- `VOLCANO_ENGINE_MODELS`
+- `BYTEPLUS_MODELS`
+- `QIANFAN_MODELS`
+- `GROQ_MODELS`
+- `MISTRAL_MODELS`
+- `XAI_MODELS`
+- `NVIDIA_MODELS`
+- `COHERE_MODELS`
+- `TOGETHER_MODELS`
+- `CEREBRAS_MODELS`
 
 ### Telegram / WhatsApp
 - `TELEGRAM_BOT_TOKEN` — bot token string. Example: `TELEGRAM_BOT_TOKEN=123456:ABC...`
