@@ -39,3 +39,13 @@ The reverse proxy must preserve these public prefixes for normal HTTP responses,
 - Confirm the actual Hugging Face Space slug before adding any GitHub Actions workflow that pushes to HF.
 - Set `JUPYTER_TOKEN` to a strong secret instead of relying on the template default.
 - Open both `/app/` and `/terminal/` with trailing slashes after the HF Space rebuild completes.
+
+## Log Review: 2026-05-14 Startup
+
+Checked the supplied HF Space startup log. Findings and actions:
+
+- `plugins.entries.acpx: plugin not installed: acpx` was caused by writing a disabled `plugins.entries.acpx` config entry even when ACP is disabled/missing on HF Spaces. The startup config now deletes that entry unless the plugin is actually enabled through the allow list.
+- Jupyter Server warned that `ServerApp.token` and `ServerApp.cookie_options` are deprecated. Startup now uses `IdentityProvider.token` and `IdentityProvider.cookie_options` for Jupyter Server 2.x.
+- The printed Control UI URL now includes the trailing slash (`/app/`) to match the mounted route and avoid copy/paste 404s.
+- `Config write anomaly: missing-meta-before-write` is expected on a fresh Space with no restored config; the script writes a new config because the log also says `No restored config — writing fresh config...`.
+- The OpenClaw security warning is expected for this single-port reverse-proxy deployment because the gateway is protected by `GATEWAY_TOKEN` and only reached publicly through the local dashboard proxy. Keep the Space private and use strong `GATEWAY_TOKEN`/`JUPYTER_TOKEN` secrets.
