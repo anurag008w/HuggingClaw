@@ -1,0 +1,237 @@
+// Single public entrypoint for HF Spaces: dashboard + reverse proxy to OpenClaw + JupyterLab.
+const http = require("http");
+const fs = require("fs");
+const net = require("net");
+
+const PORT = 7861;
+const GATEWAY_PORT = 7860;
+const GATEWAY_HOST = "127.0.0.1";
+const JUPYTER_PORT = 8888;
+const JUPYTER_HOST = "127.0.0.1";
+const JUPYTER_BASE = "/terminal";
+const startTime = Date.now();
+const LLM_MODEL = process.env.LLM_MODEL || "Not Set";
+const TELEGRAM_ENABLED = !!process.env.TELEGRAM_BOT_TOKEN;
+const WHATSAPP_ENABLED = /^true$/i.test(process.env.WHATSAPP_ENABLED || "");
+const WHATSAPP_STATUS_FILE = "/tmp/huggingclaw-wa-status.json";
+const HF_BACKUP_ENABLED = !!process.env.HF_TOKEN;
+const SYNC_INTERVAL = process.env.SYNC_INTERVAL || "180";
+const APP_BASE = "/app";
+const SYNC_STATUS_FILE = "/tmp/sync-status.json";
+const CLOUDFLARE_KEEPALIVE_STATUS_FILE =
+  "/tmp/huggingclaw-cloudflare-keepalive-status.json";
+
+function parseRequestUrl(url) {
+  try { return new URL(url, "http://localhost"); }
+  catch { return new URL("http://localhost/"); }
+}
+
+function getSyncStatus() {
+  try {
+    if (fs.existsSync(SYNC_STATUS_FILE))
+      return JSON.parse(fs.readFileSync(SYNC_STATUS_FILE, "utf8"));
+  } catch {}
+  if (HF_BACKUP_ENABLED)
+    return { status: "configured", message: `Backup enabled. Waiting for sync window (${SYNC_INTERVAL}s).` };
+  return { status: "unknown", message: "No sync data yet" };
+}
+
+function readGuardianStatus() {
+  if (!WHATSAPP_ENABLED) return { configured: false, connected: false, pairing: false };
+  try {
+    if (fs.existsSync(WHATSAPP_STATUS_FILE)) {
+      const p = JSON.parse(fs.readFileSync(WHATSAPP_STATUS_FILE, "utf8"));
+      return { configured: p.configured !== false, connected: p.connected === true, pairing: p.pairing === true };
+    }
+  } catch {}
+  return { configured: true, connected: false, pairing: false };
+}
+
+function getKeepaliveStatus() {
+  try {
+    if (fs.existsSync(CLOUDFLARE_KEEPALIVE_STATUS_FILE))
+      return JSON.parse(fs.readFileSync(CLOUDFLARE_KEEPALIVE_STATUS_FILE, "utf8"));
+  } catch {}
+  return null;
+}
+
+function probePort(host, port, path, timeoutMs = 1500) {
+  return new Promise((resolve) => {
+    const req = http.get({ hostname: host, port, path, timeout: timeoutMs }, (res) => {
+      res.resume();
+      resolve(res.statusCode >= 200 && res.statusCode < 500);
+    });
+    req.on("timeout", () => { req.destroy(); resolve(false); });
+    req.on("error", () => resolve(false));
+  });
+}
+
+function formatUptime(ms) {
+  const t = Math.floor(ms / 1000);
+  const d = Math.floor(t / 86400), h = Math.floor((t % 86400) / 3600), m = Math.floor((t % 3600) / 60);
+  if (d) return `${d}d ${h}h ${m}m`;
+  if (h) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+
+function escapeHtml(v) {
+  return String(v).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+
+function badge(label, tone = "neutral") {
+  return `<span class="badge ${tone}">${escapeHtml(label)}</span>`;
+}
+
+function tile({ title, value, detail = "", tone = "neutral", meta = "" }) {
+  return `<article class="tile ${tone}">
+    <div class="tile-head"><span class="tile-title">${escapeHtml(title)}</span><span class="tile-dot"></span></div>
+    <div class="tile-value">${value}</div>
+    ${detail ? `<div class="tile-detail">${detail}</div>` : ""}
+    ${meta ? `<div class="tile-meta">${meta}</div>` : ""}
+  </article>`;
+}
+
+function renderDashboard(data) {
+  const syncStatus = String(data.sync?.status || "unknown");
+  const syncTone = ["success","restored","synced","configured"].includes(syncStatus) ? "ok" : syncStatus === "disabled" ? "warn" : "neutral";
+  const kaConf = data.keepalive?.configured === true;
+  const kaStatus = String(data.keepalive?.status || (process.env.CLOUDFLARE_WORKERS_TOKEN ? "pending" : "not configured"));
+  const kaTone = kaConf ? "ok" : process.env.CLOUDFLARE_WORKERS_TOKEN ? "warn" : "neutral";
+
+  const tiles = [
+    tile({ title: "Gateway", value: badge(data.gatewayReady ? "Online" : "Offline", data.gatewayReady ? "ok" : "off"), detail: `OpenClaw on internal port ${GATEWAY_PORT}`, tone: data.gatewayReady ? "ok" : "off" }),
+    tile({ title: "Terminal", value: badge(data.jupyterReady ? "Online" : "Starting…", data.jupyterReady ? "ok" : "warn"), detail: `JupyterLab at <a href="${JUPYTER_BASE}/" target="_blank" style="color:inherit">${JUPYTER_BASE}/</a>`, tone: data.jupyterReady ? "ok" : "warn" }),
+    tile({ title: "Model", value: `<code>${escapeHtml(LLM_MODEL)}</code>`, detail: "Primary LLM configured", tone: "neutral" }),
+    tile({ title: "Runtime", value: escapeHtml(data.uptimeHuman), detail: `Public port ${PORT}`, tone: "neutral" }),
+    tile({ title: "Telegram", value: badge(TELEGRAM_ENABLED ? "Enabled" : "Disabled", TELEGRAM_ENABLED ? "ok" : "neutral"), detail: TELEGRAM_ENABLED ? "Bot channel active" : "Not configured", tone: TELEGRAM_ENABLED ? "ok" : "neutral" }),
+    tile({ title: "Backup", value: badge(syncStatus.toUpperCase(), syncTone), detail: escapeHtml(data.sync?.message || "No status yet"), tone: syncTone, meta: data.sync?.timestamp ? `<span class="local-time" data-iso="${data.sync.timestamp}"></span>` : "" }),
+    tile({ title: "Keep Awake", value: badge(kaConf ? "CF Cron" : kaStatus.toUpperCase(), kaTone), detail: kaConf ? `Pinging <code>${escapeHtml(data.keepalive?.targetUrl || "/health")}</code>` : process.env.CLOUDFLARE_WORKERS_TOKEN ? "Worker pending or failed" : "Not configured", tone: kaTone }),
+  ].join("");
+
+  return `<!doctype html><html lang="en"><head>
+  <meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>HuggingClaw</title>
+  <style>
+    :root{color-scheme:dark;--bg:#08080f;--panel:#12111b;--line:#26243a;--text:#f6f4ff;--muted:#7f7a9e;--soft:#b8b3d7;--good:#22c55e;--warn:#f5c542;--bad:#fb7185}
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);font-size:13px}
+    main{width:min(720px,calc(100% - 32px));margin:0 auto;padding:36px 0 44px}
+    header{text-align:center;margin-bottom:22px}h1{margin:0;font-size:1.65rem;line-height:1}
+    .subtitle{margin-top:12px;color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.14em;font-weight:800}
+    .btn-row{display:flex;gap:12px;margin:24px 0 20px}
+    .hero-action{display:flex;flex:1;min-height:46px;align-items:center;justify-content:center;border-radius:8px;background:#fff;color:#000;text-decoration:none;font-weight:850;font-size:.98rem;transition:opacity .15s}
+    .hero-action:hover{opacity:.9}.hero-action.terminal{background:#1e1e2e;color:#cdd6f4;border:1px solid #45475a}
+    .overview{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-bottom:10px}
+    .tile{border:1px solid var(--line);background:var(--panel);border-radius:11px;padding:18px;min-height:124px;display:flex;flex-direction:column;gap:10px}
+    .tile.ok{border-color:rgba(34,197,94,.22)}.tile.warn{border-color:rgba(245,197,66,.24)}.tile.off{border-color:rgba(251,113,133,.28)}
+    .tile-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
+    .tile-title{color:var(--muted);font-size:.67rem;letter-spacing:.18em;text-transform:uppercase;font-weight:850}
+    .tile-dot{width:7px;height:7px;border-radius:50%;background:var(--line)}
+    .tile.ok .tile-dot{background:var(--good)}.tile.warn .tile-dot{background:var(--warn)}.tile.off .tile-dot{background:var(--bad)}
+    .tile-value{font-size:1.12rem;font-weight:850;overflow-wrap:anywhere}.tile-detail{color:var(--soft);line-height:1.45;font-size:.83rem}
+    .tile-meta{color:var(--muted);line-height:1.4;font-size:.75rem;margin-top:auto;overflow-wrap:anywhere}
+    code{background:#232234;border:1px solid #34324c;border-radius:6px;padding:2px 6px;color:var(--text);font-size:.9em}
+    .badge{display:inline-flex;align-items:center;width:max-content;border:1px solid var(--line);border-radius:999px;padding:5px 10px;font-size:.72rem;font-weight:850;line-height:1;text-transform:uppercase}
+    .badge.ok{color:var(--good);border-color:rgba(34,197,94,.34);background:rgba(34,197,94,.11)}
+    .badge.warn{color:var(--warn);border-color:rgba(245,197,66,.34);background:rgba(245,197,66,.11)}
+    .badge.off{color:var(--bad);border-color:rgba(251,113,133,.34);background:rgba(251,113,133,.11)}
+    .badge.neutral{color:var(--soft)}
+    footer{color:var(--muted);text-align:center;font-size:.74rem;margin-top:18px}
+    @media(max-width:700px){.overview{grid-template-columns:1fr}main{width:min(100% - 22px,720px);padding-top:28px}.btn-row{flex-direction:column}}
+  </style></head><body><main>
+  <header><h1>🦞 HuggingClaw</h1><div class="subtitle">OpenClaw Gateway + JupyterLab Terminal</div></header>
+  <div class="btn-row">
+    <a class="hero-action" href="${APP_BASE}/" target="_blank" rel="noopener noreferrer">Open Control UI →</a>
+    <a class="hero-action terminal" href="${JUPYTER_BASE}/" target="_blank" rel="noopener noreferrer">💻 Open Terminal →</a>
+  </div>
+  <section class="overview">${tiles}</section>
+  <footer>Built by <a href="https://github.com/somratpro" target="_blank" style="color:inherit;text-decoration:none">@somratpro</a> · Terminal by JupyterLab</footer>
+  </main>
+  <script>document.querySelectorAll('.local-time').forEach(el=>{const d=new Date(el.getAttribute('data-iso'));if(!isNaN(d))el.textContent='At '+d.toLocaleTimeString()});</script>
+</body></html>`;
+}
+
+// ── Generic proxy ──
+function proxyHTTP(req, res, targetHost, targetPort) {
+  const url = parseRequestUrl(req.url);
+  const headers = {
+    ...req.headers,
+    host: `${targetHost}:${targetPort}`,
+    "x-forwarded-for": req.socket.remoteAddress,
+    "x-forwarded-host": req.headers.host,
+    "x-forwarded-proto": "https",
+  };
+  const pr = http.request({ hostname: targetHost, port: targetPort, path: url.pathname + url.search, method: req.method, headers }, (pres) => {
+    res.writeHead(pres.statusCode, pres.headers);
+    pres.pipe(res);
+    pres.on("error", () => res.end());
+  });
+  req.on("error", () => pr.destroy());
+  res.on("error", () => pr.destroy());
+  pr.on("error", () => {
+    if (!res.headersSent) {
+      res.writeHead(503, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: "starting", message: "Service is initializing… please wait." }));
+    } else res.end();
+  });
+  req.pipe(pr);
+}
+
+// ── HTTP server ──
+const server = http.createServer(async (req, res) => {
+  const { pathname } = parseRequestUrl(req.url);
+
+  if (pathname === "/health") {
+    const gatewayReady = await probePort(GATEWAY_HOST, GATEWAY_PORT, "/health");
+    res.writeHead(gatewayReady ? 200 : 503, { "Content-Type": "application/json" });
+    return res.end(JSON.stringify({ status: gatewayReady ? "ok" : "degraded", gatewayReady, uptime: formatUptime(Date.now() - startTime), sync: getSyncStatus(), keepalive: getKeepaliveStatus() }));
+  }
+
+  if (pathname === "/status") {
+    const [gatewayReady, jupyterReady] = await Promise.all([
+      probePort(GATEWAY_HOST, GATEWAY_PORT, "/health"),
+      probePort(JUPYTER_HOST, JUPYTER_PORT, `${JUPYTER_BASE}/api`),
+    ]);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    return res.end(JSON.stringify({ model: LLM_MODEL, uptime: formatUptime(Date.now() - startTime), gatewayReady, jupyterReady, sync: getSyncStatus(), whatsapp: readGuardianStatus(), keepalive: getKeepaliveStatus() }));
+  }
+
+  if (pathname === "/" || pathname === "/dashboard") {
+    const [gatewayReady, jupyterReady] = await Promise.all([
+      probePort(GATEWAY_HOST, GATEWAY_PORT, "/health"),
+      probePort(JUPYTER_HOST, JUPYTER_PORT, `${JUPYTER_BASE}/api`),
+    ]);
+    res.writeHead(200, { "Content-Type": "text/html" });
+    return res.end(renderDashboard({ uptimeHuman: formatUptime(Date.now() - startTime), gatewayReady, jupyterReady, sync: getSyncStatus(), whatsapp: readGuardianStatus(), keepalive: getKeepaliveStatus() }));
+  }
+
+  // JupyterLab terminal
+  if (pathname === JUPYTER_BASE || pathname.startsWith(JUPYTER_BASE + "/")) {
+    return proxyHTTP(req, res, JUPYTER_HOST, JUPYTER_PORT);
+  }
+
+  // OpenClaw gateway (everything else)
+  proxyHTTP(req, res, GATEWAY_HOST, GATEWAY_PORT);
+});
+
+// ── WebSocket upgrade (JupyterLab kernels + terminals need this) ──
+server.on("upgrade", (req, socket, head) => {
+  const { pathname, search } = parseRequestUrl(req.url);
+  const isJupyter = pathname === JUPYTER_BASE || pathname.startsWith(JUPYTER_BASE + "/");
+  const [targetHost, targetPort] = isJupyter ? [JUPYTER_HOST, JUPYTER_PORT] : [GATEWAY_HOST, GATEWAY_PORT];
+
+  const ps = net.connect(targetPort, targetHost, () => {
+    ps.write(`${req.method} ${pathname}${search} HTTP/${req.httpVersion}\r\n`);
+    for (let i = 0; i < req.rawHeaders.length; i += 2)
+      ps.write(`${req.rawHeaders[i]}: ${req.rawHeaders[i + 1]}\r\n`);
+    ps.write("\r\n");
+    if (head && head.length) ps.write(head);
+    ps.pipe(socket).pipe(ps);
+  });
+  ps.on("error", () => socket.destroy());
+});
+
+server.timeout = 0;
+server.keepAliveTimeout = 65000;
+server.listen(PORT, "0.0.0.0", () =>
+  console.log(`🦞 HuggingClaw :${PORT} → Gateway :${GATEWAY_PORT} | Terminal :${JUPYTER_PORT} at ${JUPYTER_BASE}/`),
+);
