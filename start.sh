@@ -649,8 +649,8 @@ if [ -n "${CLOUDFLARE_PROXY_URL:-}" ]; then
   echo "Proxy     : ${CLOUDFLARE_PROXY_URL}"
 fi
 if [ -n "${SPACE_HOST:-}" ]; then
-  echo "Control UI: https://${SPACE_HOST}/app/"
-  echo "Terminal  : https://${SPACE_HOST}/terminal/ (token: ${JUPYTER_TOKEN:-huggingface})"
+  echo "Routes    : /app/ (Control UI), /terminal/ (JupyterLab token: ${JUPYTER_TOKEN:-huggingface})"
+  echo "Private   : open the Hugging Face App tab first; raw https://${SPACE_HOST}/... links can show HF 404 without the embedded Space session."
 fi
 echo ""
 

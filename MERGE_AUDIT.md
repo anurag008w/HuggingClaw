@@ -49,3 +49,7 @@ Checked the supplied HF Space startup log. Findings and actions:
 - The printed Control UI URL now includes the trailing slash (`/app/`) to match the mounted route and avoid copy/paste 404s.
 - `Config write anomaly: missing-meta-before-write` is expected on a fresh Space with no restored config; the script writes a new config because the log also says `No restored config — writing fresh config...`.
 - The OpenClaw security warning is expected for this single-port reverse-proxy deployment because the gateway is protected by `GATEWAY_TOKEN` and only reached publicly through the local dashboard proxy. Keep the Space private and use strong `GATEWAY_TOKEN`/`JUPYTER_TOKEN` secrets.
+
+## Log Review: 2026-05-14 15:12 Startup
+
+The later log shows the previous `acpx` and Jupyter deprecation warnings are gone. The remaining 404 symptom is Hugging Face's outer 404 page, not a response from the Node/Jupyter/OpenClaw services. Because the Space is private, opening raw `https://<space>.hf.space/app/` or `/terminal/` outside the embedded App session can drop the private Space session and Hugging Face hides it as 404 before traffic reaches the container. The dashboard now keeps `/app/` and `/terminal/` navigation in-frame, and startup logs print relative routes plus a private-Space warning instead of clickable raw direct URLs.

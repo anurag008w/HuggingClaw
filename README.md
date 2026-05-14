@@ -408,8 +408,9 @@ HuggingClaw uses a multi-layered approach to ensure stability and persistence on
 
 ## 🐛 Troubleshooting
 
-- **Terminal 404 or redirect loop:** Open `/terminal/` with the trailing slash, rebuild after Dockerfile changes, and confirm `JUPYTER_TOKEN` is set correctly if you changed the default.
-- **Control UI 404:** Open `/app/` with the trailing slash; the reverse proxy rewrites backend redirects into this mount path.
+- **Private Space 404:** If your Space is private, raw `https://<space>.hf.space/app/` or `/terminal/` links can show Hugging Face's own 404 page when opened outside the embedded App session. Open the Space's **App** tab first, then use the in-page dashboard buttons for `/app/` and `/terminal/`.
+- **Terminal 404 or redirect loop:** Open `/terminal/` with the trailing slash from the dashboard/App tab, rebuild after Dockerfile changes, and confirm `JUPYTER_TOKEN` is set correctly if you changed the default.
+- **Control UI 404:** Open `/app/` with the trailing slash from the dashboard/App tab; the reverse proxy rewrites backend redirects into this mount path.
 - **Missing secrets:** Ensure `LLM_API_KEY`, `LLM_MODEL`, and `GATEWAY_TOKEN` are set in your Space **Settings → Secrets**.
 - **Telegram bot issues:** Verify your `TELEGRAM_BOT_TOKEN`. Check Space logs for lines like `📱 Enabling Telegram`.
 - **Backup restore failing:** Make sure `HF_TOKEN` is valid and has write access to your HF account dataset. Set `HF_USERNAME` only if auto-detection is not available in your environment.

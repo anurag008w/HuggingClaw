@@ -100,7 +100,7 @@ function renderDashboard(data) {
 
   const tiles = [
     tile({ title: "Gateway", value: badge(data.gatewayReady ? "Online" : "Offline", data.gatewayReady ? "ok" : "off"), detail: `OpenClaw on internal port ${GATEWAY_PORT}`, tone: data.gatewayReady ? "ok" : "off" }),
-    tile({ title: "Terminal", value: badge(data.jupyterReady ? "Online" : "Starting…", data.jupyterReady ? "ok" : "warn"), detail: `JupyterLab at <a href="${JUPYTER_BASE}/" target="_blank" style="color:inherit">${JUPYTER_BASE}/</a>`, tone: data.jupyterReady ? "ok" : "warn" }),
+    tile({ title: "Terminal", value: badge(data.jupyterReady ? "Online" : "Starting…", data.jupyterReady ? "ok" : "warn"), detail: `JupyterLab at <a href="${JUPYTER_BASE}/" style="color:inherit">${JUPYTER_BASE}/</a>`, tone: data.jupyterReady ? "ok" : "warn" }),
     tile({ title: "Model", value: `<code>${escapeHtml(LLM_MODEL)}</code>`, detail: "Primary LLM configured", tone: "neutral" }),
     tile({ title: "Runtime", value: escapeHtml(data.uptimeHuman), detail: `Public port ${PORT}`, tone: "neutral" }),
     tile({ title: "Telegram", value: badge(TELEGRAM_ENABLED ? "Enabled" : "Disabled", TELEGRAM_ENABLED ? "ok" : "neutral"), detail: TELEGRAM_ENABLED ? "Bot channel active" : "Not configured", tone: TELEGRAM_ENABLED ? "ok" : "neutral" }),
@@ -140,11 +140,11 @@ function renderDashboard(data) {
   </style></head><body><main>
   <header><h1>🦞 HuggingClaw</h1><div class="subtitle">OpenClaw Gateway + JupyterLab Terminal</div></header>
   <div class="btn-row">
-    <a class="hero-action" href="${APP_BASE}/" target="_blank" rel="noopener noreferrer">Open Control UI →</a>
-    <a class="hero-action terminal" href="${JUPYTER_BASE}/" target="_blank" rel="noopener noreferrer">💻 Open Terminal →</a>
+    <a class="hero-action" href="${APP_BASE}/">Open Control UI →</a>
+    <a class="hero-action terminal" href="${JUPYTER_BASE}/">💻 Open Terminal →</a>
   </div>
   <section class="overview">${tiles}</section>
-  <footer>Built by <a href="https://github.com/somratpro" target="_blank" style="color:inherit;text-decoration:none">@somratpro</a> · Terminal by JupyterLab</footer>
+  <footer>Built by <a href="https://github.com/somratpro" target="_blank" rel="noopener noreferrer" style="color:inherit;text-decoration:none">@somratpro</a> · Terminal by JupyterLab<br><span>Private HF Spaces: use these in-frame buttons instead of opening raw <code>.hf.space</code> URLs in a new tab.</span></footer>
   </main>
   <script>document.querySelectorAll('.local-time').forEach(el=>{const d=new Date(el.getAttribute('data-iso'));if(!isNaN(d))el.textContent='At '+d.toLocaleTimeString()});</script>
 </body></html>`;
