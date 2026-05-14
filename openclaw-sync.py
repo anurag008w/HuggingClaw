@@ -360,6 +360,30 @@ def create_snapshot_dir(source_root: Path) -> Path:
     return staging_root
 
 
+def prune_remote_deleted_files(repo_id: str, snapshot_dir: Path) -> None:
+    if HF_API is None:
+        return
+
+    local_files = {
+        path.relative_to(snapshot_dir).as_posix()
+        for path in snapshot_dir.rglob("*")
+        if path.is_file()
+    }
+
+    remote_files = HF_API.list_repo_files(repo_id=repo_id, repo_type="dataset")
+    stale_files = [
+        path for path in remote_files
+        if path not in local_files and path not in {".gitattributes"}
+    ]
+    if stale_files:
+        HF_API.delete_files(
+            delete_patterns=stale_files,
+            repo_id=repo_id,
+            repo_type="dataset",
+            commit_message="Prune stale files after workspace sync",
+        )
+
+
 def restore_workspace() -> bool:
     if not HF_TOKEN:
         write_status("disabled", "HF_TOKEN is not configured.")
@@ -459,6 +483,7 @@ def _sync_once_unlocked(
                 commit_message=f"HuggingClaw sync {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
                 ignore_patterns=[".git/*", ".git"],
             )
+        prune_remote_deleted_files(repo_id, snapshot_dir)
     finally:
         shutil.rmtree(snapshot_dir, ignore_errors=True)
 

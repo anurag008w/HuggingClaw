@@ -53,6 +53,7 @@ const PROVIDERS = [
     hostname:   /(?:^|\.)(?:generativelanguage\.googleapis\.com|aiplatform\.googleapis\.com)$/i,
     envPlural:  'GEMINI_API_KEYS',
     envSingular:'GEMINI_API_KEY',
+    queryParam: true,
   },
   {
     name:       'deepseek',
@@ -285,15 +286,22 @@ function patchFetch() {
       const hostname = resolveHostname(urlLike);
       const provider = matchProvider(hostname);
 
-      if (provider) {
+            if (provider) {
         const key = nextKey(provider);
         if (key) {
-          const headers        = init.headers || (input && input.headers) || undefined;
-          const patchedHeaders = setAuthHeader(headers, key);
-          init = { ...init, headers: patchedHeaders };
+          if (provider.queryParam) {
+            // Gemini: key URL query param mein jaata hai, Bearer nahi
+            const url = new URL(typeof input === 'string' ? input : input.url);
+            url.searchParams.set('key', key);
+            input = typeof input === 'string' ? url.toString() : new Request(url.toString(), input);
+          } else {
+            const headers        = init.headers || (input && input.headers) || undefined;
+            const patchedHeaders = setAuthHeader(headers, key);
+            init = { ...init, headers: patchedHeaders };
 
-          if (input && typeof input === 'object' && !(input instanceof URL) && input.headers) {
-            try { input = new Request(input, { headers: patchedHeaders }); } catch { /* noop */ }
+            if (input && typeof input === 'object' && !(input instanceof URL) && input.headers) {
+              try { input = new Request(input, { headers: patchedHeaders }); } catch { /* noop */ }
+            }
           }
         }
       }
@@ -319,7 +327,14 @@ function patchHttpModule(mod) {
       if (provider) {
         const key = nextKey(provider);
         if (key) {
-          if (typeof options === 'string' || options instanceof URL) {
+          if (provider.queryParam) {
+            // Gemini: ?key= query param use karo
+            const u = new URL(String(typeof options === 'string' || options instanceof URL ? options : `https://${options.hostname}${options.path || '/'}`));
+            u.searchParams.set('key', key);
+            args[0] = typeof options === 'object' && !(options instanceof URL)
+              ? { ...options, path: `${u.pathname}${u.search}` }
+              : u.toString();
+          } else if (typeof options === 'string' || options instanceof URL) {
             const u = new URL(String(options));
             args[0] = {
               protocol: u.protocol,
