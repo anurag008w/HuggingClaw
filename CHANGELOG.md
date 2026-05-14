@@ -12,6 +12,7 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 
 - **HF Spaces subpath routing** — normalized internal redirects and WebSocket forwarding so `/app/` and `/terminal/` stay mounted behind the single public Spaces port.
+- **Startup log noise** — removed the stale disabled `plugins.entries.acpx` config entry, switched Jupyter token/cookie options to `IdentityProvider.*`, and printed `/app/` with the trailing slash.
 
 ## [1.5.0] - 2026-05-13
 
