@@ -312,7 +312,20 @@ const server = http.createServer(async (req, res) => {
       }),
     );
   }
-
+  if (pathname === "/agents") {
+  const remoteAgents = process.env.REMOTE_AGENTS || "";
+  const agents = remoteAgents
+    ? remoteAgents.split(",").map((entry) => {
+        const [id, name, url] = entry.split("|");
+        return { id: id?.trim(), name: name?.trim(), url: url?.trim() };
+      }).filter((a) => a.id && a.name && a.url)
+    : [];
+  res.writeHead(200, {
+    "Content-Type": "application/json",
+    "Access-Control-Allow-Origin": "*",
+  });
+  return res.end(JSON.stringify({ agents }));
+}
   if (pathname === "/" || pathname === "/dashboard") {
     const gatewayReady = await probeGatewayHealth();
     res.writeHead(200, { "Content-Type": "text/html" });
