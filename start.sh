@@ -1073,7 +1073,7 @@ apt() {
 }
 pip() {
   if [ "${1:-}" = "install" ] && [ -z "${VIRTUAL_ENV:-}" ] && ! _hc_has_arg --user "$@" && ! _hc_has_arg --prefix "$@"; then
-    command pip install --user "${@:2}"
+    command pip install --user --break-system-packages "${@:2}"
   else
     command pip "$@"
   fi
@@ -1085,7 +1085,7 @@ pip() {
 }
 pip3() {
   if [ "${1:-}" = "install" ] && [ -z "${VIRTUAL_ENV:-}" ] && ! _hc_has_arg --user "$@" && ! _hc_has_arg --prefix "$@"; then
-    command pip3 install --user "${@:2}"
+    command pip3 install --user --break-system-packages "${@:2}"
   else
     command pip3 "$@"
   fi
@@ -1097,7 +1097,7 @@ pip3() {
 }
 python() {
   if [ "${1:-}" = "-m" ] && [ "${2:-}" = "pip" ] && [ "${3:-}" = "install" ] && [ -z "${VIRTUAL_ENV:-}" ] && ! _hc_has_arg --user "${@:3}" && ! _hc_has_arg --prefix "${@:3}"; then
-    command python -m pip install --user "${@:4}"
+    command python -m pip install --user --break-system-packages "${@:4}"
   else
     command python "$@"
   fi
@@ -1109,7 +1109,7 @@ python() {
 }
 python3() {
   if [ "${1:-}" = "-m" ] && [ "${2:-}" = "pip" ] && [ "${3:-}" = "install" ] && [ -z "${VIRTUAL_ENV:-}" ] && ! _hc_has_arg --user "${@:3}" && ! _hc_has_arg --prefix "${@:3}"; then
-    command python3 -m pip install --user "${@:4}"
+    command python3 -m pip install --user --break-system-packages "${@:4}"
   else
     command python3 "$@"
   fi
@@ -1318,7 +1318,7 @@ fi
 if [ -n "${HUGGINGCLAW_PIP_PACKAGES:-}" ]; then
   echo "Installing Python packages from HUGGINGCLAW_PIP_PACKAGES..."
   read -r -a HC_PIP_PACKAGES <<< "$HUGGINGCLAW_PIP_PACKAGES"
-  if python3 -m pip install --user "${HC_PIP_PACKAGES[@]}"; then
+  if python3 -m pip install --user --break-system-packages "${HC_PIP_PACKAGES[@]}"; then
     echo "HUGGINGCLAW_PIP_PACKAGES install complete."
   else
     HC_STARTUP_FAILURES=$((HC_STARTUP_FAILURES + 1))
@@ -1456,6 +1456,14 @@ start_guardian_once() {
 }
 
 while true; do
+  # Check health-server process - restart if died unexpectedly
+  if [ -n "${HEALTH_PID:-}" ] && ! kill -0 "$HEALTH_PID" 2>/dev/null; then
+    echo "Warning: health-server exited (PID $HEALTH_PID dead); restarting..."
+    node /home/node/app/health-server.js &
+    HEALTH_PID=$!
+    echo "Health server restarted (PID: $HEALTH_PID)"
+  fi
+
   # Check JupyterLab process - restart if died unexpectedly
   if [ "$RUNTIME_JUPYTER_ENABLED" = "true" ]; then
     if [ -n "${JUPYTER_PID:-}" ]; then
