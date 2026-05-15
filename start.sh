@@ -13,6 +13,41 @@ trim_var() {
   printf '%s' "$1" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
 }
 
+load_env_bundle() {
+  # HUGGINGCLAW_ENV_BUNDLE is a single base64url-encoded JSON object generated
+  # by /env-builder. Existing individual env vars win over bundled values.
+  local bundle="${HUGGINGCLAW_ENV_BUNDLE:-${ENV_BUNDLE:-}}"
+  [ -n "$bundle" ] || return 0
+  eval "$(HUGGINGCLAW_ENV_BUNDLE="$bundle" python3 - <<'PYBUNDLE'
+import base64, json, os, re, shlex, sys
+
+raw = os.environ.get("HUGGINGCLAW_ENV_BUNDLE", "").strip()
+try:
+    if raw.startswith("{"):
+        data = json.loads(raw)
+    else:
+        padded = raw + "=" * (-len(raw) % 4)
+        data = json.loads(base64.urlsafe_b64decode(padded.encode()).decode())
+    if not isinstance(data, dict):
+        raise ValueError("bundle must decode to a JSON object")
+    for key, value in data.items():
+        if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", str(key)):
+            continue
+        if str(key) in {"HUGGINGCLAW_ENV_BUNDLE", "ENV_BUNDLE"}:
+            continue
+        if os.environ.get(str(key), ""):
+            continue
+        if value is None or isinstance(value, (dict, list)):
+            continue
+        print(f"export {key}={shlex.quote(str(value))}")
+except Exception as exc:
+    print(f"Warning: invalid HUGGINGCLAW_ENV_BUNDLE ignored: {exc}", file=sys.stderr)
+PYBUNDLE
+)"
+}
+
+load_env_bundle
+
 # Normalize core env values so accidental surrounding spaces in HF Variables
 # do not block updates or cause stale comparisons/merges.
 LLM_MODEL="$(trim_var "${LLM_MODEL:-}")"
@@ -42,8 +77,11 @@ case "$DEV_MODE_NORMALIZED" in
   true|1|yes|on) DEV_MODE_ENABLED=true ;;
   *) DEV_MODE_ENABLED=false ;;
 esac
-SYNC_INTERVAL="${SYNC_INTERVAL:-180}"
-DEVDATA_RAW="${DEVDATA:-on}"
+SYNC_INTERVAL="$(trim_var "${SYNC_INTERVAL:-180}")"
+BACKUP_DATASET_NAME="$(trim_var "${BACKUP_DATASET_NAME:-huggingclaw-backup}")"
+DEVDATA_DATASET_NAME="$(trim_var "${DEVDATA_DATASET_NAME:-huggingclaw-devdata}")"
+DEVDATA_SYNC_INTERVAL="$(trim_var "${DEVDATA_SYNC_INTERVAL:-180}")"
+DEVDATA_RAW="$(trim_var "${DEVDATA:-on}")"
 DEVDATA_NORMALIZED=$(printf '%s' "$DEVDATA_RAW" | tr '[:upper:]' '[:lower:]')
 DEVDATA_ENABLED=true
 case "$DEVDATA_NORMALIZED" in
@@ -1340,6 +1378,10 @@ start_background_devdata_sync() {
   fi
   if [ -z "${HF_TOKEN:-}" ]; then
     echo "DevData  : disabled (HF_TOKEN missing)"
+    return 0
+  fi
+  if [ "${DEVDATA_DATASET_NAME:-huggingclaw-devdata}" = "${BACKUP_DATASET_NAME:-huggingclaw-backup}" ]; then
+    echo "DevData  : disabled (DEVDATA_DATASET_NAME must be separate from BACKUP_DATASET_NAME)"
     return 0
   fi
   if [ ! -f "/home/node/app/jupyter-devdata-sync.py" ]; then
