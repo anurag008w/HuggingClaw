@@ -1,0 +1,780 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>HuggingClaw Env Builder</title>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg:      #07070f;
+  --sb:      #0d0d1a;
+  --card:    #111120;
+  --border:  #1c1c30;
+  --border2: #28284a;
+  --text:    #e6e2ff;
+  --muted:   #605c82;
+  --soft:    #9e99c0;
+  --accent:  #00d4aa;
+  --accent2: #7b6ef6;
+  --secret:  #f5a64a;
+  --safe:    #3dd68c;
+  --r:       13px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden}
+body{
+  font-family:'Outfit',sans-serif;
+  background:var(--bg);color:var(--text);
+  font-size:14px;display:flex;flex-direction:column;
+}
+
+/* ── Top Bar ── */
+.topbar{
+  height:54px;flex-shrink:0;
+  background:var(--sb);border-bottom:1px solid var(--border);
+  display:flex;align-items:center;padding:0 18px;gap:14px;z-index:50;
+}
+.brand{font-weight:700;font-size:15px;letter-spacing:-.02em;white-space:nowrap}
+.brand em{color:var(--accent);font-style:normal}
+.search-wrap{flex:1;max-width:360px;position:relative}
+.search-wrap svg{position:absolute;left:10px;top:50%;transform:translateY(-50%);color:var(--muted);pointer-events:none}
+#search{
+  width:100%;background:var(--card);border:1px solid var(--border);
+  border-radius:9px;color:var(--text);font-family:inherit;font-size:13px;
+  padding:8px 12px 8px 32px;outline:none;transition:border-color .15s;
+}
+#search:focus{border-color:var(--accent2)}
+.topbar-btns{display:flex;gap:7px;margin-left:auto}
+.btn{
+  border:0;border-radius:9px;padding:8px 13px;
+  font-family:inherit;font-size:12.5px;font-weight:600;
+  cursor:pointer;white-space:nowrap;transition:opacity .15s,transform .1s;
+}
+.btn:active{transform:scale(.97)}
+.btn-ghost{background:transparent;color:var(--soft);border:1px solid var(--border)}
+.btn-ghost:hover{border-color:var(--border2);color:var(--text)}
+.btn-accent{background:var(--accent);color:#051a14}
+.btn-accent:hover{opacity:.88}
+.btn-purple{background:var(--accent2);color:#fff}
+.btn-purple:hover{opacity:.88}
+
+/* ── 3-Panel Layout ── */
+.panels{display:flex;flex:1;min-height:0}
+
+/* ── Left Sidebar ── */
+.sidebar{
+  width:210px;flex-shrink:0;
+  background:var(--sb);border-right:1px solid var(--border);
+  overflow-y:auto;padding:12px 8px;
+  display:flex;flex-direction:column;gap:1px;
+}
+.sb-label{
+  font-size:10px;font-weight:700;letter-spacing:.13em;
+  text-transform:uppercase;color:var(--muted);
+  padding:10px 10px 5px;
+}
+.sb-label:first-child{padding-top:4px}
+.nav-btn{
+  width:100%;display:flex;align-items:center;gap:8px;
+  padding:9px 10px;border-radius:9px;
+  background:transparent;border:0;
+  color:var(--soft);font-family:inherit;font-size:13px;font-weight:500;
+  cursor:pointer;text-align:left;transition:background .12s,color .12s;
+}
+.nav-btn:hover{background:rgba(255,255,255,.05);color:var(--text)}
+.nav-btn.active{background:rgba(0,212,170,.12);color:var(--accent)}
+.nav-icon{font-size:14px;width:20px;text-align:center;flex-shrink:0}
+.nav-label{flex:1}
+.nav-count{
+  background:rgba(255,255,255,.07);color:var(--muted);
+  font-size:11px;font-weight:700;border-radius:99px;
+  padding:1px 6px;min-width:20px;text-align:center;
+}
+.nav-btn.active .nav-count{background:rgba(0,212,170,.15);color:var(--accent)}
+
+/* ── Main ── */
+.main{flex:1;min-width:0;overflow-y:auto;padding:18px}
+
+.import-card{
+  background:var(--card);border:1px solid var(--border);
+  border-radius:var(--r);padding:18px;margin-bottom:18px;
+}
+.import-card h3{font-size:13px;font-weight:700;margin-bottom:3px}
+.import-card p{color:var(--muted);font-size:12px;line-height:1.5;margin-bottom:11px}
+.import-card code{
+  font-family:'JetBrains Mono',monospace;font-size:11px;
+  background:rgba(255,255,255,.07);border:1px solid var(--border2);
+  border-radius:4px;padding:1px 5px;
+}
+.import-row{display:flex;gap:9px;align-items:flex-start}
+.import-row textarea{
+  flex:1;min-height:66px;
+  background:var(--bg);border:1px solid var(--border);border-radius:9px;
+  color:var(--text);font-family:'JetBrains Mono',monospace;font-size:11.5px;
+  padding:9px 11px;outline:none;resize:vertical;transition:border-color .15s;
+}
+.import-row textarea:focus{border-color:var(--accent2)}
+.import-btns{display:flex;flex-direction:column;gap:7px}
+
+/* Section */
+.sec{margin-bottom:22px}
+.sec.sec-hidden{display:none}
+.sec-header{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.sec-icon{font-size:15px}
+.sec-title{
+  font-size:11px;font-weight:700;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--muted);
+}
+.sec-line{flex:1;height:1px;background:var(--border)}
+
+/* Cards grid */
+.cards{
+  display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(290px,1fr));
+  gap:9px;
+}
+.env-card{
+  background:var(--card);border:1px solid var(--border);
+  border-radius:var(--r);padding:13px 14px;
+  display:flex;flex-direction:column;gap:9px;
+  transition:border-color .15s;
+}
+.env-card:hover{border-color:var(--border2)}
+.env-card.selected{border-color:rgba(0,212,170,.3);background:rgba(0,212,170,.03)}
+.env-card.hidden{display:none!important}
+.card-top{display:flex;align-items:flex-start;gap:9px}
+.card-check{width:16px;height:16px;margin-top:3px;accent-color:var(--accent);flex-shrink:0;cursor:pointer}
+.card-info{flex:1;min-width:0}
+.card-key{
+  font-family:'JetBrains Mono',monospace;font-size:11.5px;
+  font-weight:500;color:var(--text);word-break:break-all;line-height:1.4;
+}
+.card-lbl{font-size:12px;color:var(--muted);margin-top:3px;line-height:1.35}
+.badge{font-size:10px;font-weight:700;border-radius:5px;padding:2px 6px;flex-shrink:0;margin-top:2px}
+.badge-s{background:rgba(245,166,74,.13);color:var(--secret);border:1px solid rgba(245,166,74,.22)}
+.badge-f{background:rgba(61,214,140,.10);color:var(--safe);border:1px solid rgba(61,214,140,.18)}
+.card-input textarea{
+  width:100%;min-height:36px;max-height:100px;
+  background:var(--bg);border:1px solid var(--border);border-radius:8px;
+  color:var(--text);font-family:'JetBrains Mono',monospace;font-size:11.5px;
+  padding:8px 10px;outline:none;resize:vertical;transition:border-color .15s;
+}
+.card-input textarea:focus{border-color:var(--accent2)}
+
+/* Custom rows */
+.custom-sec{margin-bottom:20px}
+.custom-row{display:grid;grid-template-columns:1fr 1.4fr auto;gap:7px;margin-bottom:7px}
+.custom-row input{
+  background:var(--bg);border:1px solid var(--border);border-radius:8px;
+  color:var(--text);font-family:'JetBrains Mono',monospace;font-size:11.5px;
+  padding:8px 10px;outline:none;transition:border-color .15s;
+}
+.custom-row input:focus{border-color:var(--accent2)}
+.tog{
+  padding:7px 12px;border:1px solid var(--border);border-radius:8px;
+  background:transparent;color:var(--muted);font-family:inherit;
+  font-size:12px;font-weight:600;cursor:pointer;transition:all .15s;
+}
+.tog.on{border-color:rgba(0,212,170,.35);color:var(--accent);background:rgba(0,212,170,.07)}
+
+/* ── Right Output ── */
+.output{
+  width:310px;flex-shrink:0;
+  background:var(--sb);border-left:1px solid var(--border);
+  overflow-y:auto;padding:16px;
+  display:flex;flex-direction:column;gap:14px;
+}
+.out-label{
+  font-size:10px;font-weight:700;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--muted);margin-bottom:6px;
+}
+.out-area{
+  width:100%;
+  background:var(--bg);border:1px solid var(--border);border-radius:9px;
+  color:var(--text);font-family:'JetBrains Mono',monospace;font-size:11px;
+  padding:9px 11px;outline:none;resize:vertical;transition:border-color .15s;
+  line-height:1.6;word-break:break-all;
+}
+.out-area:focus{border-color:var(--accent2)}
+#bundleOut{min-height:110px}
+#envLineOut{min-height:52px}
+.out-btns{display:flex;gap:6px;flex-wrap:wrap;margin-top:7px}
+.out-divider{height:1px;background:var(--border)}
+.summary{
+  background:var(--card);border:1px solid var(--border);
+  border-radius:9px;padding:12px;
+  font-size:12.5px;color:var(--soft);line-height:1.6;
+}
+.summary strong{color:var(--accent)}
+.sum-keys{margin-top:7px;display:flex;flex-wrap:wrap;gap:4px}
+.sum-key{
+  font-family:'JetBrains Mono',monospace;font-size:10px;
+  background:rgba(255,255,255,.05);border:1px solid var(--border2);
+  border-radius:4px;padding:2px 6px;color:var(--soft);
+}
+
+/* Toast */
+.toast{
+  position:fixed;bottom:18px;right:18px;
+  background:var(--accent);color:#051a14;
+  font-weight:700;font-size:12.5px;
+  padding:9px 15px;border-radius:9px;
+  opacity:0;transform:translateY(5px);
+  transition:.18s;z-index:999;pointer-events:none;
+}
+.toast.show{opacity:1;transform:translateY(0)}
+
+::-webkit-scrollbar{width:4px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border2);border-radius:99px}
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">🦞 HuggingClaw <em>Env Builder</em></div>
+  <div class="search-wrap">
+    <svg width="13" height="13" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.2">
+      <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+    </svg>
+    <input id="search" placeholder="Search variables…"/>
+  </div>
+  <div class="topbar-btns">
+    <button class="btn btn-ghost" id="selectCommon">⭐ Common</button>
+    <button class="btn btn-ghost" id="selectVisible">Select Visible</button>
+    <button class="btn btn-ghost" id="clearAll">✕ Clear</button>
+  </div>
+</header>
+
+<div class="panels">
+  <nav class="sidebar" id="sidebar"></nav>
+
+  <main class="main" id="main">
+    <div class="import-card">
+      <h3>Import Existing Env</h3>
+      <p>Paste a <code>.env</code> file, JSON, or an existing <code>HUGGINGCLAW_ENV_BUNDLE</code> — matching fields auto-fill.</p>
+      <div class="import-row">
+        <textarea id="importText" placeholder="LLM_MODEL=openrouter/openai/gpt-4.1-mini&#10;TELEGRAM_BOT_TOKEN=...&#10;or paste HUGGINGCLAW_ENV_BUNDLE=..."></textarea>
+        <div class="import-btns">
+          <button class="btn btn-accent" id="applyImport">Apply</button>
+          <button class="btn btn-ghost" id="addCustom">+ Custom</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="sections"></div>
+
+    <div class="custom-sec" id="customSec">
+      <div class="sec-header">
+        <span class="sec-icon">🔧</span>
+        <span class="sec-title">Custom Env</span>
+        <div class="sec-line"></div>
+      </div>
+      <div id="customRows"></div>
+    </div>
+  </main>
+
+  <aside class="output">
+    <div>
+      <div class="out-label">HUGGINGCLAW_ENV_BUNDLE</div>
+      <textarea id="bundleOut" class="out-area" spellcheck="false" placeholder="Select variables to generate…"></textarea>
+      <div class="out-btns">
+        <button class="btn btn-accent" id="copyBundle">Copy Bundle</button>
+        <button class="btn btn-ghost" id="applyBundle">Apply Edited</button>
+      </div>
+    </div>
+    <div class="out-divider"></div>
+    <div>
+      <div class="out-label">.env Line</div>
+      <textarea id="envLineOut" class="out-area" spellcheck="false" placeholder="HUGGINGCLAW_ENV_BUNDLE=…"></textarea>
+      <div class="out-btns">
+        <button class="btn btn-purple" id="copyEnvLine">Copy .env</button>
+        <button class="btn btn-ghost" id="copyJson">Copy JSON</button>
+      </div>
+    </div>
+    <div class="out-divider"></div>
+    <div class="summary" id="summary">No variables selected yet.</div>
+  </aside>
+</div>
+
+<div class="toast" id="toast">Copied!</div>
+
+<script>
+const FIELDS = [
+  {g:'Core',          icon:'⚡', k:'LLM_MODEL',                    lbl:'Default model ID',                  ph:'openrouter/openai/gpt-4.1-mini', common:1},
+  {g:'Core',          icon:'⚡', k:'LLM_API_KEY',                  lbl:'Primary provider API key',          secret:1, ph:'sk-...', common:1},
+  {g:'Core',          icon:'⚡', k:'GATEWAY_TOKEN',                lbl:'Control UI gateway token',          secret:1, common:1},
+  {g:'Core',          icon:'⚡', k:'OPENCLAW_PASSWORD',            lbl:'Optional password auth',            secret:1},
+  {g:'Core',          icon:'⚡', k:'OPENCLAW_VERSION',             lbl:'Pin OpenClaw version',              ph:'latest'},
+  {g:'Core',          icon:'⚡', k:'LLM_API_KEY_FALLBACK_ENABLED', lbl:'Allow global LLM_API_KEY fallback', ph:'true'},
+
+  {g:'Provider Keys', icon:'🔑', k:'ANTHROPIC_API_KEY',           lbl:'Anthropic (Claude)',    secret:1},
+  {g:'Provider Keys', icon:'🔑', k:'OPENAI_API_KEY',              lbl:'OpenAI (GPT)',          secret:1},
+  {g:'Provider Keys', icon:'🔑', k:'OPENROUTER_API_KEY',          lbl:'OpenRouter',            secret:1, common:1},
+  {g:'Provider Keys', icon:'🔑', k:'GEMINI_API_KEY',              lbl:'Google Gemini',         secret:1},
+  {g:'Provider Keys', icon:'🔑', k:'DEEPSEEK_API_KEY',            lbl:'DeepSeek',              secret:1},
+  {g:'Provider Keys', icon:'🔑', k:'GROQ_API_KEY',                lbl:'Groq',                  secret:1},
+  {g:'Provider Keys', icon:'🔑', k:'MISTRAL_API_KEY',             lbl:'Mistral',               secret:1},
+  {g:'Provider Keys', icon:'🔑', k:'XAI_API_KEY',                 lbl:'xAI (Grok)',            secret:1},
+  {g:'Provider Keys', icon:'🔑', k:'COHERE_API_KEY',              lbl:'Cohere',                secret:1},
+  {g:'Provider Keys', icon:'🔑', k:'TOGETHER_API_KEY',            lbl:'Together AI',           secret:1},
+  {g:'Provider Keys', icon:'🔑', k:'CEREBRAS_API_KEY',            lbl:'Cerebras',              secret:1},
+  {g:'Provider Keys', icon:'🔑', k:'HUGGINGFACE_HUB_TOKEN',       lbl:'Hugging Face token',    secret:1},
+  {g:'Provider Keys', icon:'🔑', k:'COPILOT_GITHUB_TOKEN',        lbl:'GitHub Copilot',        secret:1},
+
+  {g:'Rotation Pools',icon:'🔄', k:'ANTHROPIC_API_KEYS',          lbl:'Anthropic pool (comma-sep)'},
+  {g:'Rotation Pools',icon:'🔄', k:'OPENAI_API_KEYS',             lbl:'OpenAI pool'},
+  {g:'Rotation Pools',icon:'🔄', k:'OPENROUTER_API_KEYS',         lbl:'OpenRouter pool'},
+  {g:'Rotation Pools',icon:'🔄', k:'GEMINI_API_KEYS',             lbl:'Gemini pool'},
+  {g:'Rotation Pools',icon:'🔄', k:'DEEPSEEK_API_KEYS',           lbl:'DeepSeek pool'},
+  {g:'Rotation Pools',icon:'🔄', k:'GROQ_API_KEYS',               lbl:'Groq pool'},
+  {g:'Rotation Pools',icon:'🔄', k:'MISTRAL_API_KEYS',            lbl:'Mistral pool'},
+  {g:'Rotation Pools',icon:'🔄', k:'XAI_API_KEYS',                lbl:'xAI pool'},
+  {g:'Rotation Pools',icon:'🔄', k:'COHERE_API_KEYS',             lbl:'Cohere pool'},
+  {g:'Rotation Pools',icon:'🔄', k:'TOGETHER_API_KEYS',           lbl:'Together pool'},
+  {g:'Rotation Pools',icon:'🔄', k:'CEREBRAS_API_KEYS',           lbl:'Cerebras pool'},
+  {g:'Rotation Pools',icon:'🔄', k:'HUGGINGFACE_HUB_TOKENS',      lbl:'HF token pool'},
+
+  {g:'Model Lists',   icon:'📋', k:'OPENAI_MODELS',               lbl:'Visible OpenAI models'},
+  {g:'Model Lists',   icon:'📋', k:'ANTHROPIC_MODELS',            lbl:'Visible Anthropic models'},
+  {g:'Model Lists',   icon:'📋', k:'GEMINI_MODELS',               lbl:'Visible Gemini models'},
+  {g:'Model Lists',   icon:'📋', k:'OPENROUTER_MODELS',           lbl:'Visible OpenRouter models'},
+  {g:'Model Lists',   icon:'📋', k:'GROQ_MODELS',                 lbl:'Visible Groq models'},
+  {g:'Model Lists',   icon:'📋', k:'MISTRAL_MODELS',              lbl:'Visible Mistral models'},
+  {g:'Model Lists',   icon:'📋', k:'XAI_MODELS',                  lbl:'Visible xAI models'},
+
+  {g:'Custom Provider',icon:'🔌',k:'CUSTOM_PROVIDER_NAME',         lbl:'Provider display name'},
+  {g:'Custom Provider',icon:'🔌',k:'CUSTOM_BASE_URL',              lbl:'OpenAI-compatible base URL'},
+  {g:'Custom Provider',icon:'🔌',k:'CUSTOM_MODEL_ID',              lbl:'Model ID'},
+  {g:'Custom Provider',icon:'🔌',k:'CUSTOM_MODEL_NAME',            lbl:'Friendly model name'},
+  {g:'Custom Provider',icon:'🔌',k:'CUSTOM_API_KEY',               lbl:'Provider API key',          secret:1},
+  {g:'Custom Provider',icon:'🔌',k:'CUSTOM_API_TYPE',              lbl:'API type',                  ph:'openai-completions'},
+  {g:'Custom Provider',icon:'🔌',k:'CUSTOM_CONTEXT_WINDOW',        lbl:'Context window'},
+  {g:'Custom Provider',icon:'🔌',k:'CUSTOM_MAX_TOKENS',            lbl:'Max output tokens'},
+
+  {g:'Telegram',      icon:'✈️', k:'TELEGRAM_BOT_TOKEN',           lbl:'Bot token from BotFather', secret:1, common:1},
+  {g:'Telegram',      icon:'✈️', k:'TELEGRAM_ALLOWED_USERS',       lbl:'Allowed user IDs (comma)', ph:'123456789,987654321', common:1},
+
+  {g:'WhatsApp',      icon:'💬', k:'WHATSAPP_ENABLED',             lbl:'Enable WhatsApp pairing',  ph:'false', common:1},
+
+  {g:'Cloudflare',    icon:'☁️', k:'CLOUDFLARE_WORKERS_TOKEN',     lbl:'Workers API token',         secret:1, common:1},
+  {g:'Cloudflare',    icon:'☁️', k:'CLOUDFLARE_PROXY_URL',         lbl:'Proxy worker URL',          ph:'https://your-proxy.workers.dev', common:1},
+  {g:'Cloudflare',    icon:'☁️', k:'CLOUDFLARE_PROXY_SECRET',      lbl:'Proxy shared secret',       secret:1},
+  {g:'Cloudflare',    icon:'☁️', k:'CLOUDFLARE_PROXY_DOMAINS',     lbl:'Extra domains to proxy',    ph:'api.sendgrid.com,slack.com'},
+  {g:'Cloudflare',    icon:'☁️', k:'CLOUDFLARE_KEEPALIVE_ENABLED', lbl:'Enable keep-awake worker',  ph:'true'},
+
+  {g:'Backup',        icon:'💾', k:'HF_USERNAME',                  lbl:'Hugging Face username',     common:1},
+  {g:'Backup',        icon:'💾', k:'HF_TOKEN',                     lbl:'HF write token',            secret:1, common:1},
+  {g:'Backup',        icon:'💾', k:'BACKUP_DATASET_NAME',          lbl:'Backup dataset name',       ph:'huggingclaw-backup', common:1},
+  {g:'Backup',        icon:'💾', k:'SYNC_INTERVAL',                lbl:'Sync interval (seconds)',   ph:'180', common:1},
+
+  {g:'DevData',       icon:'🧪', k:'DEV_MODE',                     lbl:'Enable dev mode',           ph:'false', common:1},
+  {g:'DevData',       icon:'🧪', k:'HUGGINGCLAW_JUPYTER_ENABLED',  lbl:'Enable Jupyter terminal',   ph:'false', common:1},
+  {g:'DevData',       icon:'🧪', k:'JUPYTER_TOKEN',                lbl:'Jupyter access token',      secret:1, ph:'huggingface', common:1},
+  {g:'DevData',       icon:'🧪', k:'DEVDATA',                      lbl:'DevData switch',            ph:'on', common:1},
+  {g:'DevData',       icon:'🧪', k:'DEVDATA_DATASET_NAME',         lbl:'DevData dataset name',      ph:'huggingclaw-devdata', common:1},
+  {g:'DevData',       icon:'🧪', k:'DEVDATA_SYNC_INTERVAL',        lbl:'DevData sync (seconds)',    ph:'180'},
+
+  {g:'Runtime',       icon:'⚙️', k:'HUGGINGCLAW_APT_PACKAGES',     lbl:'APT packages to install'},
+  {g:'Runtime',       icon:'⚙️', k:'HUGGINGCLAW_PIP_PACKAGES',     lbl:'Pip packages to install'},
+  {g:'Runtime',       icon:'⚙️', k:'HUGGINGCLAW_NPM_PACKAGES',     lbl:'NPM packages to install'},
+  {g:'Runtime',       icon:'⚙️', k:'HUGGINGCLAW_RUN',              lbl:'Startup command (one-liner)'},
+  {g:'Runtime',       icon:'⚙️', k:'HUGGINGCLAW_STARTUP_COMMANDS', lbl:'Multiline startup commands'},
+];
+
+const ICONS = {
+  All:'🏠', Core:'⚡', 'Provider Keys':'🔑', 'Rotation Pools':'🔄',
+  'Model Lists':'📋', 'Custom Provider':'🔌', Telegram:'✈️', WhatsApp:'💬',
+  Cloudflare:'☁️', Backup:'💾', DevData:'🧪', Runtime:'⚙️', 'Custom Env':'🔧'
+};
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({
+  '&': '&amp;',
+  '<': '&lt;',
+  '>': '&gt;',
+  '"': '&quot;',
+  "'": '&#39;'
+}[c]));
+const safeKey = k => /^[A-Z_][A-Z0-9_]*$/.test(k) && !['HUGGINGCLAW_ENV_BUNDLE','ENV_BUNDLE'].includes(k);
+
+function encodeBundle(obj) {
+  const j = JSON.stringify(obj);
+  let b = '';
+  for (const x of new TextEncoder().encode(j)) b += String.fromCharCode(x);
+  return btoa(b).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+function decodeBundle(raw) {
+  try {
+    raw = String(raw || '').trim();
+    if (!raw) return {};
+
+    if (raw.includes('HUGGINGCLAW_ENV_BUNDLE=')) {
+      raw = raw.split('HUGGINGCLAW_ENV_BUNDLE=').pop().trim();
+    }
+
+    if (
+      (raw.startsWith('"') && raw.endsWith('"')) ||
+      (raw.startsWith("'") && raw.endsWith("'"))
+    ) {
+      raw = raw.slice(1, -1);
+    }
+
+    if (raw.startsWith('{')) return JSON.parse(raw);
+
+    const p = raw + '='.repeat((4 - raw.length % 4) % 4);
+    const b = atob(p.replace(/-/g, '+').replace(/_/g, '/'));
+    const bytes = Uint8Array.from(b, c => c.charCodeAt(0));
+    return JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    return {};
+  }
+}
+
+function parseEnv(text) {
+  text = String(text || '').trim();
+  if (!text) return {};
+
+  if (
+    text.startsWith('{') ||
+    /^[A-Za-z0-9_-]{20,}$/.test(text) ||
+    text.includes('HUGGINGCLAW_ENV_BUNDLE=')
+  ) {
+    return decodeBundle(text);
+  }
+
+  const out = {};
+  for (let line of text.split(/\r?\n/)) {
+    line = line.trim();
+    if (!line || line.startsWith('#')) continue;
+    if (line.startsWith('export ')) line = line.slice(7).trim();
+    const i = line.indexOf('=');
+    if (i < 1) continue;
+
+    const key = line.slice(0, i).trim();
+    let val = line.slice(i + 1).trim();
+
+    if (
+      (val.startsWith('"') && val.endsWith('"')) ||
+      (val.startsWith("'") && val.endsWith("'"))
+    ) {
+      val = val.slice(1, -1);
+    }
+
+    if (safeKey(key)) out[key] = val;
+  }
+  return out;
+}
+
+function showToast(msg = 'Copied!') {
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 1500);
+}
+
+let activeGroup = 'All';
+let customCount = 0;
+const GROUPS = ['All', ...[...new Set(FIELDS.map(f => f.g))], 'Custom Env'];
+
+function renderSidebar() {
+  const sb = $('sidebar');
+  sb.innerHTML = '<div class="sb-label">Groups</div>';
+  GROUPS.forEach(g => {
+    const btn = document.createElement('button');
+    btn.className = 'nav-btn' + (activeGroup === g ? ' active' : '');
+    btn.dataset.group = g;
+    const id = 'nc_' + g.replace(/\W/g, '_');
+    btn.innerHTML = `<span class="nav-icon">${ICONS[g] || '📁'}</span><span class="nav-label">${esc(g)}</span><span class="nav-count" id="${id}">0</span>`;
+    btn.onclick = () => {
+      activeGroup = g;
+      renderSidebar();
+      filter();
+    };
+    sb.appendChild(btn);
+  });
+}
+
+function renderSections() {
+  const grouped = {};
+  FIELDS.forEach(f => { (grouped[f.g] ||= []).push(f); });
+
+  const wrap = $('sections');
+  wrap.innerHTML = '';
+
+  Object.entries(grouped).forEach(([grp, items]) => {
+    const sec = document.createElement('div');
+    sec.className = 'sec';
+    sec.dataset.section = grp;
+    sec.innerHTML = `
+      <div class="sec-header">
+        <span class="sec-icon">${ICONS[grp] || '📁'}</span>
+        <span class="sec-title">${esc(grp)}</span>
+        <div class="sec-line"></div>
+      </div>
+      <div class="cards">${items.map(cardHTML).join('')}</div>
+    `;
+    wrap.appendChild(sec);
+  });
+
+  document.querySelectorAll('[data-check]').forEach(el =>
+    el.addEventListener('change', () => {
+      markSelected();
+      refresh();
+    })
+  );
+
+  document.querySelectorAll('[data-key]').forEach(el =>
+    el.addEventListener('input', refresh)
+  );
+}
+
+function cardHTML(f) {
+  const badge = f.secret
+    ? '<span class="badge badge-s">secret</span>'
+    : '<span class="badge badge-f">safe</span>';
+
+  return `<div class="env-card" data-row data-group="${esc(f.g)}" data-search="${esc((f.g + ' ' + f.k + ' ' + f.lbl).toLowerCase())}">
+    <div class="card-top">
+      <input type="checkbox" class="card-check" data-check="${esc(f.k)}" ${f.common ? 'data-common="1"' : ''}>
+      <div class="card-info">
+        <div class="card-key">${esc(f.k)}</div>
+        <div class="card-lbl">${esc(f.lbl || '')}</div>
+      </div>
+      ${badge}
+    </div>
+    <div class="card-input">
+      <textarea data-key="${esc(f.k)}" placeholder="${esc(f.ph || f.lbl || '')}" spellcheck="false"></textarea>
+    </div>
+  </div>`;
+}
+
+function addCustomRow(key = '', val = '', enabled = false) {
+  const id = customCount++;
+  const row = document.createElement('div');
+  row.className = 'custom-row';
+  row.dataset.customRow = id;
+  row.dataset.enabled = enabled ? '1' : '0';
+
+  row.innerHTML = `
+    <input data-ck="${id}" placeholder="CUSTOM_ENV_NAME" value="${esc(key)}">
+    <input data-cv="${id}" placeholder="value" value="${esc(val)}">
+    <button class="tog${enabled ? ' on' : ''}">${enabled ? 'On' : 'Off'}</button>
+  `;
+
+  $('customRows').appendChild(row);
+
+  row.querySelectorAll('input').forEach(el => el.addEventListener('input', refresh));
+  row.querySelector('button').onclick = () => {
+    const on = row.dataset.enabled !== '1';
+    row.dataset.enabled = on ? '1' : '0';
+    row.querySelector('button').textContent = on ? 'On' : 'Off';
+    row.querySelector('button').classList.toggle('on', on);
+    refresh();
+  };
+}
+
+function collect() {
+  const obj = {};
+
+  document.querySelectorAll('[data-check]').forEach(ch => {
+    const key = ch.dataset.check;
+    const val = (document.querySelector(`[data-key="${CSS.escape(key)}"]`)?.value || '').trim();
+    if (ch.checked && val && safeKey(key)) obj[key] = val;
+  });
+
+  document.querySelectorAll('[data-custom-row]').forEach(row => {
+    const id = row.dataset.customRow;
+    const key = (row.querySelector(`[data-ck="${id}"]`)?.value || '').trim();
+    const val = (row.querySelector(`[data-cv="${id}"]`)?.value || '').trim();
+    if (row.dataset.enabled === '1' && safeKey(key) && val) obj[key] = val;
+  });
+
+  return obj;
+}
+
+function refresh() {
+  const obj = collect();
+  const keys = Object.keys(obj).sort();
+  const bundle = keys.length ? encodeBundle(Object.fromEntries(keys.map(k => [k, obj[k]]))) : '';
+
+  $('bundleOut').value = bundle;
+  $('envLineOut').value = bundle ? `HUGGINGCLAW_ENV_BUNDLE=${bundle}` : '';
+
+  const s = $('summary');
+  if (keys.length) {
+    s.innerHTML = `<strong>${keys.length}</strong> variable${keys.length > 1 ? 's' : ''} selected<div class="sum-keys">${keys.map(k => `<span class="sum-key">${esc(k)}</span>`).join('')}</div>`;
+  } else {
+    s.innerHTML = 'No variables selected yet.';
+  }
+
+  updateCounts();
+}
+
+function markSelected() {
+  document.querySelectorAll('[data-row]').forEach(r =>
+    r.classList.toggle('selected', !!r.querySelector('[data-check]')?.checked)
+  );
+}
+
+function updateCounts() {
+  document.querySelectorAll('[id^="nc_"]').forEach(el => el.textContent = '0');
+
+  const byGrp = {};
+  document.querySelectorAll('[data-check]:checked').forEach(ch => {
+    const g = ch.closest('[data-row]')?.dataset.group;
+    if (g) byGrp[g] = (byGrp[g] || 0) + 1;
+  });
+
+  const custOn = document.querySelectorAll('[data-custom-row][data-enabled="1"]').length;
+  const total = Object.values(byGrp).reduce((a, b) => a + b, 0) + custOn;
+
+  const allEl = document.getElementById('nc_All');
+  if (allEl) allEl.textContent = total;
+
+  Object.entries(byGrp).forEach(([g, c]) => {
+    const el = document.getElementById('nc_' + g.replace(/\W/g, '_'));
+    if (el) el.textContent = c;
+  });
+
+  const custEl = document.getElementById('nc_Custom_Env');
+  if (custEl) custEl.textContent = custOn;
+}
+
+function filter() {
+  const q = $('search').value.trim().toLowerCase();
+
+  document.querySelectorAll('.sec[data-section]').forEach(sec => {
+    const grp = sec.dataset.section;
+    const gMatch = activeGroup === 'All' || activeGroup === grp;
+
+    if (!gMatch) {
+      sec.classList.add('sec-hidden');
+      return;
+    }
+
+    let any = false;
+    sec.querySelectorAll('[data-row]').forEach(card => {
+      const m = !q || card.dataset.search.includes(q);
+      card.classList.toggle('hidden', !m);
+      if (m) any = true;
+    });
+
+    sec.classList.toggle('sec-hidden', !any);
+  });
+
+  const cs = $('customSec');
+  if (cs) cs.style.display = (activeGroup === 'All' || activeGroup === 'Custom Env') ? '' : 'none';
+
+  document.querySelectorAll('.nav-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.group === activeGroup)
+  );
+}
+
+function clearForm() {
+  document.querySelectorAll('[data-check]').forEach(c => c.checked = false);
+  document.querySelectorAll('[data-key]').forEach(e => e.value = '');
+  $('customRows').innerHTML = '';
+  customCount = 0;
+  addCustomRow();
+}
+
+function applyObj(obj, replace = false) {
+  if (replace) clearForm();
+
+  for (const [key, val] of Object.entries(obj || {})) {
+    if (!safeKey(key)) continue;
+
+    const inp = document.querySelector(`[data-key="${CSS.escape(key)}"]`);
+    const chk = document.querySelector(`[data-check="${CSS.escape(key)}"]`);
+
+    if (inp && chk) {
+      inp.value = val;
+      chk.checked = true;
+    } else {
+      addCustomRow(key, val, true);
+    }
+  }
+
+  markSelected();
+  filter();
+  refresh();
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast('Copied ✓');
+  } catch {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    ta.remove();
+    showToast('Copied ✓');
+  }
+}
+
+// ── Init ──
+renderSidebar();
+renderSections();
+addCustomRow();
+filter();
+refresh();
+
+// ── Events ──
+$('search').oninput = filter;
+
+$('selectCommon').onclick = () => {
+  document.querySelectorAll('[data-common="1"]').forEach(c => c.checked = true);
+  markSelected();
+  refresh();
+};
+
+$('selectVisible').onclick = () => {
+  document
+    .querySelectorAll('.sec:not(.sec-hidden) [data-row]:not(.hidden) [data-check]')
+    .forEach(c => c.checked = true);
+  markSelected();
+  refresh();
+};
+
+$('clearAll').onclick = () => {
+  clearForm();
+  markSelected();
+  filter();
+  refresh();
+};
+
+$('applyImport').onclick = () => {
+  try {
+    applyObj(parseEnv($('importText').value), true);
+    showToast('Imported ✓');
+  } catch (e) {
+    showToast('Import failed');
+    alert(e.message);
+  }
+};
+
+$('addCustom').onclick = () => addCustomRow();
+
+$('applyBundle').onclick = () => {
+  try {
+    applyObj(decodeBundle($('bundleOut').value), true);
+    showToast('Bundle applied ✓');
+  } catch (e) {
+    showToast('Invalid bundle');
+  }
+};
+
+$('copyBundle').onclick = () => copyText($('bundleOut').value);
+$('copyEnvLine').onclick = () => copyText($('envLineOut').value);
+$('copyJson').onclick = () => copyText(JSON.stringify(collect(), null, 2));
+</script>
+</body>
+</html>
