@@ -42,8 +42,11 @@ case "$DEV_MODE_NORMALIZED" in
   true|1|yes|on) DEV_MODE_ENABLED=true ;;
   *) DEV_MODE_ENABLED=false ;;
 esac
-SYNC_INTERVAL="${SYNC_INTERVAL:-180}"
-DEVDATA_RAW="${DEVDATA:-on}"
+SYNC_INTERVAL="$(trim_var "${SYNC_INTERVAL:-180}")"
+BACKUP_DATASET_NAME="$(trim_var "${BACKUP_DATASET_NAME:-huggingclaw-backup}")"
+DEVDATA_DATASET_NAME="$(trim_var "${DEVDATA_DATASET_NAME:-huggingclaw-devdata}")"
+DEVDATA_SYNC_INTERVAL="$(trim_var "${DEVDATA_SYNC_INTERVAL:-180}")"
+DEVDATA_RAW="$(trim_var "${DEVDATA:-on}")"
 DEVDATA_NORMALIZED=$(printf '%s' "$DEVDATA_RAW" | tr '[:upper:]' '[:lower:]')
 DEVDATA_ENABLED=true
 case "$DEVDATA_NORMALIZED" in
@@ -1340,6 +1343,10 @@ start_background_devdata_sync() {
   fi
   if [ -z "${HF_TOKEN:-}" ]; then
     echo "DevData  : disabled (HF_TOKEN missing)"
+    return 0
+  fi
+  if [ "${DEVDATA_DATASET_NAME:-huggingclaw-devdata}" = "${BACKUP_DATASET_NAME:-huggingclaw-backup}" ]; then
+    echo "DevData  : disabled (DEVDATA_DATASET_NAME must be separate from BACKUP_DATASET_NAME)"
     return 0
   fi
   if [ ! -f "/home/node/app/jupyter-devdata-sync.py" ]; then

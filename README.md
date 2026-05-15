@@ -160,6 +160,8 @@ To use WhatsApp, enable the channel and scan the QR code from the Control UI (**
 | Variable | Default | Description |
 | :--- | :--- | :--- |
 | `WHATSAPP_ENABLED` | `false` | Enable WhatsApp pairing support |
+| `WS_MIN_PROTOCOL` | `1` | Minimum WhatsApp Web protocol version used by the pairing guardian |
+| `WS_MAX_PROTOCOL` | `5` | Maximum WhatsApp Web protocol version used by the pairing guardian |
 
 ## 💾 Workspace Backup *(Optional)*
 
@@ -190,10 +192,10 @@ Activation rules:
 | :--- | :--- | :--- |
 | `DEVDATA` | `on` | Enable/disable Jupyter devdata sync (`off`/`false` disables) |
 | `DEVDATA_DATASET_NAME` | `huggingclaw-devdata` | Separate HF dataset name for Jupyter dev data |
-| `DEVDATA_SYNC_INTERVAL` | `300` | Sync interval (seconds) for Jupyter devdata |
+| `DEVDATA_SYNC_INTERVAL` | `180` | Sync interval (seconds) for Jupyter devdata |
 
 Notes:
-- This is separate from `BACKUP_DATASET_NAME` (`huggingclaw-backup`).
+- This is separate from `BACKUP_DATASET_NAME` (`huggingclaw-backup`). DevData sync is disabled if both dataset names are set to the same value.
 - If `CLOUDFLARE_PROXY_URL` is missing/invalid, Telegram falls back to direct `https://api.telegram.org`.
 
 ## 📦 Ephemeral Package Re-install *(Optional)*
