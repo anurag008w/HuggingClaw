@@ -49,13 +49,10 @@ RUN apt-get update && apt-get install -y \
     xfonts-scalable \
     --no-install-recommends && \
     pip3 install --no-cache-dir --break-system-packages huggingface_hub && \
-    case "$(printf '%s' "${DEV_MODE}" | tr '[:upper:]' '[:lower:]')" in \
-      true|1|yes|on) \
-        pip3 install --no-cache-dir --break-system-packages \
-          jupyterlab==4.5.7 \
-          tornado==6.5.5 \
-          ipywidgets==8.1.8 ;; \
-    esac && \
+    pip3 install --no-cache-dir --break-system-packages \
+      jupyterlab==4.5.7 \
+      tornado==6.5.5 \
+      ipywidgets==8.1.8 && \
     rm -rf /var/lib/apt/lists/*
 
 # Reuse existing node user (UID 1000). Allow passwordless package-manager
