@@ -749,6 +749,9 @@ if [ -n "${CLOUDFLARE_PROXY_URL:-}" ]; then
   echo "Proxy     : ${CLOUDFLARE_PROXY_URL}"
 fi
 RUNTIME_JUPYTER_ENABLED="$DEV_MODE_ENABLED"
+# Add user bin to PATH for jupyter-lab
+export PATH="$HOME/.local/bin:$PATH"
+
 if [ "$DEV_MODE_ENABLED" = "true" ] && ! command -v jupyter-lab >/dev/null 2>&1; then
   echo "DEV_MODE enabled but jupyter-lab is missing; attempting runtime install..."
   if python3 -m pip install --user --no-cache-dir --break-system-packages jupyterlab==4.5.7 tornado==6.5.5 ipywidgets==8.1.8; then
@@ -856,7 +859,7 @@ start_jupyter_once() {
 
   echo "DEV_MODE enabled (${DEV_MODE_RAW}) — starting JupyterLab terminal on internal port 8888 (path: /terminal/) with root: $JUPYTER_ROOT_DIR"
   JUPYTER_LOG_FILE="/tmp/jupyterlab.log"
-  jupyter-lab \
+  python3 -m jupyterlab \
       --ip 127.0.0.1 \
       --port 8888 \
       --no-browser \
