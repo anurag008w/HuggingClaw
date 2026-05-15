@@ -8,6 +8,20 @@ umask 0077
 # ════════════════════════════════════════════════════════════════
 
 # ── Startup Banner ──
+trim_var() {
+  # Trim leading/trailing whitespace from a value.
+  printf '%s' "$1" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+# Normalize core env values so accidental surrounding spaces in HF Variables
+# do not block updates or cause stale comparisons/merges.
+LLM_MODEL="$(trim_var "${LLM_MODEL:-}")"
+GATEWAY_TOKEN="$(trim_var "${GATEWAY_TOKEN:-}")"
+SPACE_HOST="$(trim_var "${SPACE_HOST:-}")"
+OPENCLAW_PASSWORD="$(trim_var "${OPENCLAW_PASSWORD:-}")"
+LLM_API_KEY="$(trim_var "${LLM_API_KEY:-}")"
+CLOUDFLARE_PROXY_URL="$(trim_var "${CLOUDFLARE_PROXY_URL:-}")"
+
 OPENCLAW_VERSION="${OPENCLAW_VERSION:-latest}"
 OPENCLAW_APP_DIR="/home/node/.openclaw/openclaw-app"
 OPENCLAW_RUNTIME_VERSION=""
@@ -207,6 +221,11 @@ export NPM_CONFIG_PREFIX="${NPM_CONFIG_PREFIX:-/home/node/.local}"
 export npm_config_prefix="$NPM_CONFIG_PREFIX"
 export PYTHONUSERBASE="${PYTHONUSERBASE:-/home/node/.local}"
 export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
+# Show current working directory in terminal prompt (JupyterLab terminals can
+# otherwise display only "$" when PS1 is unset/minimal).
+if [ -z "${PS1:-}" ] || [ "$PS1" = "$ " ]; then
+  export PS1='\u@\h:\w\$ '
+fi
 STARTUP_FILE="/home/node/.openclaw/workspace/startup.sh"
 
 # ── Restore workspace/state from HF Dataset ──
@@ -519,6 +538,24 @@ if [ -n "${ALLOWED_ORIGINS:-}" ]; then
   CONFIG_JSON=$(echo "$CONFIG_JSON" | jq ".gateway.controlUi.allowedOrigins += $ORIGINS_JSON | .gateway.controlUi.allowedOrigins |= unique")
 fi
 
+resolve_telegram_api_root() {
+  local candidate="$(trim_var "${CLOUDFLARE_PROXY_URL:-}")"
+  if [ -n "$candidate" ]; then
+    case "$candidate" in
+      http://*|https://*)
+        printf '%s' "$candidate"
+        return 0
+        ;;
+      *)
+        echo "Warning: invalid CLOUDFLARE_PROXY_URL '$candidate' (must start with http:// or https://); falling back to direct Telegram API." >&2
+        ;;
+    esac
+  fi
+  printf '%s' "https://api.telegram.org"
+}
+TELEGRAM_API_ROOT="$(resolve_telegram_api_root)"
+
+
 # Telegram (supports multiple user IDs, comma-separated)
 if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
   CONFIG_JSON=$(echo "$CONFIG_JSON" | jq '.plugins.entries.telegram = {"enabled": true}')
@@ -531,12 +568,12 @@ if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
   # Force ipv4 for Telegram specifically as HF IPv6 often times out
   export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--dns-result-order=ipv4first"
   
-  CONFIG_JSON=$(echo "$CONFIG_JSON" | jq --arg token "$CLEAN_TG_TOKEN" --arg proxy_url "${CLOUDFLARE_PROXY_URL:-}" '
+  CONFIG_JSON=$(echo "$CONFIG_JSON" | jq --arg token "$CLEAN_TG_TOKEN" --arg proxy_url "$TELEGRAM_API_ROOT" '
     .channels.telegram.enabled = true
     | .channels.telegram.botToken = $token
     | .channels.telegram.commands.native = false
     | .channels.telegram.timeoutSeconds = 60
-    | (if $proxy_url != "" then .channels.telegram.apiRoot = $proxy_url else .channels.telegram.apiRoot = "https://api.telegram.org" end)
+    | (if $proxy_url != "" then .channels.telegram.apiRoot = $proxy_url else . end)
     | .channels.telegram.retry = {
         "attempts": 5,
         "minDelayMs": 800,
@@ -600,7 +637,7 @@ if [ -f "$EXISTING_CONFIG" ]; then
      | .channels = ((.channels // {}) * ($desired.channels // {}))
      | .plugins.allow = (((.plugins.allow // []) + ($desired.plugins.allow // [])) | unique)
      | .plugins.deny = (((.plugins.deny // []) + ($desired.plugins.deny // [])) | unique)
-     | .plugins.entries = (($desired.plugins.entries // {}) * (.plugins.entries // {}))
+     | .plugins.entries = ((.plugins.entries // {}) * ($desired.plugins.entries // {}))
      | if $whatsappEnabled then
          ($desired.channels.whatsapp // {"dmPolicy": "pairing"}) as $desiredWhatsapp
          | .plugins.entries.whatsapp.enabled = true
@@ -761,6 +798,7 @@ if [ "$RUNTIME_JUPYTER_ENABLED" = "true" ]; then
       --IdentityProvider.token="$JUPYTER_TOKEN" \
       --ServerApp.base_url=/terminal/ \
       --ServerApp.terminals_enabled=True \
+      --ServerApp.terminado_settings='{"shell_command":["/bin/bash","-i"]}' \
       --ServerApp.allow_origin='*' \
       --ServerApp.allow_remote_access=True \
       --ServerApp.trust_xheaders=True \
@@ -796,6 +834,9 @@ export NPM_CONFIG_PREFIX="${NPM_CONFIG_PREFIX:-/home/node/.local}"
 export npm_config_prefix="$NPM_CONFIG_PREFIX"
 export PYTHONUSERBASE="${PYTHONUSERBASE:-/home/node/.local}"
 export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
+if [ -z "${PS1:-}" ] || [ "$PS1" = "$ " ]; then
+  export PS1="\u@\h:\w\$ "
+fi
 STARTUP_FILE="/home/node/.openclaw/workspace/startup.sh"
 _hc_append() {
   if [ "${HUGGINGCLAW_CAPTURE_DISABLE:-0}" = "1" ]; then
@@ -1014,7 +1055,7 @@ openclaw() {
 }
 BASHRC
 cat > /home/node/.profile <<'PROFILE'
-[ -f ~/.bashrc ] && . ~/.bashrc
+[ -n "${BASH_VERSION:-}" ] && [ -f ~/.bashrc ] && . ~/.bashrc
 PROFILE
 echo "Shell capture wrappers ready."
 
