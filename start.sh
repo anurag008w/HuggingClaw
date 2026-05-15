@@ -829,9 +829,12 @@ export LLM_MODEL="$LLM_MODEL"
 node /home/node/app/health-server.js &
 HEALTH_PID=$!
 
-# 10.5. Start JupyterLab Terminal on internal port 8888 (DEV_MODE only)
-# Accessible via /terminal/ path through the health-server proxy
-if [ "$RUNTIME_JUPYTER_ENABLED" = "true" ]; then
+start_jupyter_once() {
+  [ "$RUNTIME_JUPYTER_ENABLED" = "true" ] || return 0
+  if [ -n "${JUPYTER_PID:-}" ] && kill -0 "$JUPYTER_PID" 2>/dev/null; then
+    return 0
+  fi
+
   JUPYTER_TOKEN="${JUPYTER_TOKEN:-huggingface}"
   JUPYTER_ROOT_DIR="${JUPYTER_ROOT_DIR:-/home/node}"
   if [ "$JUPYTER_ROOT_DIR" = "/home/node/.openclaw/workspace" ] && [ "$DEVDATA_ENABLED" = "true" ]; then
@@ -852,6 +855,7 @@ if [ "$RUNTIME_JUPYTER_ENABLED" = "true" ]; then
   fi
 
   echo "DEV_MODE enabled (${DEV_MODE_RAW}) — starting JupyterLab terminal on internal port 8888 (path: /terminal/) with root: $JUPYTER_ROOT_DIR"
+  JUPYTER_LOG_FILE="/tmp/jupyterlab.log"
   jupyter-lab \
       --ip 127.0.0.1 \
       --port 8888 \
@@ -869,9 +873,15 @@ if [ "$RUNTIME_JUPYTER_ENABLED" = "true" ]; then
       --LabApp.news_url=None \
       --LabApp.check_for_updates_class="jupyterlab.NeverCheckForUpdate" \
       --notebook-dir="$JUPYTER_ROOT_DIR" \
-      2>&1 | tee -a /tmp/jupyterlab.log &
+      >> "$JUPYTER_LOG_FILE" 2>&1 &
   JUPYTER_PID=$!
   echo "JupyterLab started (PID: $JUPYTER_PID)"
+}
+
+# 10.5. Start JupyterLab Terminal on internal port 8888 (DEV_MODE only)
+# Accessible via /terminal/ path through the health-server proxy
+if [ "$RUNTIME_JUPYTER_ENABLED" = "true" ]; then
+  start_jupyter_once
 else
   echo "Jupyter terminal disabled for this boot (DEV_MODE=${DEV_MODE_RAW})."
 fi
@@ -1406,7 +1416,7 @@ start_background_devdata_sync() {
     return 0
   fi
   echo "DevData  : enabled (dataset=${DEVDATA_DATASET_NAME:-huggingclaw-devdata})"
-  python3 -u /home/node/app/jupyter-devdata-sync.py &
+  python3 -u /home/node/app/jupyter-devdata-sync.py >> /tmp/devdata-sync.log 2>&1 &
   DEVDATA_SYNC_PID=$!
 }
 
@@ -1417,7 +1427,7 @@ start_background_sync_once() {
     return 0
   fi
 
-  python3 -u /home/node/app/openclaw-sync.py loop &
+  python3 -u /home/node/app/openclaw-sync.py loop >> /tmp/workspace-sync.log 2>&1 &
   SYNC_LOOP_PID=$!
 }
 
@@ -1434,6 +1444,11 @@ start_guardian_once() {
 }
 
 while true; do
+  if [ "$RUNTIME_JUPYTER_ENABLED" = "true" ] && [ -n "${JUPYTER_PID:-}" ] && ! kill -0 "$JUPYTER_PID" 2>/dev/null; then
+    echo "Warning: JupyterLab exited; attempting restart."
+    start_jupyter_once
+  fi
+
   echo "Launching OpenClaw gateway on port 7860..."
 
   GATEWAY_ARGS=(gateway run --port 7860 --bind lan)
