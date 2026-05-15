@@ -143,7 +143,13 @@ async function callRpc(ws, method, params) {
       }
     };
     ws.on("message", handler);
-    ws.send(JSON.stringify({ type: "req", id, method, params }));
+    try {
+      ws.send(JSON.stringify({ type: "req", id, method, params }));
+    } catch (sendErr) {
+      ws.removeListener("message", handler);
+      reject(sendErr);
+      return;
+    }
     setTimeout(() => { ws.removeListener("message", handler); reject(new Error("RPC Timeout")); }, WAIT_TIMEOUT + 5000);
   });
 }
@@ -248,6 +254,13 @@ if (!WHATSAPP_ENABLED) {
   writeStatus({ configured: false, connected: false, pairing: false });
   process.exit(0);
 }
+
+process.on("unhandledRejection", (reason) => {
+  const msg = reason && reason.message ? reason.message : String(reason);
+  if (!/RPC Timeout|Timeout/i.test(msg)) {
+    console.log(`[guardian] Unhandled rejection: ${msg}`);
+  }
+});
 
 writeStatus({ configured: true, connected: false, pairing: false });
 console.log("[guardian] WhatsApp Guardian active. Monitoring pairing status...");
