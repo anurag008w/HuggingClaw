@@ -48,6 +48,19 @@ def enabled():
         print("DevData sync disabled: DEVDATA_DATASET_NAME must be separate from BACKUP_DATASET_NAME.")
     return ENABLE and dev and bool(HF_TOKEN) and separate_dataset
 
+def validate_jupyter_paths() -> None:
+    # JupyterLab theme/settings live under ~/.jupyter and ~/.local/share/jupyter.
+    # If these are not writable, settings can appear to "reset" every restart.
+    for required in (JUPYTER_ROOT, Path("/home/node/.jupyter"), Path("/home/node/.local/share/jupyter")):
+        try:
+            required.mkdir(parents=True, exist_ok=True)
+            probe = required / ".devdata-write-check"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink(missing_ok=True)
+        except Exception as exc:
+            kind = classify_error(exc)
+            print(f"DevData warning [{kind}]: {required} is not writable; Jupyter settings may not persist ({exc})")
+
 def repo_id(api) -> str:
     ns = HF_USERNAME
     if not ns:
@@ -134,5 +147,6 @@ if __name__ == "__main__":
         api.repo_info(repo_id=rid, repo_type="dataset")
     except RepositoryNotFoundError:
         api.create_repo(repo_id=rid, repo_type="dataset", private=True)
+    validate_jupyter_paths()
     restore_once(api, rid)
     sync_loop(api, rid)
