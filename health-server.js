@@ -302,7 +302,7 @@ const server = http.createServer(async (req, res) => {
   if (pathname === "/status") {
     const [gatewayReady, jupyterReady] = await Promise.all([
       probePort(GATEWAY_HOST, GATEWAY_PORT, "/health"),
-      JUPYTER_ENABLED ? probePort(JUPYTER_HOST, JUPYTER_PORT, `${JUPYTER_BASE}/api/status`) : Promise.resolve(false),
+      JUPYTER_ENABLED ? probePort(JUPYTER_HOST, JUPYTER_PORT, `${JUPYTER_BASE}/login`) : Promise.resolve(false),
     ]);
     res.writeHead(200, { "Content-Type": "application/json" });
     return res.end(JSON.stringify({ model: LLM_MODEL, uptime: formatUptime(Date.now() - startTime), gatewayReady, jupyterReady, sync: getSyncStatus(), whatsapp: readGuardianStatus(), keepalive: getKeepaliveStatus() }));
@@ -316,7 +316,7 @@ const server = http.createServer(async (req, res) => {
   if (pathname === "/" || pathname === "/dashboard") {
     const [gatewayReady, jupyterReady] = await Promise.all([
       probePort(GATEWAY_HOST, GATEWAY_PORT, "/health"),
-      JUPYTER_ENABLED ? probePort(JUPYTER_HOST, JUPYTER_PORT, `${JUPYTER_BASE}/api/status`) : Promise.resolve(false),
+      JUPYTER_ENABLED ? probePort(JUPYTER_HOST, JUPYTER_PORT, `${JUPYTER_BASE}/login`) : Promise.resolve(false),
     ]);
     res.writeHead(200, { "Content-Type": "text/html" });
     return res.end(renderDashboard({ uptimeHuman: formatUptime(Date.now() - startTime), gatewayReady, jupyterReady, sync: getSyncStatus(), whatsapp: readGuardianStatus(), keepalive: getKeepaliveStatus() }));
