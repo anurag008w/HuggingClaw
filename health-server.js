@@ -19,7 +19,12 @@ const TELEGRAM_ENABLED = !!process.env.TELEGRAM_BOT_TOKEN;
 const WHATSAPP_ENABLED = /^true$/i.test(process.env.WHATSAPP_ENABLED || "");
 const WHATSAPP_STATUS_FILE = "/tmp/huggingclaw-wa-status.json";
 const HF_BACKUP_ENABLED = !!process.env.HF_TOKEN;
-const SYNC_INTERVAL = process.env.SYNC_INTERVAL || "180";
+const SYNC_INTERVAL = (process.env.SYNC_INTERVAL || "180").trim() || "180";
+const BACKUP_DATASET_NAME = (process.env.BACKUP_DATASET_NAME || "huggingclaw-backup").trim() || "huggingclaw-backup";
+const DEVDATA_DATASET_NAME = (process.env.DEVDATA_DATASET_NAME || "huggingclaw-devdata").trim() || "huggingclaw-devdata";
+const DEVDATA_SYNC_INTERVAL = (process.env.DEVDATA_SYNC_INTERVAL || "180").trim() || "180";
+const DEVDATA_SEPARATE_DATASET = DEVDATA_DATASET_NAME !== BACKUP_DATASET_NAME;
+const DEVDATA_ENABLED = JUPYTER_ENABLED && HF_BACKUP_ENABLED && DEVDATA_SEPARATE_DATASET && !/^(off|false|0|no)$/i.test((process.env.DEVDATA || "on").trim());
 const APP_BASE = "/app";
 const SYNC_STATUS_FILE = "/tmp/sync-status.json";
 const CLOUDFLARE_KEEPALIVE_STATUS_FILE =
@@ -113,6 +118,13 @@ function renderDashboard(data) {
 
   if (JUPYTER_ENABLED) {
     tiles.push(tile({ title: "Terminal", value: badge(data.jupyterReady ? "Online" : "Starting…", data.jupyterReady ? "ok" : "warn"), detail: `JupyterLab at <a href="${JUPYTER_BASE}/" style="color:inherit">${JUPYTER_BASE}/</a>`, tone: data.jupyterReady ? "ok" : "warn" }));
+    tiles.push(tile({
+      title: "DevData",
+      value: badge(DEVDATA_ENABLED ? "Enabled" : "Disabled", DEVDATA_ENABLED ? "ok" : "neutral"),
+      detail: DEVDATA_ENABLED ? `Separate dataset <code>${escapeHtml(DEVDATA_DATASET_NAME)}</code>` : DEVDATA_SEPARATE_DATASET ? "Separate Jupyter dataset backup inactive" : "DevData dataset must be separate from main backup dataset",
+      tone: DEVDATA_ENABLED ? "ok" : "neutral",
+      meta: `Sync interval ${escapeHtml(DEVDATA_SYNC_INTERVAL)}s`,
+    }));
   }
 
   const tilesHtml = tiles.join("");
