@@ -749,10 +749,10 @@ if [ -n "${CLOUDFLARE_PROXY_URL:-}" ]; then
   echo "Proxy     : ${CLOUDFLARE_PROXY_URL}"
 fi
 RUNTIME_JUPYTER_ENABLED="$DEV_MODE_ENABLED"
-# Add user bin to PATH for jupyter-lab (installed in Dockerfile build)
+# Add user bin to PATH for jupyter-lab (installed in Dockerfile when DEV_MODE=true)
 export PATH="$HOME/.local/bin:$PATH"
 
-# Skip runtime install since jupyter is installed during build
+# Runtime install fallback: only attempt if DEV_MODE is enabled but install failed during build
 if [ "$DEV_MODE_ENABLED" = "true" ] && ! python3 -c "import jupyterlab" >/dev/null 2>&1; then
   echo "DEV_MODE enabled but jupyter-lab is missing; attempting runtime install..."
   if python3 -m pip install --user --no-cache-dir --break-system-packages jupyterlab==4.5.7 tornado==6.5.5 ipywidgets==8.1.8; then
