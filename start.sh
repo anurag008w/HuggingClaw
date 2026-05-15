@@ -814,6 +814,9 @@ export NPM_CONFIG_PREFIX="${NPM_CONFIG_PREFIX:-/home/node/.local}"
 export npm_config_prefix="$NPM_CONFIG_PREFIX"
 export PYTHONUSERBASE="${PYTHONUSERBASE:-/home/node/.local}"
 export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
+if [ -z "${PS1:-}" ] || [ "$PS1" = "$ " ]; then
+  export PS1="\u@\h:\w\$ "
+fi
 STARTUP_FILE="/home/node/.openclaw/workspace/startup.sh"
 _hc_append() {
   if [ "${HUGGINGCLAW_CAPTURE_DISABLE:-0}" = "1" ]; then
