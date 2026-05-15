@@ -658,7 +658,7 @@ fi
 RUNTIME_JUPYTER_ENABLED="$DEV_MODE_ENABLED"
 if [ "$DEV_MODE_ENABLED" = "true" ] && ! command -v jupyter-lab >/dev/null 2>&1; then
   echo "DEV_MODE enabled but jupyter-lab is missing; attempting runtime install..."
-  if python3 -m pip install --user --no-cache-dir jupyterlab==4.5.7 tornado==6.5.5 ipywidgets==8.1.8; then
+  if python3 -m pip install --user --no-cache-dir --break-system-packages jupyterlab==4.5.7 tornado==6.5.5 ipywidgets==8.1.8; then
     echo "Runtime Jupyter install complete."
   else
     echo "WARNING: Runtime Jupyter install failed; disabling terminal for this boot."
