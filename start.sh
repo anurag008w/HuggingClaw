@@ -655,9 +655,25 @@ fi
 if [ -n "${CLOUDFLARE_PROXY_URL:-}" ]; then
   echo "Proxy     : ${CLOUDFLARE_PROXY_URL}"
 fi
+RUNTIME_JUPYTER_ENABLED="$DEV_MODE_ENABLED"
+if [ "$DEV_MODE_ENABLED" = "true" ] && ! command -v jupyter-lab >/dev/null 2>&1; then
+  echo "DEV_MODE enabled but jupyter-lab is missing; attempting runtime install..."
+  if python3 -m pip install --user --no-cache-dir jupyterlab==4.5.7 tornado==6.5.5 ipywidgets==8.1.8; then
+    echo "Runtime Jupyter install complete."
+  else
+    echo "WARNING: Runtime Jupyter install failed; disabling terminal for this boot."
+    RUNTIME_JUPYTER_ENABLED=false
+  fi
+fi
+if [ "$RUNTIME_JUPYTER_ENABLED" = "true" ] && ! command -v jupyter-lab >/dev/null 2>&1; then
+  echo "WARNING: jupyter-lab still unavailable; disabling terminal for this boot."
+  RUNTIME_JUPYTER_ENABLED=false
+fi
+export HUGGINGCLAW_JUPYTER_ENABLED="$RUNTIME_JUPYTER_ENABLED"
+
 if [ -n "${SPACE_HOST:-}" ]; then
-  if [ "$DEV_MODE_ENABLED" = "true" ]; then
-    echo "Routes    : /app/ (Control UI), /terminal/ (JupyterLab token: ${JUPYTER_TOKEN:-huggingface})"
+  if [ "$RUNTIME_JUPYTER_ENABLED" = "true" ]; then
+    echo "Routes    : /app/ (Control UI), /terminal/ (JupyterLab)"
   else
     echo "Routes    : /app/ (Control UI)"
   fi
@@ -722,7 +738,7 @@ HEALTH_PID=$!
 
 # 10.5. Start JupyterLab Terminal on internal port 8888 (DEV_MODE only)
 # Accessible via /terminal/ path through the health-server proxy
-if [ "$DEV_MODE_ENABLED" = "true" ]; then
+if [ "$RUNTIME_JUPYTER_ENABLED" = "true" ]; then
   JUPYTER_TOKEN="${JUPYTER_TOKEN:-huggingface}"
   JUPYTER_ROOT_DIR="${JUPYTER_ROOT_DIR:-/home/node}"
   mkdir -p "$JUPYTER_ROOT_DIR"
@@ -753,9 +769,9 @@ if [ "$DEV_MODE_ENABLED" = "true" ]; then
       --notebook-dir="$JUPYTER_ROOT_DIR" \
       2>&1 | tee -a /tmp/jupyterlab.log &
   JUPYTER_PID=$!
-  echo "JupyterLab started (PID: $JUPYTER_PID) — token: ${JUPYTER_TOKEN}"
+  echo "JupyterLab started (PID: $JUPYTER_PID)"
 else
-  echo "DEV_MODE disabled (${DEV_MODE_RAW}) — skipping JupyterLab terminal setup."
+  echo "Jupyter terminal disabled for this boot (DEV_MODE=${DEV_MODE_RAW})."
 fi
 
 if [ -n "${CLOUDFLARE_WORKERS_TOKEN:-}" ]; then

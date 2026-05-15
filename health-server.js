@@ -10,6 +10,9 @@ const JUPYTER_PORT = 8888;
 const JUPYTER_HOST = "127.0.0.1";
 const JUPYTER_BASE = "/terminal";
 const DEV_MODE_ENABLED = /^(true|1|yes|on)$/i.test(process.env.DEV_MODE || "");
+const JUPYTER_ENABLED = /^(true|1|yes|on)$/i.test(
+  process.env.HUGGINGCLAW_JUPYTER_ENABLED || (DEV_MODE_ENABLED ? "true" : "false")
+);
 const startTime = Date.now();
 const LLM_MODEL = process.env.LLM_MODEL || "Not Set";
 const TELEGRAM_ENABLED = !!process.env.TELEGRAM_BOT_TOKEN;
@@ -108,7 +111,7 @@ function renderDashboard(data) {
     tile({ title: "Keep Awake", value: badge(kaConf ? "CF Cron" : kaStatus.toUpperCase(), kaTone), detail: kaConf ? `Pinging <code>${escapeHtml(data.keepalive?.targetUrl || "/health")}</code>` : process.env.CLOUDFLARE_WORKERS_TOKEN ? "Worker pending or failed" : "Not configured", tone: kaTone }),
   ];
 
-  if (DEV_MODE_ENABLED) {
+  if (JUPYTER_ENABLED) {
     tiles.push(tile({ title: "Terminal", value: badge(data.jupyterReady ? "Online" : "Starting…", data.jupyterReady ? "ok" : "warn"), detail: `JupyterLab at <a href="${JUPYTER_BASE}/" style="color:inherit">${JUPYTER_BASE}/</a>`, tone: data.jupyterReady ? "ok" : "warn" }));
   }
 
@@ -147,10 +150,10 @@ function renderDashboard(data) {
   <header><h1>🦞 HuggingClaw</h1><div class="subtitle">OpenClaw Gateway</div></header>
   <div class="btn-row">
     <a class="hero-action" href="${APP_BASE}/">Open Control UI →</a>
-    ${DEV_MODE_ENABLED ? `<a class="hero-action terminal" href="${JUPYTER_BASE}/">💻 Open Terminal →</a>` : ""}
+    ${JUPYTER_ENABLED ? `<a class="hero-action terminal" href="${JUPYTER_BASE}/">💻 Open Terminal →</a>` : ""}
   </div>
   <section class="overview">${tilesHtml}</section>
-  <footer>Built by <a href="https://github.com/somratpro" target="_blank" rel="noopener noreferrer" style="color:inherit;text-decoration:none">@somratpro</a>${DEV_MODE_ENABLED ? " · Terminal by JupyterLab" : ""}<br><span>Private HF Spaces: use these in-frame buttons instead of opening raw <code>.hf.space</code> URLs in a new tab.</span></footer>
+  <footer>Built by <a href="https://github.com/somratpro" target="_blank" rel="noopener noreferrer" style="color:inherit;text-decoration:none">@somratpro</a>${JUPYTER_ENABLED ? " · Terminal by JupyterLab" : ""}<br><span>Public Spaces can be opened directly via <code>.hf.space</code>; private Spaces require the App tab session.</span></footer>
   </main>
   <script>document.querySelectorAll('.local-time').forEach(el=>{const d=new Date(el.getAttribute('data-iso'));if(!isNaN(d))el.textContent='At '+d.toLocaleTimeString()});</script>
 </body></html>`;
@@ -252,7 +255,7 @@ const server = http.createServer(async (req, res) => {
   if (pathname === "/status") {
     const [gatewayReady, jupyterReady] = await Promise.all([
       probePort(GATEWAY_HOST, GATEWAY_PORT, "/health"),
-      DEV_MODE_ENABLED ? probePort(JUPYTER_HOST, JUPYTER_PORT, `${JUPYTER_BASE}/api`) : Promise.resolve(false),
+      JUPYTER_ENABLED ? probePort(JUPYTER_HOST, JUPYTER_PORT, `${JUPYTER_BASE}/api`) : Promise.resolve(false),
     ]);
     res.writeHead(200, { "Content-Type": "application/json" });
     return res.end(JSON.stringify({ model: LLM_MODEL, uptime: formatUptime(Date.now() - startTime), gatewayReady, jupyterReady, sync: getSyncStatus(), whatsapp: readGuardianStatus(), keepalive: getKeepaliveStatus() }));
@@ -261,7 +264,7 @@ const server = http.createServer(async (req, res) => {
   if (pathname === "/" || pathname === "/dashboard") {
     const [gatewayReady, jupyterReady] = await Promise.all([
       probePort(GATEWAY_HOST, GATEWAY_PORT, "/health"),
-      DEV_MODE_ENABLED ? probePort(JUPYTER_HOST, JUPYTER_PORT, `${JUPYTER_BASE}/api`) : Promise.resolve(false),
+      JUPYTER_ENABLED ? probePort(JUPYTER_HOST, JUPYTER_PORT, `${JUPYTER_BASE}/api`) : Promise.resolve(false),
     ]);
     res.writeHead(200, { "Content-Type": "text/html" });
     return res.end(renderDashboard({ uptimeHuman: formatUptime(Date.now() - startTime), gatewayReady, jupyterReady, sync: getSyncStatus(), whatsapp: readGuardianStatus(), keepalive: getKeepaliveStatus() }));
@@ -269,7 +272,7 @@ const server = http.createServer(async (req, res) => {
 
   // JupyterLab terminal
   if (pathname === JUPYTER_BASE || pathname.startsWith(JUPYTER_BASE + "/")) {
-    if (!DEV_MODE_ENABLED) {
+    if (!JUPYTER_ENABLED) {
       res.writeHead(404, { "Content-Type": "application/json" });
       return res.end(JSON.stringify({ status: "disabled", message: "JupyterLab terminal is disabled. Set DEV_MODE=true to enable /terminal/." }));
     }
@@ -297,7 +300,7 @@ const server = http.createServer(async (req, res) => {
 // ── WebSocket upgrade (JupyterLab kernels + terminals need this) ──
 server.on("upgrade", (req, socket, head) => {
   const { pathname, search } = parseRequestUrl(req.url);
-  const isJupyter = DEV_MODE_ENABLED && (pathname === JUPYTER_BASE || pathname.startsWith(JUPYTER_BASE + "/"));
+  const isJupyter = JUPYTER_ENABLED && (pathname === JUPYTER_BASE || pathname.startsWith(JUPYTER_BASE + "/"));
   const isApp = pathname === APP_BASE || pathname.startsWith(APP_BASE + "/");
   const [targetHost, targetPort] = isJupyter ? [JUPYTER_HOST, JUPYTER_PORT] : [GATEWAY_HOST, GATEWAY_PORT];
   const publicPrefix = isJupyter ? JUPYTER_BASE : isApp ? APP_BASE : "";
@@ -326,5 +329,5 @@ server.on("upgrade", (req, socket, head) => {
 server.timeout = 0;
 server.keepAliveTimeout = 65000;
 server.listen(PORT, "0.0.0.0", () =>
-  console.log(`🦞 HuggingClaw :${PORT} → Gateway :${GATEWAY_PORT}${DEV_MODE_ENABLED ? ` | Terminal :${JUPYTER_PORT} at ${JUPYTER_BASE}/` : " | Terminal disabled (DEV_MODE=false)"}`),
+  console.log(`🦞 HuggingClaw :${PORT} → Gateway :${GATEWAY_PORT}${JUPYTER_ENABLED ? ` | Terminal :${JUPYTER_PORT} at ${JUPYTER_BASE}/` : " | Terminal disabled"}`),
 );
