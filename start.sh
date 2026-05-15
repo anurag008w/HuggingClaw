@@ -890,6 +890,21 @@ start_jupyter_once() {
   echo "JupyterLab started (PID: $JUPYTER_PID)"
 }
 
+# BUG FIX #3: DevData restore must happen BEFORE JupyterLab starts.
+# The background jupyter-devdata-sync.py process is only launched AFTER the
+# gateway is ready (20-90 s from now). If restore ran there, JupyterLab would
+# already be live and the file writes would corrupt its runtime state → crash.
+# Running --restore here (synchronous, before JupyterLab) solves that.
+if [ "$RUNTIME_JUPYTER_ENABLED" = "true" ] && \
+   [ "$DEVDATA_ENABLED" = "true" ] && \
+   [ -n "${HF_TOKEN:-}" ] && \
+   [ -f "/home/node/app/jupyter-devdata-sync.py" ] && \
+   [ "${DEVDATA_DATASET_NAME:-huggingclaw-devdata}" != "${BACKUP_DATASET_NAME:-huggingclaw-backup}" ]; then
+  echo "DevData  : restoring workspace from ${DEVDATA_DATASET_NAME:-huggingclaw-devdata} (before JupyterLab starts)..."
+  python3 /home/node/app/jupyter-devdata-sync.py --restore || \
+    echo "DevData  : restore warning (non-fatal); continuing startup."
+fi
+
 # 10.5. Start JupyterLab Terminal on internal port 8888 (DEV_MODE only)
 # Accessible via /terminal/ path through the health-server proxy
 if [ "$RUNTIME_JUPYTER_ENABLED" = "true" ]; then
@@ -1456,6 +1471,13 @@ start_background_devdata_sync() {
   fi
   if [ ! -f "/home/node/app/jupyter-devdata-sync.py" ]; then
     echo "DevData  : script missing; skipped"
+    return 0
+  fi
+  # BUG FIX #1: Guard against spawning a second devdata-sync process on every
+  # gateway restart. Without this check, each restart launched a fresh
+  # jupyter-devdata-sync.py which called restore_once() while JupyterLab was
+  # already running, corrupting its runtime state and killing it.
+  if [ -n "${DEVDATA_SYNC_PID:-}" ] && kill -0 "$DEVDATA_SYNC_PID" 2>/dev/null; then
     return 0
   fi
   echo "DevData  : enabled (dataset=${DEVDATA_DATASET_NAME:-huggingclaw-devdata})"
