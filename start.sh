@@ -749,10 +749,11 @@ if [ -n "${CLOUDFLARE_PROXY_URL:-}" ]; then
   echo "Proxy     : ${CLOUDFLARE_PROXY_URL}"
 fi
 RUNTIME_JUPYTER_ENABLED="$DEV_MODE_ENABLED"
-# Add user bin to PATH for jupyter-lab
+# Add user bin to PATH for jupyter-lab (installed in Dockerfile build)
 export PATH="$HOME/.local/bin:$PATH"
 
-if [ "$DEV_MODE_ENABLED" = "true" ] && ! command -v jupyter-lab >/dev/null 2>&1; then
+# Skip runtime install since jupyter is installed during build
+if [ "$DEV_MODE_ENABLED" = "true" ] && ! python3 -c "import jupyterlab" >/dev/null 2>&1; then
   echo "DEV_MODE enabled but jupyter-lab is missing; attempting runtime install..."
   if python3 -m pip install --user --no-cache-dir --break-system-packages jupyterlab==4.5.7 tornado==6.5.5 ipywidgets==8.1.8; then
     echo "Runtime Jupyter install complete."
@@ -761,7 +762,7 @@ if [ "$DEV_MODE_ENABLED" = "true" ] && ! command -v jupyter-lab >/dev/null 2>&1;
     RUNTIME_JUPYTER_ENABLED=false
   fi
 fi
-if [ "$RUNTIME_JUPYTER_ENABLED" = "true" ] && ! command -v jupyter-lab >/dev/null 2>&1; then
+if [ "$RUNTIME_JUPYTER_ENABLED" = "true" ] && ! python3 -c "import jupyterlab" >/dev/null 2>&1; then
   echo "WARNING: jupyter-lab still unavailable; disabling terminal for this boot."
   RUNTIME_JUPYTER_ENABLED=false
 fi
