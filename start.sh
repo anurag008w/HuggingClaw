@@ -1078,7 +1078,10 @@ pip() {
     command pip "$@"
   fi
   local rc=$?
-  if [ $rc -eq 0 ] && [ "${1:-}" = "install" ] && _hc_has_install_targets "${@:2}"; then
+  # Skip capture when -r/--requirement is used: the requirements file won't exist on next boot
+  if [ $rc -eq 0 ] && [ "${1:-}" = "install" ] \
+      && ! _hc_has_arg -r "${@:2}" && ! _hc_has_arg --requirement "${@:2}" \
+      && _hc_has_install_targets "${@:2}"; then
     _hc_append_cmd "python3 -m pip install --user" "${@:2}"
   fi
   return $rc
@@ -1090,7 +1093,9 @@ pip3() {
     command pip3 "$@"
   fi
   local rc=$?
-  if [ $rc -eq 0 ] && [ "${1:-}" = "install" ] && _hc_has_install_targets "${@:2}"; then
+  if [ $rc -eq 0 ] && [ "${1:-}" = "install" ] \
+      && ! _hc_has_arg -r "${@:2}" && ! _hc_has_arg --requirement "${@:2}" \
+      && _hc_has_install_targets "${@:2}"; then
     _hc_append_cmd "python3 -m pip install --user" "${@:2}"
   fi
   return $rc
@@ -1102,7 +1107,9 @@ python() {
     command python "$@"
   fi
   local rc=$?
-  if [ $rc -eq 0 ] && [ "${1:-}" = "-m" ] && [ "${2:-}" = "pip" ] && [ "${3:-}" = "install" ] && _hc_has_install_targets "${@:4}"; then
+  if [ $rc -eq 0 ] && [ "${1:-}" = "-m" ] && [ "${2:-}" = "pip" ] && [ "${3:-}" = "install" ] \
+      && ! _hc_has_arg -r "${@:4}" && ! _hc_has_arg --requirement "${@:4}" \
+      && _hc_has_install_targets "${@:4}"; then
     _hc_append_cmd "python3 -m pip install --user" "${@:4}"
   fi
   return $rc
@@ -1114,7 +1121,9 @@ python3() {
     command python3 "$@"
   fi
   local rc=$?
-  if [ $rc -eq 0 ] && [ "${1:-}" = "-m" ] && [ "${2:-}" = "pip" ] && [ "${3:-}" = "install" ] && _hc_has_install_targets "${@:4}"; then
+  if [ $rc -eq 0 ] && [ "${1:-}" = "-m" ] && [ "${2:-}" = "pip" ] && [ "${3:-}" = "install" ] \
+      && ! _hc_has_arg -r "${@:4}" && ! _hc_has_arg --requirement "${@:4}" \
+      && _hc_has_install_targets "${@:4}"; then
     _hc_append_cmd "python3 -m pip install --user" "${@:4}"
   fi
   return $rc
@@ -1133,6 +1142,28 @@ openclaw() {
   if [ $rc -eq 0 ] && [ "${1:-}" = "plugins" ] && [ "${2:-}" = "install" ] && _hc_has_install_targets "${@:3}"; then
     _hc_allow_openclaw_plugins "${@:3}"
     _hc_append_cmd "openclaw plugins install" "${@:3}"
+  fi
+  return $rc
+}
+# uv pip install — increasingly popular fast pip replacement
+uv() {
+  command uv "$@"
+  local rc=$?
+  # Only capture: uv pip install ... (not uv pip sync, uv add, etc.)
+  # Skip if -r/--requirements flag present (file won't exist on next boot)
+  if [ $rc -eq 0 ] && [ "${1:-}" = "pip" ] && [ "${2:-}" = "install" ] \
+      && ! _hc_has_arg -r "${@:3}" && ! _hc_has_arg --requirements "${@:3}" \
+      && _hc_has_install_targets "${@:3}"; then
+    _hc_append_cmd "uv pip install" "${@:3}"
+  fi
+  return $rc
+}
+# pipx — isolated tool installs
+pipx() {
+  command pipx "$@"
+  local rc=$?
+  if [ $rc -eq 0 ] && [ "${1:-}" = "install" ] && _hc_has_install_targets "${@:2}"; then
+    _hc_append_cmd "pipx install" "${@:2}"
   fi
   return $rc
 }
