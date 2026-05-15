@@ -1,23 +1,25 @@
 #!/usr/bin/env python3
 import os, shutil, tempfile, time
 from pathlib import Path
-from huggingface_hub import HfApi, upload_folder, snapshot_download
-from huggingface_hub.errors import RepositoryNotFoundError
 
 HF_TOKEN = os.environ.get("HF_TOKEN", "").strip()
 HF_USERNAME = os.environ.get("HF_USERNAME", "").strip() or os.environ.get("SPACE_AUTHOR_NAME", "").strip()
-DATASET_NAME = os.environ.get("DEVDATA_DATASET_NAME", "huggingclaw-devdata").strip()
+DATASET_NAME = os.environ.get("DEVDATA_DATASET_NAME", "").strip() or "huggingclaw-devdata"
+BACKUP_DATASET_NAME = os.environ.get("BACKUP_DATASET_NAME", "").strip() or "huggingclaw-backup"
 JUPYTER_ROOT = Path(os.environ.get("JUPYTER_ROOT_DIR", "/home/node")).resolve()
-INTERVAL = int(os.environ.get("DEVDATA_SYNC_INTERVAL", "300"))
+INTERVAL = int((os.environ.get("DEVDATA_SYNC_INTERVAL", "").strip() or "180"))
 ENABLE = os.environ.get("DEVDATA", "on").strip().lower() not in {"off","false","0","no"}
 
 EXCLUDE = {".cache", "node_modules", ".npm", ".yarn", ".local/share/Trash", ".ipynb_checkpoints"}
 
 def enabled():
     dev = os.environ.get("DEV_MODE", "").strip().lower() in {"1","true","yes","on"}
-    return ENABLE and dev and bool(HF_TOKEN)
+    separate_dataset = DATASET_NAME != BACKUP_DATASET_NAME
+    if ENABLE and dev and HF_TOKEN and not separate_dataset:
+        print("DevData sync disabled: DEVDATA_DATASET_NAME must be separate from BACKUP_DATASET_NAME.")
+    return ENABLE and dev and bool(HF_TOKEN) and separate_dataset
 
-def repo_id(api: HfApi) -> str:
+def repo_id(api) -> str:
     ns = HF_USERNAME
     if not ns:
         who = api.whoami()
@@ -84,6 +86,9 @@ if __name__ == "__main__":
     if not enabled():
         print("DevData sync disabled.")
         raise SystemExit(0)
+    from huggingface_hub import HfApi, upload_folder, snapshot_download
+    from huggingface_hub.errors import RepositoryNotFoundError
+
     api = HfApi(token=HF_TOKEN)
     rid = repo_id(api)
     try:
