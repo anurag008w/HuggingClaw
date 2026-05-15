@@ -8,7 +8,70 @@ umask 0077
 # ════════════════════════════════════════════════════════════════
 
 # ── Startup Banner ──
+trim_var() {
+  # Trim leading/trailing whitespace from a value.
+  printf '%s' "$1" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+hc_is_true() {
+  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+load_env_bundle() {
+  # HUGGINGCLAW_ENV_BUNDLE is a single base64url-encoded JSON object generated
+  # by /env-builder. Existing individual env vars win over bundled values.
+  local bundle="${HUGGINGCLAW_ENV_BUNDLE:-${ENV_BUNDLE:-}}"
+  [ -n "$bundle" ] || return 0
+  eval "$(HUGGINGCLAW_ENV_BUNDLE="$bundle" python3 - <<'PYBUNDLE'
+import base64, json, os, re, shlex, sys
+
+raw = os.environ.get("HUGGINGCLAW_ENV_BUNDLE", "").strip()
+try:
+    if raw.startswith("{"):
+        data = json.loads(raw)
+    else:
+        padded = raw + "=" * (-len(raw) % 4)
+        data = json.loads(base64.urlsafe_b64decode(padded.encode()).decode())
+    if not isinstance(data, dict):
+        raise ValueError("bundle must decode to a JSON object")
+    for key, value in data.items():
+        if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", str(key)):
+            continue
+        if str(key) in {"HUGGINGCLAW_ENV_BUNDLE", "ENV_BUNDLE"}:
+            continue
+        if os.environ.get(str(key), ""):
+            continue
+        if value is None or isinstance(value, (dict, list)):
+            continue
+        print(f"export {key}={shlex.quote(str(value))}")
+except Exception as exc:
+    print(f"Warning: invalid HUGGINGCLAW_ENV_BUNDLE ignored: {exc}", file=sys.stderr)
+PYBUNDLE
+)"
+}
+
+load_env_bundle
+
+# Normalize core env values so accidental surrounding spaces in HF Variables
+# do not block updates or cause stale comparisons/merges.
+LLM_MODEL="$(trim_var "${LLM_MODEL:-}")"
+GATEWAY_TOKEN="$(trim_var "${GATEWAY_TOKEN:-}")"
+OPENCLAW_PASSWORD="$(trim_var "${OPENCLAW_PASSWORD:-}")"
+LLM_API_KEY="$(trim_var "${LLM_API_KEY:-}")"
+CLOUDFLARE_PROXY_URL="$(trim_var "${CLOUDFLARE_PROXY_URL:-}")"
+
 OPENCLAW_VERSION="${OPENCLAW_VERSION:-latest}"
+APP_BASE="$(trim_var "${APP_BASE:-/app}")"
+JUPYTER_BASE="$(trim_var "${JUPYTER_BASE:-/terminal}")"
+PORT="$(trim_var "${PORT:-7861}")"
+GATEWAY_PORT="$(trim_var "${GATEWAY_PORT:-7860}")"
+JUPYTER_PORT="$(trim_var "${JUPYTER_PORT:-8888}")"
+BACKUP_DATASET_NAME="$(trim_var "${BACKUP_DATASET_NAME:-${BACKUP_DATASET:-huggingclaw-backup}}")"
+SPACE_AUTHOR_NAME="$(trim_var "${SPACE_AUTHOR_NAME:-}")"
+SPACE_HOST="$(trim_var "${SPACE_HOST:-}")"
 OPENCLAW_APP_DIR="/home/node/.openclaw/openclaw-app"
 OPENCLAW_RUNTIME_VERSION=""
 OPENCLAW_FILE_LOG_LEVEL_CONFIGURED=false
@@ -24,11 +87,18 @@ WHATSAPP_ENABLED_NORMALIZED=$(printf '%s' "$WHATSAPP_ENABLED" | tr '[:upper:]' '
 DEV_MODE_RAW="${DEV_MODE:-false}"
 DEV_MODE_NORMALIZED=$(printf '%s' "$DEV_MODE_RAW" | tr '[:upper:]' '[:lower:]')
 DEV_MODE_ENABLED=false
-case "$DEV_MODE_NORMALIZED" in
-  true|1|yes|on) DEV_MODE_ENABLED=true ;;
-  *) DEV_MODE_ENABLED=false ;;
-esac
-SYNC_INTERVAL="${SYNC_INTERVAL:-180}"
+if hc_is_true "$DEV_MODE_NORMALIZED"; then
+  DEV_MODE_ENABLED=true
+fi
+SYNC_INTERVAL="$(trim_var "${SYNC_INTERVAL:-180}")"
+DEVDATA_DATASET_NAME="$(trim_var "${DEVDATA_DATASET_NAME:-huggingclaw-devdata}")"
+DEVDATA_SYNC_INTERVAL="$(trim_var "${DEVDATA_SYNC_INTERVAL:-180}")"
+DEVDATA_RAW="$(trim_var "${DEVDATA:-on}")"
+DEVDATA_NORMALIZED=$(printf '%s' "$DEVDATA_RAW" | tr '[:upper:]' '[:lower:]')
+DEVDATA_ENABLED=true
+if ! hc_is_true "$DEVDATA_NORMALIZED"; then
+  DEVDATA_ENABLED=false
+fi
 if [ -n "${SPACE_HOST:-}" ]; then
   OPENCLAW_CONSOLE_LOG_LEVEL="${OPENCLAW_CONSOLE_LOG_LEVEL:-warn}"
   OPENCLAW_FILE_LOG_LEVEL="${OPENCLAW_FILE_LOG_LEVEL:-info}"
@@ -207,6 +277,11 @@ export NPM_CONFIG_PREFIX="${NPM_CONFIG_PREFIX:-/home/node/.local}"
 export npm_config_prefix="$NPM_CONFIG_PREFIX"
 export PYTHONUSERBASE="${PYTHONUSERBASE:-/home/node/.local}"
 export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
+# Show current working directory in terminal prompt (JupyterLab terminals can
+# otherwise display only "$" when PS1 is unset/minimal).
+if [ -z "${PS1:-}" ] || [ "$PS1" = "$ " ]; then
+  export PS1='\u@\h:\w\$ '
+fi
 STARTUP_FILE="/home/node/.openclaw/workspace/startup.sh"
 
 # ── Restore workspace/state from HF Dataset ──
@@ -519,6 +594,24 @@ if [ -n "${ALLOWED_ORIGINS:-}" ]; then
   CONFIG_JSON=$(echo "$CONFIG_JSON" | jq ".gateway.controlUi.allowedOrigins += $ORIGINS_JSON | .gateway.controlUi.allowedOrigins |= unique")
 fi
 
+resolve_telegram_api_root() {
+  local candidate="$(trim_var "${CLOUDFLARE_PROXY_URL:-}")"
+  if [ -n "$candidate" ]; then
+    case "$candidate" in
+      http://*|https://*)
+        printf '%s' "$candidate"
+        return 0
+        ;;
+      *)
+        echo "Warning: invalid CLOUDFLARE_PROXY_URL '$candidate' (must start with http:// or https://); falling back to direct Telegram API." >&2
+        ;;
+    esac
+  fi
+  printf '%s' "https://api.telegram.org"
+}
+TELEGRAM_API_ROOT="$(resolve_telegram_api_root)"
+
+
 # Telegram (supports multiple user IDs, comma-separated)
 if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
   CONFIG_JSON=$(echo "$CONFIG_JSON" | jq '.plugins.entries.telegram = {"enabled": true}')
@@ -531,12 +624,12 @@ if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
   # Force ipv4 for Telegram specifically as HF IPv6 often times out
   export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--dns-result-order=ipv4first"
   
-  CONFIG_JSON=$(echo "$CONFIG_JSON" | jq --arg token "$CLEAN_TG_TOKEN" --arg proxy_url "${CLOUDFLARE_PROXY_URL:-}" '
+  CONFIG_JSON=$(echo "$CONFIG_JSON" | jq --arg token "$CLEAN_TG_TOKEN" --arg proxy_url "$TELEGRAM_API_ROOT" '
     .channels.telegram.enabled = true
     | .channels.telegram.botToken = $token
     | .channels.telegram.commands.native = false
     | .channels.telegram.timeoutSeconds = 60
-    | (if $proxy_url != "" then .channels.telegram.apiRoot = $proxy_url else .channels.telegram.apiRoot = "https://api.telegram.org" end)
+    | (if $proxy_url != "" then .channels.telegram.apiRoot = $proxy_url else . end)
     | .channels.telegram.retry = {
         "attempts": 5,
         "minDelayMs": 800,
@@ -600,7 +693,7 @@ if [ -f "$EXISTING_CONFIG" ]; then
      | .channels = ((.channels // {}) * ($desired.channels // {}))
      | .plugins.allow = (((.plugins.allow // []) + ($desired.plugins.allow // [])) | unique)
      | .plugins.deny = (((.plugins.deny // []) + ($desired.plugins.deny // [])) | unique)
-     | .plugins.entries = (($desired.plugins.entries // {}) * (.plugins.entries // {}))
+     | .plugins.entries = ((.plugins.entries // {}) * ($desired.plugins.entries // {}))
      | if $whatsappEnabled then
          ($desired.channels.whatsapp // {"dmPolicy": "pairing"}) as $desiredWhatsapp
          | .plugins.entries.whatsapp.enabled = true
@@ -736,12 +829,20 @@ export LLM_MODEL="$LLM_MODEL"
 node /home/node/app/health-server.js &
 HEALTH_PID=$!
 
-# 10.5. Start JupyterLab Terminal on internal port 8888 (DEV_MODE only)
-# Accessible via /terminal/ path through the health-server proxy
-if [ "$RUNTIME_JUPYTER_ENABLED" = "true" ]; then
+start_jupyter_once() {
+  [ "$RUNTIME_JUPYTER_ENABLED" = "true" ] || return 0
+  if [ -n "${JUPYTER_PID:-}" ] && kill -0 "$JUPYTER_PID" 2>/dev/null; then
+    return 0
+  fi
+
   JUPYTER_TOKEN="${JUPYTER_TOKEN:-huggingface}"
   JUPYTER_ROOT_DIR="${JUPYTER_ROOT_DIR:-/home/node}"
+  if [ "$JUPYTER_ROOT_DIR" = "/home/node/.openclaw/workspace" ] && [ "$DEVDATA_ENABLED" = "true" ]; then
+    echo "Jupyter root was set to OpenClaw workspace; moving Jupyter root to /home/node/devdata to keep BACKUP and DEVDATA datasets separate."
+    JUPYTER_ROOT_DIR="/home/node/devdata"
+  fi
   mkdir -p "$JUPYTER_ROOT_DIR"
+  export JUPYTER_ROOT_DIR
   if [ "$JUPYTER_ROOT_DIR" != "/home/node/app" ]; then
     if [ -L "$JUPYTER_ROOT_DIR/HuggingClaw" ] || [ ! -e "$JUPYTER_ROOT_DIR/HuggingClaw" ]; then
       ln -sfn /home/node/app "$JUPYTER_ROOT_DIR/HuggingClaw"
@@ -754,6 +855,7 @@ if [ "$RUNTIME_JUPYTER_ENABLED" = "true" ]; then
   fi
 
   echo "DEV_MODE enabled (${DEV_MODE_RAW}) — starting JupyterLab terminal on internal port 8888 (path: /terminal/) with root: $JUPYTER_ROOT_DIR"
+  JUPYTER_LOG_FILE="/tmp/jupyterlab.log"
   jupyter-lab \
       --ip 127.0.0.1 \
       --port 8888 \
@@ -761,6 +863,7 @@ if [ "$RUNTIME_JUPYTER_ENABLED" = "true" ]; then
       --IdentityProvider.token="$JUPYTER_TOKEN" \
       --ServerApp.base_url=/terminal/ \
       --ServerApp.terminals_enabled=True \
+      --ServerApp.terminado_settings='{"shell_command":["/bin/bash","-i"]}' \
       --ServerApp.allow_origin='*' \
       --ServerApp.allow_remote_access=True \
       --ServerApp.trust_xheaders=True \
@@ -770,9 +873,15 @@ if [ "$RUNTIME_JUPYTER_ENABLED" = "true" ]; then
       --LabApp.news_url=None \
       --LabApp.check_for_updates_class="jupyterlab.NeverCheckForUpdate" \
       --notebook-dir="$JUPYTER_ROOT_DIR" \
-      2>&1 | tee -a /tmp/jupyterlab.log &
+      >> "$JUPYTER_LOG_FILE" 2>&1 &
   JUPYTER_PID=$!
   echo "JupyterLab started (PID: $JUPYTER_PID)"
+}
+
+# 10.5. Start JupyterLab Terminal on internal port 8888 (DEV_MODE only)
+# Accessible via /terminal/ path through the health-server proxy
+if [ "$RUNTIME_JUPYTER_ENABLED" = "true" ]; then
+  start_jupyter_once
 else
   echo "Jupyter terminal disabled for this boot (DEV_MODE=${DEV_MODE_RAW})."
 fi
@@ -796,6 +905,9 @@ export NPM_CONFIG_PREFIX="${NPM_CONFIG_PREFIX:-/home/node/.local}"
 export npm_config_prefix="$NPM_CONFIG_PREFIX"
 export PYTHONUSERBASE="${PYTHONUSERBASE:-/home/node/.local}"
 export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
+if [ -z "${PS1:-}" ] || [ "$PS1" = "$ " ]; then
+  export PS1="\u@\h:\w\$ "
+fi
 STARTUP_FILE="/home/node/.openclaw/workspace/startup.sh"
 _hc_append() {
   if [ "${HUGGINGCLAW_CAPTURE_DISABLE:-0}" = "1" ]; then
@@ -1014,7 +1126,7 @@ openclaw() {
 }
 BASHRC
 cat > /home/node/.profile <<'PROFILE'
-[ -f ~/.bashrc ] && . ~/.bashrc
+[ -n "${BASH_VERSION:-}" ] && [ -f ~/.bashrc ] && . ~/.bashrc
 PROFILE
 echo "Shell capture wrappers ready."
 
@@ -1283,6 +1395,31 @@ sync_before_gateway_restart() {
     echo "Warning: could not sync settled state before gateway restart"
 }
 
+start_background_devdata_sync() {
+  if [ "$DEV_MODE_ENABLED" != "true" ]; then
+    return 0
+  fi
+  if [ "$DEVDATA_ENABLED" != "true" ]; then
+    echo "DevData  : disabled by DEVDATA=${DEVDATA_RAW}"
+    return 0
+  fi
+  if [ -z "${HF_TOKEN:-}" ]; then
+    echo "DevData  : disabled (HF_TOKEN missing)"
+    return 0
+  fi
+  if [ "${DEVDATA_DATASET_NAME:-huggingclaw-devdata}" = "${BACKUP_DATASET_NAME:-huggingclaw-backup}" ]; then
+    echo "DevData  : disabled (DEVDATA_DATASET_NAME must be separate from BACKUP_DATASET_NAME)"
+    return 0
+  fi
+  if [ ! -f "/home/node/app/jupyter-devdata-sync.py" ]; then
+    echo "DevData  : script missing; skipped"
+    return 0
+  fi
+  echo "DevData  : enabled (dataset=${DEVDATA_DATASET_NAME:-huggingclaw-devdata})"
+  python3 -u /home/node/app/jupyter-devdata-sync.py >> /tmp/devdata-sync.log 2>&1 &
+  DEVDATA_SYNC_PID=$!
+}
+
 start_background_sync_once() {
   [ -n "${HF_TOKEN:-}" ] || return 0
 
@@ -1290,7 +1427,7 @@ start_background_sync_once() {
     return 0
   fi
 
-  python3 -u /home/node/app/openclaw-sync.py loop &
+  python3 -u /home/node/app/openclaw-sync.py loop >> /tmp/workspace-sync.log 2>&1 &
   SYNC_LOOP_PID=$!
 }
 
@@ -1307,6 +1444,11 @@ start_guardian_once() {
 }
 
 while true; do
+  if [ "$RUNTIME_JUPYTER_ENABLED" = "true" ] && [ -n "${JUPYTER_PID:-}" ] && ! kill -0 "$JUPYTER_PID" 2>/dev/null; then
+    echo "Warning: JupyterLab exited; attempting restart."
+    start_jupyter_once
+  fi
+
   echo "Launching OpenClaw gateway on port 7860..."
 
   GATEWAY_ARGS=(gateway run --port 7860 --bind lan)
@@ -1356,6 +1498,7 @@ while true; do
   # config edits can make OpenClaw exit/reload, and the gateway loop below will
   # relaunch it without rerunning all startup code.
   start_background_sync_once
+  start_background_devdata_sync
 
   set +e
   wait "$GATEWAY_PID"

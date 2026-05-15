@@ -3,24 +3,39 @@ const http = require("http");
 const fs = require("fs");
 const net = require("net");
 
-const PORT = 7861;
-const GATEWAY_PORT = 7860;
+function isTrue(value) {
+  return /^(true|1|yes|on)$/i.test(String(value || "").trim());
+}
+function normalizeBase(value, fallback) {
+  const raw = String(value || fallback || "").trim() || fallback;
+  if (!raw) return fallback;
+  const base = raw.startsWith("/") ? raw : `/${raw}`;
+  return base.replace(/\/+$/, "") || fallback;
+}
+
+const PORT = Number.parseInt(process.env.PORT || "7861", 10);
+const GATEWAY_PORT = Number.parseInt(process.env.GATEWAY_PORT || "7860", 10);
 const GATEWAY_HOST = "127.0.0.1";
-const JUPYTER_PORT = 8888;
+const JUPYTER_PORT = Number.parseInt(process.env.JUPYTER_PORT || "8888", 10);
 const JUPYTER_HOST = "127.0.0.1";
-const JUPYTER_BASE = "/terminal";
-const DEV_MODE_ENABLED = /^(true|1|yes|on)$/i.test(process.env.DEV_MODE || "");
+const JUPYTER_BASE = normalizeBase(process.env.JUPYTER_BASE, "/terminal");
+const DEV_MODE_ENABLED = isTrue(process.env.DEV_MODE);
 const JUPYTER_ENABLED = /^(true|1|yes|on)$/i.test(
   process.env.HUGGINGCLAW_JUPYTER_ENABLED || (DEV_MODE_ENABLED ? "true" : "false")
 );
 const startTime = Date.now();
 const LLM_MODEL = process.env.LLM_MODEL || "Not Set";
 const TELEGRAM_ENABLED = !!process.env.TELEGRAM_BOT_TOKEN;
-const WHATSAPP_ENABLED = /^true$/i.test(process.env.WHATSAPP_ENABLED || "");
+const WHATSAPP_ENABLED = isTrue(process.env.WHATSAPP_ENABLED);
 const WHATSAPP_STATUS_FILE = "/tmp/huggingclaw-wa-status.json";
 const HF_BACKUP_ENABLED = !!process.env.HF_TOKEN;
-const SYNC_INTERVAL = process.env.SYNC_INTERVAL || "180";
-const APP_BASE = "/app";
+const SYNC_INTERVAL = (process.env.SYNC_INTERVAL || "180").trim() || "180";
+const BACKUP_DATASET_NAME = (process.env.BACKUP_DATASET_NAME || process.env.BACKUP_DATASET || "huggingclaw-backup").trim() || "huggingclaw-backup";
+const DEVDATA_DATASET_NAME = (process.env.DEVDATA_DATASET_NAME || "huggingclaw-devdata").trim() || "huggingclaw-devdata";
+const DEVDATA_SYNC_INTERVAL = (process.env.DEVDATA_SYNC_INTERVAL || "180").trim() || "180";
+const DEVDATA_SEPARATE_DATASET = DEVDATA_DATASET_NAME !== BACKUP_DATASET_NAME;
+const DEVDATA_ENABLED = JUPYTER_ENABLED && HF_BACKUP_ENABLED && DEVDATA_SEPARATE_DATASET && !/^(off|false|0|no)$/i.test((process.env.DEVDATA || "on").trim());
+const APP_BASE = normalizeBase(process.env.APP_BASE, "/app");
 const SYNC_STATUS_FILE = "/tmp/sync-status.json";
 const CLOUDFLARE_KEEPALIVE_STATUS_FILE =
   "/tmp/huggingclaw-cloudflare-keepalive-status.json";
@@ -113,6 +128,13 @@ function renderDashboard(data) {
 
   if (JUPYTER_ENABLED) {
     tiles.push(tile({ title: "Terminal", value: badge(data.jupyterReady ? "Online" : "Starting…", data.jupyterReady ? "ok" : "warn"), detail: `JupyterLab at <a href="${JUPYTER_BASE}/" style="color:inherit">${JUPYTER_BASE}/</a>`, tone: data.jupyterReady ? "ok" : "warn" }));
+    tiles.push(tile({
+      title: "DevData",
+      value: badge(DEVDATA_ENABLED ? "Enabled" : "Disabled", DEVDATA_ENABLED ? "ok" : "neutral"),
+      detail: DEVDATA_ENABLED ? `Separate dataset <code>${escapeHtml(DEVDATA_DATASET_NAME)}</code>` : DEVDATA_SEPARATE_DATASET ? "Separate Jupyter dataset backup inactive" : "DevData dataset must be separate from main backup dataset",
+      tone: DEVDATA_ENABLED ? "ok" : "neutral",
+      meta: `Sync interval ${escapeHtml(DEVDATA_SYNC_INTERVAL)}s`,
+    }));
   }
 
   const tilesHtml = tiles.join("");
@@ -128,7 +150,7 @@ function renderDashboard(data) {
     .subtitle{margin-top:12px;color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.14em;font-weight:800}
     .btn-row{display:flex;gap:12px;margin:24px 0 20px}
     .hero-action{display:flex;flex:1;min-height:46px;align-items:center;justify-content:center;border-radius:8px;background:#fff;color:#000;text-decoration:none;font-weight:850;font-size:.98rem;transition:opacity .15s}
-    .hero-action:hover{opacity:.9}.hero-action.terminal{background:#1e1e2e;color:#cdd6f4;border:1px solid #45475a}
+    .hero-action:hover{opacity:.9}.hero-action.terminal{background:#1e1e2e;color:#cdd6f4;border:1px solid #45475a}.hero-action.env{background:#312e81;color:#eef2ff;border:1px solid #6366f1}
     .overview{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-bottom:10px}
     .tile{border:1px solid var(--line);background:var(--panel);border-radius:11px;padding:18px;min-height:124px;display:flex;flex-direction:column;gap:10px}
     .tile.ok{border-color:rgba(34,197,94,.22)}.tile.warn{border-color:rgba(245,197,66,.24)}.tile.off{border-color:rgba(251,113,133,.28)}
@@ -149,14 +171,39 @@ function renderDashboard(data) {
   </style></head><body><main>
   <header><h1>🦞 HuggingClaw</h1><div class="subtitle">OpenClaw Gateway</div></header>
   <div class="btn-row">
-    <a class="hero-action" href="${APP_BASE}/">Open Control UI →</a>
-    ${JUPYTER_ENABLED ? `<a class="hero-action terminal" href="${JUPYTER_BASE}/">💻 Open Terminal →</a>` : ""}
+    <a class="hero-action" data-space-link="app" href="${APP_BASE}/">Open Control UI →</a>
+    ${JUPYTER_ENABLED ? `<a class="hero-action terminal" data-space-link="terminal" href="${JUPYTER_BASE}/">💻 Open Terminal →</a>` : ""}
+    <a class="hero-action env" data-space-link="env-builder" href="/env-builder">⚙️ Env Builder →</a>
   </div>
   <section class="overview">${tilesHtml}</section>
   <footer>Built by <a href="https://github.com/somratpro" target="_blank" rel="noopener noreferrer" style="color:inherit;text-decoration:none">@somratpro</a>${JUPYTER_ENABLED ? " · Terminal by JupyterLab" : ""}<br><span>Public Spaces can be opened directly via <code>.hf.space</code>; private Spaces require the App tab session.</span></footer>
   </main>
-  <script>document.querySelectorAll('.local-time').forEach(el=>{const d=new Date(el.getAttribute('data-iso'));if(!isNaN(d))el.textContent='At '+d.toLocaleTimeString()});</script>
+  <script>
+  document.querySelectorAll('.local-time').forEach(el=>{const d=new Date(el.getAttribute('data-iso'));if(!isNaN(d))el.textContent='At '+d.toLocaleTimeString()});
+  const inEmbeddedApp = (() => { try { return window.top !== window.self; } catch { return true; } })();
+  const isDirectHfSpaceHost = /\.hf\.space$/i.test(window.location.hostname);
+  // If inside the HF App iframe, force new-tab navigation so users can break out
+  // to the standalone Space host. Also keep direct .hf.space behavior opening new tabs.
+  const openInNewTab = inEmbeddedApp || isDirectHfSpaceHost;
+  document.querySelectorAll('a[data-space-link]').forEach((a) => {
+    if (openInNewTab) {
+      a.setAttribute('target', '_blank');
+      a.setAttribute('rel', 'noopener noreferrer');
+    } else {
+      a.removeAttribute('target');
+      a.removeAttribute('rel');
+    }
+  });
+</script>
 </body></html>`;
+}
+
+function renderEnvBuilder() {
+  try {
+    return fs.readFileSync(require("path").join(__dirname, "env-builder.html"), "utf8");
+  } catch (exc) {
+    return `<!doctype html><title>Env Builder unavailable</title><pre>${escapeHtml(exc.message)}</pre>`;
+  }
 }
 
 // ── Generic proxy ──
@@ -259,6 +306,11 @@ const server = http.createServer(async (req, res) => {
     ]);
     res.writeHead(200, { "Content-Type": "application/json" });
     return res.end(JSON.stringify({ model: LLM_MODEL, uptime: formatUptime(Date.now() - startTime), gatewayReady, jupyterReady, sync: getSyncStatus(), whatsapp: readGuardianStatus(), keepalive: getKeepaliveStatus() }));
+  }
+
+  if (pathname === "/env-builder" || pathname === "/env-builder/") {
+    res.writeHead(200, { "Content-Type": "text/html" });
+    return res.end(renderEnvBuilder());
   }
 
   if (pathname === "/" || pathname === "/dashboard") {
