@@ -298,10 +298,9 @@ function patchFetch() {
             const headers        = init.headers || (input && input.headers) || undefined;
             const patchedHeaders = setAuthHeader(headers, key);
             init = { ...init, headers: patchedHeaders };
-
-            if (input && typeof input === 'object' && !(input instanceof URL) && input.headers) {
-              try { input = new Request(input, { headers: patchedHeaders }); } catch { /* noop */ }
-            }
+            // NOTE: new Request(input, {headers}) yahan nahi karte — Request clone karna
+            // body stream ko disturb kar deta hai → UND_ERR_INVALID_ARG on POST requests.
+            // init.headers fetch spec ke mutabiq Request ke headers ko override kar deta hai.
           }
         }
       }
@@ -335,13 +334,17 @@ function patchHttpModule(mod) {
               ? { ...options, path: `${u.pathname}${u.search}` }
               : u.toString();
           } else if (typeof options === 'string' || options instanceof URL) {
+            // Convert string/URL to options object and inject auth header.
+            // Also preserve any extra options passed as args[1] (3-arg form of http.request).
             const u = new URL(String(options));
+            const extraOpts = (args[1] && typeof args[1] === 'object' && typeof args[1].on !== 'function') ? args[1] : {};
             args[0] = {
               protocol: u.protocol,
               hostname: u.hostname,
               port:     u.port,
               path:     `${u.pathname}${u.search}`,
-              headers:  { authorization: `Bearer ${key}` },
+              ...extraOpts,
+              headers:  setAuthHeader(extraOpts.headers, key),
             };
           } else if (options && typeof options === 'object') {
             args[0] = { ...options, headers: setAuthHeader(options.headers, key) };
