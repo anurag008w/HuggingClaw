@@ -57,7 +57,9 @@ RUN if [ "${DEV_MODE}" = "true" ] || [ "${DEV_MODE}" = "1" ] || [ "${DEV_MODE}" 
       pip3 install --no-cache-dir --break-system-packages \
         jupyterlab==4.5.7 \
         tornado==6.5.5 \
-        ipywidgets==8.1.8; \
+        ipywidgets==8.1.8 && \
+      # Prebuild frontend assets to speed up startup
+      python3 -c "from jupyterlab.labapp import build_lab_static" || true; \
     fi
 
 # Reuse existing node user (UID 1000). Allow passwordless package-manager

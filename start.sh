@@ -858,6 +858,11 @@ start_jupyter_once() {
     fi
   fi
 
+  # Pre-build labstatic assets once to speed up future starts
+  if [ ! -d "$JUPYTER_ROOT_DIR/.jupyter/lab" ]; then
+    mkdir -p "$JUPYTER_ROOT_DIR/.jupyter"
+  fi
+
   echo "DEV_MODE enabled (${DEV_MODE_RAW}) — starting JupyterLab terminal on internal port 8888 (path: /terminal/) with root: $JUPYTER_ROOT_DIR"
   JUPYTER_LOG_FILE="/tmp/jupyterlab.log"
   python3 -m jupyterlab \
@@ -867,7 +872,7 @@ start_jupyter_once() {
       --IdentityProvider.token="$JUPYTER_TOKEN" \
       --ServerApp.base_url=/terminal/ \
       --ServerApp.terminals_enabled=True \
-      --ServerApp.terminado_settings='{"shell_command":["/bin/bash","-i"]}' \
+      --terminado_settings='{"shell_command":["/bin/bash","-i"]}' \
       --ServerApp.allow_origin='*' \
       --ServerApp.allow_remote_access=True \
       --ServerApp.trust_xheaders=True \
@@ -875,7 +880,9 @@ start_jupyter_once() {
       --IdentityProvider.cookie_options="{'SameSite': 'None', 'Secure': True}" \
       --ServerApp.disable_check_xsrf=True \
       --LabApp.news_url=None \
-      --LabApp.check_for_updates_class="jupyterlab.NeverCheckForUpdate" \
+      --LabApp.check_for_updates_class=jupyterlab.NeverCheckForUpdate \
+      --ServerApp.quiet=True \
+      --ServerApp.log_level=WARNING \
       --notebook-dir="$JUPYTER_ROOT_DIR" \
       >> "$JUPYTER_LOG_FILE" 2>&1 &
   JUPYTER_PID=$!
