@@ -207,6 +207,11 @@ export NPM_CONFIG_PREFIX="${NPM_CONFIG_PREFIX:-/home/node/.local}"
 export npm_config_prefix="$NPM_CONFIG_PREFIX"
 export PYTHONUSERBASE="${PYTHONUSERBASE:-/home/node/.local}"
 export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
+# Show current working directory in terminal prompt (JupyterLab terminals can
+# otherwise display only "$" when PS1 is unset/minimal).
+if [ -z "${PS1:-}" ] || [ "$PS1" = "$ " ]; then
+  export PS1='\u@\h:\w\$ '
+fi
 STARTUP_FILE="/home/node/.openclaw/workspace/startup.sh"
 
 # ── Restore workspace/state from HF Dataset ──
@@ -1014,7 +1019,7 @@ openclaw() {
 }
 BASHRC
 cat > /home/node/.profile <<'PROFILE'
-[ -f ~/.bashrc ] && . ~/.bashrc
+[ -n "${BASH_VERSION:-}" ] && [ -f ~/.bashrc ] && . ~/.bashrc
 PROFILE
 echo "Shell capture wrappers ready."
 
