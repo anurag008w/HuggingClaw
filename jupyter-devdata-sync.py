@@ -7,10 +7,13 @@ from pathlib import Path
 HF_TOKEN = os.environ.get("HF_TOKEN", "").strip()
 HF_USERNAME = os.environ.get("HF_USERNAME", "").strip() or os.environ.get("SPACE_AUTHOR_NAME", "").strip()
 DATASET_NAME = os.environ.get("DEVDATA_DATASET_NAME", "").strip() or "huggingclaw-devdata"
-BACKUP_DATASET_NAME = os.environ.get("BACKUP_DATASET_NAME", "").strip() or "huggingclaw-backup"
+BACKUP_DATASET_NAME = os.environ.get("BACKUP_DATASET_NAME", "").strip() or os.environ.get("BACKUP_DATASET", "").strip() or "huggingclaw-backup"
 JUPYTER_ROOT = Path(os.environ.get("JUPYTER_ROOT_DIR", "/home/node")).resolve()
 INTERVAL = int((os.environ.get("DEVDATA_SYNC_INTERVAL", "").strip() or "180"))
-ENABLE = os.environ.get("DEVDATA", "on").strip().lower() not in {"off","false","0","no"}
+def is_true(value):
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+ENABLE = is_true(os.environ.get("DEVDATA", "on"))
 
 EXCLUDE = {
     ".cache",
@@ -26,7 +29,7 @@ EXCLUDE = {
 }
 
 def enabled():
-    dev = os.environ.get("DEV_MODE", "").strip().lower() in {"1","true","yes","on"}
+    dev = is_true(os.environ.get("DEV_MODE", ""))
     separate_dataset = DATASET_NAME != BACKUP_DATASET_NAME
     if ENABLE and dev and HF_TOKEN and not separate_dataset:
         print("DevData sync disabled: DEVDATA_DATASET_NAME must be separate from BACKUP_DATASET_NAME.")
