@@ -298,10 +298,9 @@ function patchFetch() {
             const headers        = init.headers || (input && input.headers) || undefined;
             const patchedHeaders = setAuthHeader(headers, key);
             init = { ...init, headers: patchedHeaders };
-
-            if (input && typeof input === 'object' && !(input instanceof URL) && input.headers) {
-              try { input = new Request(input, { headers: patchedHeaders }); } catch { /* noop */ }
-            }
+            // NOTE: new Request(input, {headers}) yahan nahi karte — Request clone karna
+            // body stream ko disturb kar deta hai → UND_ERR_INVALID_ARG on POST requests.
+            // init.headers fetch spec ke mutabiq Request ke headers ko override kar deta hai.
           }
         }
       }
