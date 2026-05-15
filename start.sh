@@ -873,7 +873,7 @@ start_jupyter_once() {
       --IdentityProvider.token="$JUPYTER_TOKEN" \
       --ServerApp.base_url=/terminal/ \
       --ServerApp.terminals_enabled=True \
-      --terminado_settings='{"shell_command":["/bin/bash","-i"]}' \
+      --ServerApp.terminado_settings='{"shell_command":["/bin/bash","-i"]}' \
       --ServerApp.allow_origin='*' \
       --ServerApp.allow_remote_access=True \
       --ServerApp.trust_xheaders=True \
@@ -882,8 +882,7 @@ start_jupyter_once() {
       --ServerApp.disable_check_xsrf=True \
       --LabApp.news_url=None \
       --LabApp.check_for_updates_class=jupyterlab.NeverCheckForUpdate \
-      --ServerApp.quiet=True \
-      --ServerApp.log_level=WARNING \
+      --ServerApp.log_level=WARN \
       --ServerApp.root_dir="$JUPYTER_ROOT_DIR" \
       >> "$JUPYTER_LOG_FILE" 2>&1 &
   JUPYTER_PID=$!
