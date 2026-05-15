@@ -3,29 +3,39 @@ const http = require("http");
 const fs = require("fs");
 const net = require("net");
 
-const PORT = 7861;
-const GATEWAY_PORT = 7860;
+function isTrue(value) {
+  return /^(true|1|yes|on)$/i.test(String(value || "").trim());
+}
+function normalizeBase(value, fallback) {
+  const raw = String(value || fallback || "").trim() || fallback;
+  if (!raw) return fallback;
+  const base = raw.startsWith("/") ? raw : `/${raw}`;
+  return base.replace(/\/+$/, "") || fallback;
+}
+
+const PORT = Number.parseInt(process.env.PORT || "7861", 10);
+const GATEWAY_PORT = Number.parseInt(process.env.GATEWAY_PORT || "7860", 10);
 const GATEWAY_HOST = "127.0.0.1";
-const JUPYTER_PORT = 8888;
+const JUPYTER_PORT = Number.parseInt(process.env.JUPYTER_PORT || "8888", 10);
 const JUPYTER_HOST = "127.0.0.1";
-const JUPYTER_BASE = "/terminal";
-const DEV_MODE_ENABLED = /^(true|1|yes|on)$/i.test(process.env.DEV_MODE || "");
+const JUPYTER_BASE = normalizeBase(process.env.JUPYTER_BASE, "/terminal");
+const DEV_MODE_ENABLED = isTrue(process.env.DEV_MODE);
 const JUPYTER_ENABLED = /^(true|1|yes|on)$/i.test(
   process.env.HUGGINGCLAW_JUPYTER_ENABLED || (DEV_MODE_ENABLED ? "true" : "false")
 );
 const startTime = Date.now();
 const LLM_MODEL = process.env.LLM_MODEL || "Not Set";
 const TELEGRAM_ENABLED = !!process.env.TELEGRAM_BOT_TOKEN;
-const WHATSAPP_ENABLED = /^true$/i.test(process.env.WHATSAPP_ENABLED || "");
+const WHATSAPP_ENABLED = isTrue(process.env.WHATSAPP_ENABLED);
 const WHATSAPP_STATUS_FILE = "/tmp/huggingclaw-wa-status.json";
 const HF_BACKUP_ENABLED = !!process.env.HF_TOKEN;
 const SYNC_INTERVAL = (process.env.SYNC_INTERVAL || "180").trim() || "180";
-const BACKUP_DATASET_NAME = (process.env.BACKUP_DATASET_NAME || "huggingclaw-backup").trim() || "huggingclaw-backup";
+const BACKUP_DATASET_NAME = (process.env.BACKUP_DATASET_NAME || process.env.BACKUP_DATASET || "huggingclaw-backup").trim() || "huggingclaw-backup";
 const DEVDATA_DATASET_NAME = (process.env.DEVDATA_DATASET_NAME || "huggingclaw-devdata").trim() || "huggingclaw-devdata";
 const DEVDATA_SYNC_INTERVAL = (process.env.DEVDATA_SYNC_INTERVAL || "180").trim() || "180";
 const DEVDATA_SEPARATE_DATASET = DEVDATA_DATASET_NAME !== BACKUP_DATASET_NAME;
 const DEVDATA_ENABLED = JUPYTER_ENABLED && HF_BACKUP_ENABLED && DEVDATA_SEPARATE_DATASET && !/^(off|false|0|no)$/i.test((process.env.DEVDATA || "on").trim());
-const APP_BASE = "/app";
+const APP_BASE = normalizeBase(process.env.APP_BASE, "/app");
 const SYNC_STATUS_FILE = "/tmp/sync-status.json";
 const CLOUDFLARE_KEEPALIVE_STATUS_FILE =
   "/tmp/huggingclaw-cloudflare-keepalive-status.json";
