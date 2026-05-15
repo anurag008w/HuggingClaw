@@ -278,8 +278,10 @@ const server = http.createServer(async (req, res) => {
     }
     return proxyHTTP(req, res, JUPYTER_HOST, JUPYTER_PORT, {
       publicPrefix: JUPYTER_BASE,
-      stripPrefix: JUPYTER_BASE,
-      retryWithoutPrefixOn404: true,
+      // Jupyter is started with --ServerApp.base_url=/terminal/, so keep the
+      // /terminal prefix when proxying. Stripping it breaks static/theme URLs.
+      stripPrefix: "",
+      retryWithoutPrefixOn404: false,
     });
   }
 
