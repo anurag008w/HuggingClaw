@@ -49,6 +49,14 @@ EXCLUDE = {
     "HuggingClaw",
     "HuggingClaw-Workspace",
     "browser-deps",
+    # Exclude Python/system package directories — these contain thousands of files
+    # (e.g. .local/lib/python3.11/site-packages/) and must not be synced to the
+    # HF Dataset. Syncing them causes 10,000+ file fetches on every restore and
+    # can restore a broken jsonschema that crashes JupyterLab on boot.
+    ".local",
+    "lib",
+    "site-packages",
+    "__pycache__",
 }
 
 
