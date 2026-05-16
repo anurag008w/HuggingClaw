@@ -2281,6 +2281,33 @@ $('applyImport').onclick = () => {
     alert(e.message);
   }
 };
+
+// Auto-import: paste karo aur turant parse + apply ho jaata hai
+$('importText').addEventListener('paste', () => {
+  setTimeout(() => {
+    try {
+      const val = $('importText').value.trim();
+      if (!val) return;
+      applyObj(parseEnv(val), true);
+      showToast('Auto-imported ✓');
+    } catch (e) {
+      showToast('Import failed');
+    }
+  }, 0);
+});
+
+// Live typing: jaise jaise type karo env format mein, bundle banta jaata hai
+$('importText').addEventListener('input', () => {
+  const val = $('importText').value.trim();
+  if (!val) return;
+  // Sirf agar valid env/bundle format lag raha ho tabhi auto-apply
+  const looksLikeEnv = val.includes('=') || val.startsWith('{') || /^[A-Za-z0-9_\-]{20,}$/.test(val);
+  if (looksLikeEnv) {
+    try {
+      applyObj(parseEnv(val), true);
+    } catch (e) { /* silent — user abhi type kar raha hai */ }
+  }
+});
 $('addCustom').onclick = () => addCustomRow();
 $('applyBundle').onclick = () => {
   try {
