@@ -1,5 +1,6 @@
 // Single public entrypoint for HF Spaces: dashboard + reverse proxy to OpenClaw + JupyterLab.
 const http = require("http");
+const https = require("https");
 const fs = require("fs");
 const net = require("net");
 
@@ -37,6 +38,65 @@ const DEVDATA_SEPARATE_DATASET = DEVDATA_DATASET_NAME !== BACKUP_DATASET_NAME;
 const DEVDATA_ENABLED = JUPYTER_ENABLED && HF_BACKUP_ENABLED && DEVDATA_SEPARATE_DATASET && !/^(off|false|0|no)$/i.test((process.env.DEVDATA || "on").trim());
 const APP_BASE = normalizeBase(process.env.APP_BASE, "/app");
 const SYNC_STATUS_FILE = "/tmp/sync-status.json";
+
+// ── Private Space redirect support ──
+// HF automatically sets SPACE_ID as "username/spacename" in every Space container.
+const SPACE_ID = (process.env.SPACE_ID || "").trim();
+function deriveHfSpaceUrl() {
+  if (SPACE_ID) return `https://huggingface.co/spaces/${SPACE_ID}`;
+  const host = (process.env.SPACE_HOST || "").replace(/\.hf\.space$/i, "");
+  const author = (process.env.SPACE_AUTHOR_NAME || "").trim().toLowerCase();
+  if (author && host.toLowerCase().startsWith(author + "-")) {
+    const spaceName = host.slice(author.length + 1);
+    return `https://huggingface.co/spaces/${process.env.SPACE_AUTHOR_NAME}/${spaceName}`;
+  }
+  return "";
+}
+const HF_SPACE_URL = deriveHfSpaceUrl();
+
+// Auto-detect space privacy via HF API at startup.
+// Caches result so every request doesn't hit the API.
+let SPACE_IS_PRIVATE = false;
+async function detectSpacePrivacy() {
+  if (!SPACE_ID) return;
+  try {
+    const token = (process.env.HF_TOKEN || "").trim();
+    const reqOptions = {
+      hostname: "huggingface.co",
+      path: `/api/spaces/${SPACE_ID}`,
+      method: "GET",
+      headers: Object.assign(
+        { "User-Agent": "HuggingClaw/health-server" },
+        token ? { Authorization: `Bearer ${token}` } : {}
+      ),
+    };
+    await new Promise((resolve) => {
+      const r = https.request(reqOptions, (res) => {
+        let body = "";
+        res.on("data", (chunk) => { body += chunk; });
+        res.on("end", () => {
+          try {
+            if (res.statusCode === 200) {
+              const data = JSON.parse(body);
+              SPACE_IS_PRIVATE = data.private === true;
+            } else if (res.statusCode === 404 && !token) {
+              // 404 with no token usually means private space
+              SPACE_IS_PRIVATE = true;
+            }
+          } catch {}
+          resolve();
+        });
+      });
+      r.on("error", resolve);
+      r.setTimeout(5000, () => { r.destroy(); resolve(); });
+      r.end();
+    });
+    console.log(`[health-server] Space privacy detected: ${SPACE_IS_PRIVATE ? "private" : "public"}`);
+  } catch {
+    // Network error — default to false (safe)
+  }
+}
+detectSpacePrivacy();
 const CLOUDFLARE_KEEPALIVE_STATUS_FILE =
   "/tmp/huggingclaw-cloudflare-keepalive-status.json";
 
@@ -78,7 +138,7 @@ function probePort(host, port, path, timeoutMs = 1500) {
   return new Promise((resolve) => {
     const req = http.get({ hostname: host, port, path, timeout: timeoutMs }, (res) => {
       res.resume();
-      resolve(res.statusCode >= 200 && res.statusCode < 500);
+      resolve(res.statusCode >= 200 && res.statusCode < 400);
     });
     req.on("timeout", () => { req.destroy(); resolve(false); });
     req.on("error", () => resolve(false));
@@ -122,9 +182,24 @@ function renderDashboard(data) {
     tile({ title: "Model", value: `<code>${escapeHtml(LLM_MODEL)}</code>`, detail: "Primary LLM configured", tone: "neutral" }),
     tile({ title: "Runtime", value: escapeHtml(data.uptimeHuman), detail: `Public port ${PORT}`, tone: "neutral" }),
     tile({ title: "Telegram", value: badge(TELEGRAM_ENABLED ? "Enabled" : "Disabled", TELEGRAM_ENABLED ? "ok" : "neutral"), detail: TELEGRAM_ENABLED ? "Bot channel active" : "Not configured", tone: TELEGRAM_ENABLED ? "ok" : "neutral" }),
+  ];
+
+  if (WHATSAPP_ENABLED) {
+    const wa = data.whatsapp || {};
+    const waTone = wa.connected ? "ok" : wa.pairing ? "warn" : "neutral";
+    const waLabel = wa.connected ? "Connected" : wa.pairing ? "Pairing…" : wa.configured ? "Waiting" : "Disabled";
+    const waDetail = wa.connected
+      ? "WhatsApp channel active"
+      : wa.pairing
+        ? "Scan QR code in Control UI → WhatsApp"
+        : "WhatsApp not yet connected";
+    tiles.push(tile({ title: "WhatsApp", value: badge(waLabel, waTone), detail: waDetail, tone: waTone }));
+  }
+
+  tiles.push(
     tile({ title: "Backup", value: badge(syncStatus.toUpperCase(), syncTone), detail: escapeHtml(data.sync?.message || "No status yet"), tone: syncTone, meta: data.sync?.timestamp ? `<span class="local-time" data-iso="${data.sync.timestamp}"></span>` : "" }),
     tile({ title: "Keep Awake", value: badge(kaConf ? "CF Cron" : kaStatus.toUpperCase(), kaTone), detail: kaConf ? `Pinging <code>${escapeHtml(data.keepalive?.targetUrl || "/health")}</code>` : process.env.CLOUDFLARE_WORKERS_TOKEN ? "Worker pending or failed" : "Not configured", tone: kaTone }),
-  ];
+  );
 
   if (JUPYTER_ENABLED) {
     tiles.push(tile({ title: "Terminal", value: badge(data.jupyterReady ? "Online" : "Starting…", data.jupyterReady ? "ok" : "warn"), detail: `JupyterLab at <a href="${JUPYTER_BASE}/" style="color:inherit">${JUPYTER_BASE}/</a>`, tone: data.jupyterReady ? "ok" : "warn" }));
@@ -176,12 +251,25 @@ function renderDashboard(data) {
     <a class="hero-action env" data-space-link="env-builder" href="/env-builder">⚙️ Env Builder →</a>
   </div>
   <section class="overview">${tilesHtml}</section>
-  <footer>Built by <a href="https://github.com/somratpro" target="_blank" rel="noopener noreferrer" style="color:inherit;text-decoration:none">@somratpro</a>${JUPYTER_ENABLED ? " · Terminal by JupyterLab" : ""}<br><span>Public Spaces can be opened directly via <code>.hf.space</code>; private Spaces require the App tab session.</span></footer>
+  <footer>Built by <a href="https://github.com/somratpro" target="_blank" rel="noopener noreferrer" style="color:inherit;text-decoration:none">@somratpro</a>${JUPYTER_ENABLED ? " · Terminal by JupyterLab" : ""}<br><span>Public Spaces open via <code>.hf.space</code> directly. Private Spaces require the <a href="${HF_SPACE_URL || "#"}" target="_blank" rel="noopener noreferrer" style="color:inherit">Hugging Face App tab</a> for the authenticated session${HF_SPACE_URL ? ` — or share <code>huggingface.co/spaces/${SPACE_ID}</code>` : ""}.</span></footer>
   </main>
   <script>
   document.querySelectorAll('.local-time').forEach(el=>{const d=new Date(el.getAttribute('data-iso'));if(!isNaN(d))el.textContent='At '+d.toLocaleTimeString()});
   const inEmbeddedApp = (() => { try { return window.top !== window.self; } catch { return true; } })();
   const isDirectHfSpaceHost = /\.hf\.space$/i.test(window.location.hostname);
+  const HF_SPACE_URL = ${JSON.stringify(HF_SPACE_URL)};
+  const SPACE_IS_PRIVATE = ${JSON.stringify(SPACE_IS_PRIVATE)};
+  // ── Private Space Guard ──
+  // Direct .hf.space access outside the HF App iframe has no valid session cookie
+  // for private spaces — HF CDN returns 404 before the request reaches the container.
+  // Redirect users to huggingface.co/spaces/... which authenticates them properly.
+  if (SPACE_IS_PRIVATE && isDirectHfSpaceHost && !inEmbeddedApp && HF_SPACE_URL) {
+    const notice = document.createElement('div');
+    notice.style.cssText = 'position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#08080f;color:#f6f4ff;font-family:sans-serif;flex-direction:column;gap:16px;z-index:9999';
+    notice.innerHTML = '<span style="font-size:1.1rem">🔒 Private Space &mdash; Redirecting&hellip;</span><a href="' + HF_SPACE_URL + '" style="color:#a5b4fc;font-size:.85rem">Click here if not redirected</a>';
+    document.body.appendChild(notice);
+    setTimeout(() => { window.location.replace(HF_SPACE_URL); }, 300);
+  }
   // If inside the HF App iframe, force new-tab navigation so users can break out
   // to the standalone Space host. Also keep direct .hf.space behavior opening new tabs.
   const openInNewTab = inEmbeddedApp || isDirectHfSpaceHost;
@@ -195,6 +283,39 @@ function renderDashboard(data) {
     }
   });
 </script>
+</body></html>`;
+}
+
+function renderPrivateRedirect(targetUrl) {
+  const safeUrl = escapeHtml(targetUrl);
+  return `<!doctype html><html lang="en"><head>
+  <meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta http-equiv="refresh" content="3;url=${safeUrl}"/>
+  <title>HuggingClaw — Private Space</title>
+  <style>
+    :root{color-scheme:dark}
+    body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+         font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;
+         background:#08080f;color:#f6f4ff;text-align:center;padding:24px}
+    .card{border:1px solid #26243a;background:#12111b;border-radius:14px;padding:36px 32px;max-width:440px}
+    h1{margin:0 0 12px;font-size:1.5rem}
+    p{color:#b8b3d7;line-height:1.6;margin:0 0 24px}
+    .btn{display:inline-flex;align-items:center;justify-content:center;
+         background:#fff;color:#000;font-weight:850;font-size:.95rem;
+         border-radius:8px;padding:12px 28px;text-decoration:none;transition:opacity .15s}
+    .btn:hover{opacity:.85}
+    .sub{color:#7f7a9e;font-size:.78rem;margin-top:16px}
+  </style></head><body>
+  <div class="card">
+    <h1>🔒 Private Space</h1>
+    <p>This HuggingFace Space is private. You need to be logged in to <strong>huggingface.co</strong> to access it.<br><br>Redirecting you now&hellip;</p>
+    <a class="btn" href="${safeUrl}">Open on Hugging Face →</a>
+    <div class="sub">Redirecting in 3 seconds&hellip;</div>
+  </div>
+  <script>
+    // Immediate redirect if JS available — don't wait for meta refresh
+    setTimeout(() => { window.location.replace(${JSON.stringify(targetUrl)}); }, 100);
+  </script>
 </body></html>`;
 }
 
@@ -308,7 +429,34 @@ const server = http.createServer(async (req, res) => {
     return res.end(JSON.stringify({ model: LLM_MODEL, uptime: formatUptime(Date.now() - startTime), gatewayReady, jupyterReady, sync: getSyncStatus(), whatsapp: readGuardianStatus(), keepalive: getKeepaliveStatus() }));
   }
 
+  // Private space redirect — send users to the authenticated HF Spaces page.
+  // Works for both direct .hf.space links AND programmatic shares.
+  if (pathname === "/hf-redirect" || pathname === "/hf-redirect/") {
+    if (HF_SPACE_URL) {
+      res.writeHead(302, { Location: HF_SPACE_URL, "Cache-Control": "no-store" });
+      return res.end();
+    }
+    res.writeHead(404, { "Content-Type": "text/plain" });
+    return res.end("SPACE_ID not configured.");
+  }
+
+  // ── Private Space Guard (server-side) ──
+  // Triggers automatically when SPACE_IS_PRIVATE=true (detected via HF API at startup).
+  // Only intercepts browser navigation (Accept: text/html) — API calls, assets,
+  // and WebSocket upgrades pass through untouched.
+  // /health and /status are always exempt so uptime monitors keep working.
+  const isHtmlRequest = (req.headers.accept || "").includes("text/html");
+  const isDirectHfSpaceRequest = SPACE_IS_PRIVATE &&
+    HF_SPACE_URL &&
+    isHtmlRequest &&
+    typeof req.headers.host === "string" &&
+    req.headers.host.endsWith(".hf.space");
+
   if (pathname === "/env-builder" || pathname === "/env-builder/") {
+    if (isDirectHfSpaceRequest) {
+      res.writeHead(200, { "Content-Type": "text/html" });
+      return res.end(renderPrivateRedirect(HF_SPACE_URL));
+    }
     res.writeHead(200, { "Content-Type": "text/html" });
     return res.end(renderEnvBuilder());
   }
@@ -325,6 +473,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (pathname === "/" || pathname === "/dashboard") {
+    if (isDirectHfSpaceRequest) {
+      res.writeHead(200, { "Content-Type": "text/html" });
+      return res.end(renderPrivateRedirect(HF_SPACE_URL));
+    }
     const [gatewayReady, jupyterReady] = await Promise.all([
       probePort(GATEWAY_HOST, GATEWAY_PORT, "/health"),
       JUPYTER_ENABLED ? probePort(JUPYTER_HOST, JUPYTER_PORT, `${JUPYTER_BASE}/login`) : Promise.resolve(false),
@@ -339,6 +491,10 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(404, { "Content-Type": "application/json" });
       return res.end(JSON.stringify({ status: "disabled", message: "JupyterLab terminal is disabled. Set DEV_MODE=true to enable /terminal/." }));
     }
+    if (isDirectHfSpaceRequest) {
+      res.writeHead(200, { "Content-Type": "text/html" });
+      return res.end(renderPrivateRedirect(HF_SPACE_URL));
+    }
     return proxyHTTP(req, res, JUPYTER_HOST, JUPYTER_PORT, {
       publicPrefix: JUPYTER_BASE,
       // Jupyter is started with --ServerApp.base_url=/terminal/, so keep the
@@ -351,6 +507,10 @@ const server = http.createServer(async (req, res) => {
   // OpenClaw Control UI mounted under /app. Retry without the mount prefix on
   // 404 so deployments keep working across OpenClaw basePath behavior changes.
   if (pathname === APP_BASE || pathname.startsWith(APP_BASE + "/")) {
+    if (isDirectHfSpaceRequest) {
+      res.writeHead(200, { "Content-Type": "text/html" });
+      return res.end(renderPrivateRedirect(HF_SPACE_URL));
+    }
     return proxyHTTP(req, res, GATEWAY_HOST, GATEWAY_PORT, {
       publicPrefix: APP_BASE,
       stripPrefix: APP_BASE,
@@ -358,7 +518,18 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
+  // Favicon — serve a minimal inline SVG so browsers don't proxy to the gateway
+  if (pathname === "/favicon.ico" || pathname === "/favicon.svg") {
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🦞</text></svg>';
+    res.writeHead(200, { "Content-Type": "image/svg+xml", "Cache-Control": "public, max-age=86400" });
+    return res.end(svg);
+  }
+
   // OpenClaw gateway API/static fallback (everything else)
+  if (isDirectHfSpaceRequest) {
+    res.writeHead(200, { "Content-Type": "text/html" });
+    return res.end(renderPrivateRedirect(HF_SPACE_URL));
+  }
   proxyHTTP(req, res, GATEWAY_HOST, GATEWAY_PORT);
 });
 

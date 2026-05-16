@@ -134,7 +134,7 @@ fi
 if [ -n "$ERRORS" ]; then
   echo "Missing required secrets:"
   echo -e "$ERRORS"
-echo "Add them in HF Spaces → Settings → Secrets"
+  echo "Add them in HF Spaces → Settings → Secrets"
   exit 1
 fi
 
@@ -252,6 +252,14 @@ promote_first_pool_key "CEREBRAS_API_KEY" "CEREBRAS_API_KEYS"
 promote_first_pool_key "VENICE_API_KEY" "VENICE_API_KEYS"
 promote_first_pool_key "SYNTHETIC_API_KEY" "SYNTHETIC_API_KEYS"
 promote_first_pool_key "COPILOT_GITHUB_TOKEN" "COPILOT_GITHUB_TOKENS"
+promote_first_pool_key "AI_GATEWAY_API_KEY" "AI_GATEWAY_API_KEYS"
+
+# kimi-coding uses Moonshot AI endpoint (api.moonshot.cn).
+# If KIMI_API_KEY is set but MOONSHOT_API_KEY is not, mirror it so the
+# multi-provider-key-rotator (which matches on api.moonshot.cn) injects it.
+if [ -z "${MOONSHOT_API_KEY:-}" ] && [ -n "${KIMI_API_KEY:-}" ]; then
+  export MOONSHOT_API_KEY="$KIMI_API_KEY"
+fi
 promote_first_pool_key "HUGGINGFACE_HUB_TOKEN" "HUGGINGFACE_HUB_TOKENS"
 
 # Compatibility aliases for Google provider secrets some users already have.
@@ -840,7 +848,15 @@ start_jupyter_once() {
     return 0
   fi
 
-  JUPYTER_TOKEN="${JUPYTER_TOKEN:-huggingface}"
+  # Security guard: refuse to start JupyterLab with the insecure default token.
+  # JupyterLab exposes a full shell — a weak token is equivalent to no auth.
+  if [ -z "${JUPYTER_TOKEN:-}" ] || [ "${JUPYTER_TOKEN}" = "huggingface" ]; then
+    echo "ERROR: JUPYTER_TOKEN is unset or still set to the insecure default (\"huggingface\")." >&2
+    echo "       JupyterLab grants full shell access. Set a strong, unique token in your Space secrets." >&2
+    echo "       Hint:  openssl rand -hex 32" >&2
+    echo "       DEV_MODE active but JupyterLab will NOT start until JUPYTER_TOKEN is changed." >&2
+    return 1
+  fi
   JUPYTER_ROOT_DIR="${JUPYTER_ROOT_DIR:-/home/node}"
   if [ "$JUPYTER_ROOT_DIR" = "/home/node/.openclaw/workspace" ] && [ "$DEVDATA_ENABLED" = "true" ]; then
     echo "Jupyter root was set to OpenClaw workspace; moving Jupyter root to /home/node/devdata to keep BACKUP and DEVDATA datasets separate."

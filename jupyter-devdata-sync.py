@@ -81,9 +81,48 @@ def repo_id(api) -> str:
         raise RuntimeError("Cannot resolve HF namespace for devdata sync")
     return f"{ns}/{DATASET_NAME}"
 
+# Filename patterns that must never be synced to a public/private HF Dataset.
+# These are matched against the *name* of each path component (not the full path),
+# so ".env" matches /home/node/.env and /home/node/subdir/.env alike.
+import fnmatch as _fnmatch
+
+SECRET_FILENAME_PATTERNS = {
+    ".env",           # dotenv files — almost always contain API keys
+    ".env.*",         # .env.local, .env.production, etc.
+    "*secret*",       # any file/dir whose name contains "secret"
+    "*secrets*",
+    "*_secret*",
+    "*-secret*",
+    "*key*",          # private keys, API key files
+    "*_key*",
+    "*-key*",
+    "*token*",        # token files
+    "*_token*",
+    "*-token*",
+    "*.pem",          # TLS/SSH private keys
+    "*.key",          # generic key files
+    "*.p12",          # PKCS#12 bundles
+    "*.pfx",
+    "credentials",    # common credential file names
+    "credentials.*",
+    ".netrc",         # stores plaintext passwords
+    ".htpasswd",
+}
+
+
+def _name_is_secret(name: str) -> bool:
+    """Return True if *name* matches any secret-exclusion pattern."""
+    name_lower = name.lower()
+    return any(_fnmatch.fnmatch(name_lower, pat) for pat in SECRET_FILENAME_PATTERNS)
+
+
 def should_skip(p: Path):
-    parts = set(p.parts)
-    return any(x in parts for x in EXCLUDE)
+    # Skip directories/files in the hard-coded exclude set.
+    parts = p.parts
+    if any(x in parts for x in EXCLUDE):
+        return True
+    # Skip any component whose name looks like a secret file/dir.
+    return any(_name_is_secret(part) for part in parts)
 
 def snapshot(src: Path, dst: Path):
     for p in src.rglob("*"):

@@ -166,6 +166,33 @@ const PROVIDERS = [
     envPlural:  'HUGGINGFACE_HUB_TOKENS',       // plural variant
     envSingular:'HUGGINGFACE_HUB_TOKEN',
   },
+  {
+    name:       'venice',
+    hostname:   /(?:^|\.)api\.venice\.ai$/i,
+    envPlural:  'VENICE_API_KEYS',
+    envSingular:'VENICE_API_KEY',
+  },
+  {
+    name:       'github-copilot',
+    hostname:   /(?:^|\.)api\.githubcopilot\.com$/i,
+    envPlural:  'COPILOT_GITHUB_TOKENS',
+    envSingular:'COPILOT_GITHUB_TOKEN',
+  },
+  {
+    name:       'qianfan',
+    // Baidu Qianfan / ERNIE
+    hostname:   /(?:^|\.)(?:aip|qianfan)\.baidubce\.com$/i,
+    envPlural:  'QIANFAN_API_KEYS',
+    envSingular:'QIANFAN_API_KEY',
+  },
+  {
+    name:       'modelstudio',
+    // Aliyun DashScope / Qwen (both qwen/* and modelstudio/* prefixes)
+    hostname:   /(?:^|\.)dashscope\.aliyuncs\.com$/i,
+    envPlural:  'MODELSTUDIO_API_KEYS',
+    envSingular:'MODELSTUDIO_API_KEY',
+  },
+
 ];
 
 // ─── Key loading ─────────────────────────────────────────────────────────────
