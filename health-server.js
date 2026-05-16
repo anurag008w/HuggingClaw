@@ -184,17 +184,6 @@ function renderDashboard(data) {
     tile({ title: "Telegram", value: badge(TELEGRAM_ENABLED ? "Enabled" : "Disabled", TELEGRAM_ENABLED ? "ok" : "neutral"), detail: TELEGRAM_ENABLED ? "Bot channel active" : "Not configured", tone: TELEGRAM_ENABLED ? "ok" : "neutral" }),
   ];
 
-  if (WHATSAPP_ENABLED) {
-    const wa = data.whatsapp || {};
-    const waTone = wa.connected ? "ok" : wa.pairing ? "warn" : "neutral";
-    const waLabel = wa.connected ? "Connected" : wa.pairing ? "Pairing…" : wa.configured ? "Waiting" : "Disabled";
-    const waDetail = wa.connected
-      ? "WhatsApp channel active"
-      : wa.pairing
-        ? "Scan QR code in Control UI → WhatsApp"
-        : "WhatsApp not yet connected";
-    tiles.push(tile({ title: "WhatsApp", value: badge(waLabel, waTone), detail: waDetail, tone: waTone }));
-  }
 
   tiles.push(
     tile({ title: "Backup", value: badge(syncStatus.toUpperCase(), syncTone), detail: escapeHtml(data.sync?.message || "No status yet"), tone: syncTone, meta: data.sync?.timestamp ? `<span class="local-time" data-iso="${data.sync.timestamp}"></span>` : "" }),
