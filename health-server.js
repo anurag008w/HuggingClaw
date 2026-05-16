@@ -313,6 +313,17 @@ const server = http.createServer(async (req, res) => {
     return res.end(renderEnvBuilder());
   }
 
+  if (pathname === "/env-builder.js") {
+    try {
+      const js = fs.readFileSync(require("path").join(__dirname, "env-builder.js"), "utf8");
+      res.writeHead(200, { "Content-Type": "application/javascript" });
+      return res.end(js);
+    } catch (exc) {
+      res.writeHead(404, { "Content-Type": "text/plain" });
+      return res.end(`env-builder.js not found: ${exc.message}`);
+    }
+  }
+
   if (pathname === "/" || pathname === "/dashboard") {
     const [gatewayReady, jupyterReady] = await Promise.all([
       probePort(GATEWAY_HOST, GATEWAY_PORT, "/health"),
