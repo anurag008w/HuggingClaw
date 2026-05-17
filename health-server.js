@@ -130,6 +130,9 @@ async function detectSpacePrivacy() {
   _privacyDetectionResolve();
 }
 detectSpacePrivacy();
+// Re-check every 5 minutes so runtime public↔private changes are picked up
+// without needing a rebuild/restart.
+setInterval(detectSpacePrivacy, 5 * 60 * 1000);
 const CLOUDFLARE_KEEPALIVE_STATUS_FILE =
   "/tmp/huggingclaw-cloudflare-keepalive-status.json";
 
@@ -348,7 +351,6 @@ function renderPrivateRedirect(targetUrl) {
   const safeUrl = escapeHtml(targetUrl);
   return `<!doctype html><html lang="en"><head>
   <meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <meta http-equiv="refresh" content="3;url=${safeUrl}"/>
   <title>HuggingClaw — Private Space</title>
   <style>
     :root{color-scheme:dark}
@@ -371,8 +373,13 @@ function renderPrivateRedirect(targetUrl) {
     <div class="sub">Redirecting in 3 seconds&hellip;</div>
   </div>
   <script>
-    // Immediate redirect if JS available — don't wait for meta refresh
-    setTimeout(() => { window.location.replace(${JSON.stringify(targetUrl)}); }, 100);
+    // Only auto-redirect when NOT inside an iframe (e.g. HF App tab embeds this
+    // page in an iframe; navigating that iframe to huggingface.co is blocked by
+    // X-Frame-Options and causes "refused to connect" in the browser).
+    const _inFrame = (() => { try { return window.top !== window.self; } catch { return true; } })();
+    if (!_inFrame) {
+      setTimeout(() => { window.location.replace(${JSON.stringify(targetUrl)}); }, 100);
+    }
   </script>
 </body></html>`;
 }
