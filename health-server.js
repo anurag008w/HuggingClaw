@@ -57,8 +57,14 @@ const HF_SPACE_URL = deriveHfSpaceUrl();
 // Auto-detect space privacy via HF API at startup.
 // Caches result so every request doesn't hit the API.
 let SPACE_IS_PRIVATE = false;
+// Promise that resolves once the first privacy detection attempt completes.
+// Dashboard handler awaits this so the page is never rendered with a stale false.
+let _privacyDetectionDone = false;
+let _privacyDetectionResolve;
+const privacyDetectionReady = new Promise((res) => { _privacyDetectionResolve = res; });
+
 async function detectSpacePrivacy() {
-  if (!SPACE_ID) return;
+  if (!SPACE_ID) { _privacyDetectionDone = true; _privacyDetectionResolve(); return; }
   try {
     const token = (process.env.HF_TOKEN || "").trim();
     const reqOptions = {
@@ -79,8 +85,10 @@ async function detectSpacePrivacy() {
             if (res.statusCode === 200) {
               const data = JSON.parse(body);
               SPACE_IS_PRIVATE = data.private === true;
-            } else if (res.statusCode === 404 && !token) {
-              // 404 with no token usually means private space
+            } else if (!token) {
+              // Any non-200 response without a token means we can't read the space publicly.
+              // HF returns 401 (Unauthorized) or 403 (Forbidden) for private spaces — not just 404.
+              // Treat all of these as private so buttons don't open externally.
               SPACE_IS_PRIVATE = true;
             }
           } catch {}
@@ -93,7 +101,10 @@ async function detectSpacePrivacy() {
     });
     console.log(`[health-server] Space privacy detected: ${SPACE_IS_PRIVATE ? "private" : "public"}`);
   } catch {
-    // Network error — default to false (safe)
+    // Network error — leave SPACE_IS_PRIVATE as false (fail-open for public access)
+  } finally {
+    _privacyDetectionDone = true;
+    _privacyDetectionResolve();
   }
 }
 detectSpacePrivacy();
@@ -247,8 +258,40 @@ function renderDashboard(data) {
   const inEmbeddedApp = (() => { try { return window.top !== window.self; } catch { return true; } })();
   const isDirectHfSpaceHost = /\.hf\.space$/i.test(window.location.hostname);
   const HF_SPACE_URL = ${JSON.stringify(HF_SPACE_URL)};
-  const SPACE_IS_PRIVATE = ${JSON.stringify(SPACE_IS_PRIVATE)};
-  // ── Private Space Guard ──
+  // Server-side detected value (may be stale if page was cached — see /api/is-private)
+  let SPACE_IS_PRIVATE = ${JSON.stringify(SPACE_IS_PRIVATE)};
+
+  function applyLinkTargets() {
+    // Keep hero buttons in-frame for private spaces; open new tab for public spaces
+    // accessed via the HF iframe or directly at .hf.space.
+    const openInNewTab = !SPACE_IS_PRIVATE && (inEmbeddedApp || isDirectHfSpaceHost);
+    document.querySelectorAll('a[data-space-link]').forEach((a) => {
+      if (openInNewTab) {
+        a.setAttribute('target', '_blank');
+        a.setAttribute('rel', 'noopener noreferrer');
+      } else {
+        a.removeAttribute('target');
+        a.removeAttribute('rel');
+      }
+    });
+  }
+
+  applyLinkTargets();
+
+  // Fallback: if server rendered the page before privacy detection completed,
+  // re-fetch the live value from /api/is-private and reapply targets.
+  // This handles the startup race condition where SPACE_IS_PRIVATE was still false.
+  if (!SPACE_IS_PRIVATE && isDirectHfSpaceHost) {
+    fetch('/api/is-private', { cache: 'no-store' })
+      .then(r => r.json())
+      .then(d => {
+        if (d.isPrivate && !SPACE_IS_PRIVATE) {
+          SPACE_IS_PRIVATE = true;
+          applyLinkTargets(); // re-run: removes target="_blank" from buttons
+        }
+      })
+      .catch(() => {}); // silently ignore — server-rendered value stays
+  }
   // Direct .hf.space access outside the HF App iframe has no valid session cookie
   // for private spaces — HF CDN returns 404 before the request reaches the container.
   // Redirect users to huggingface.co/spaces/... which authenticates them properly.
@@ -259,21 +302,6 @@ function renderDashboard(data) {
     document.body.appendChild(notice);
     setTimeout(() => { window.location.replace(HF_SPACE_URL); }, 300);
   }
-  // If inside the HF App iframe on a PRIVATE space, keep navigation in the
-  // same frame — all routes (/app/, /terminal/, /env-builder) are proxied
-  // through this server so same-origin navigation works fine.
-  // Public spaces: open in new tab when in HF iframe or direct .hf.space
-  // so users can break out to the full standalone Space URL.
-  const openInNewTab = !SPACE_IS_PRIVATE && (inEmbeddedApp || isDirectHfSpaceHost);
-  document.querySelectorAll('a[data-space-link]').forEach((a) => {
-    if (openInNewTab) {
-      a.setAttribute('target', '_blank');
-      a.setAttribute('rel', 'noopener noreferrer');
-    } else {
-      a.removeAttribute('target');
-      a.removeAttribute('rel');
-    }
-  });
 </script>
 </body></html>`;
 }
@@ -406,6 +434,15 @@ function proxyHTTP(req, res, targetHost, targetPort, options = {}) {
 const server = http.createServer(async (req, res) => {
   const { pathname } = parseRequestUrl(req.url);
 
+  // Lightweight endpoint for client-side fallback detection.
+  // Called by the dashboard JS if it suspects the server-rendered SPACE_IS_PRIVATE
+  // value was stale (race condition at startup). No auth required — it's not sensitive.
+  if (pathname === "/api/is-private") {
+    if (!_privacyDetectionDone) await privacyDetectionReady;
+    res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+    return res.end(JSON.stringify({ isPrivate: SPACE_IS_PRIVATE }));
+  }
+
   if (pathname === "/health") {
     const gatewayReady = await probePort(GATEWAY_HOST, GATEWAY_PORT, "/health");
     res.writeHead(gatewayReady ? 200 : 503, { "Content-Type": "application/json" });
@@ -472,6 +509,11 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (pathname === "/" || pathname === "/dashboard") {
+    // Wait for the one-time privacy detection to finish before rendering.
+    // This prevents the race condition where the dashboard loads before the HF API
+    // responds and SPACE_IS_PRIVATE is incorrectly false, causing buttons to get
+    // target="_blank" and open externally even on a private space.
+    if (!_privacyDetectionDone) await privacyDetectionReady;
     if (isDirectHfSpaceRequest) {
       res.writeHead(200, { "Content-Type": "text/html" });
       return res.end(renderPrivateRedirect(HF_SPACE_URL));
