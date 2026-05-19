@@ -458,10 +458,10 @@ const FIELDS = [
     "g": "Core",
     "icon": "⚡",
     "k": "OPENCLAW_VERSION",
-    "lbl": "Pin OpenClaw version",
+    "lbl": "Pin OpenClaw version (build-time; rebuild required)",
     "type": "text",
     "ph": "latest",
-    "tag": "optional"
+    "tag": "build"
   },
 {
     "g": "Plugins",
@@ -2293,7 +2293,7 @@ function applyObj(obj, replace = false) {
       addCustomRow(key, val, true);
     }
   }
-  markSelected(); filter(); refresh();
+  sortAllSections(); markSelected(); filter(); refresh();
 }
 
 function autoCheck(key) {
@@ -2398,6 +2398,16 @@ function sortSection(cardEl) {
   [...checked, ...rest].forEach(c => cards.appendChild(c));
 }
 
+function sortAllSections() {
+  document.querySelectorAll('.cards').forEach(cards => {
+    const all     = [...cards.querySelectorAll('[data-row]')];
+    const checked = all.filter(c =>  c.querySelector('[data-check]')?.checked);
+    const rest    = all.filter(c => !c.querySelector('[data-check]')?.checked);
+    rest.sort((a, b) => Number(a.dataset.origIdx) - Number(b.dataset.origIdx));
+    [...checked, ...rest].forEach(c => cards.appendChild(c));
+  });
+}
+
 function bindFieldEvents() {
   document.querySelectorAll('[data-check]').forEach(el => el.addEventListener('change', () => { sortSection(el.closest('[data-row]')); markSelected(); refresh(); }));
   document.querySelectorAll('[data-key]').forEach(el => el.addEventListener('input', refresh));
@@ -2458,16 +2468,19 @@ refresh();
 $('search').oninput = filter;
 $('selectCommon').onclick = () => {
   document.querySelectorAll('[data-common="1"]').forEach(c => c.checked = true);
+  sortAllSections();
   markSelected();
   refresh();
 };
 $('selectVisible').onclick = () => {
   document.querySelectorAll('.sec:not(.sec-hidden) [data-row]:not(.hidden) [data-check]').forEach(c => c.checked = true);
+  sortAllSections();
   markSelected();
   refresh();
 };
 $('clearAll').onclick = () => {
   clearForm();
+  sortAllSections();
   markSelected();
   filter();
   refresh();

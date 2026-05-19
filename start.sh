@@ -42,6 +42,9 @@ try:
             continue
         if str(key) in {"HUGGINGCLAW_ENV_BUNDLE", "ENV_BUNDLE"}:
             continue
+        if str(key) == "OPENCLAW_VERSION":
+            print("Warning: OPENCLAW_VERSION from env bundle is ignored (build-time only; set HF Variable and rebuild).", file=sys.stderr)
+            continue
         if os.environ.get(str(key), ""):
             continue
         if value is None or isinstance(value, (dict, list)):
