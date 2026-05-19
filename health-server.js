@@ -664,11 +664,11 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       const token = decodeURIComponent((body.match(/(?:^|&)token=([^&]*)/) || [])[1] || "").replace(/\+/g, " ");
       if (safeEqual(token, GATEWAY_TOKEN)) {
-        const cookie = `hc_env_auth=${encodeURIComponent(GATEWAY_TOKEN)}; Path=/env-builder; HttpOnly; SameSite=Strict; Max-Age=86400`;
+        const cookie = `hc_env_auth=${encodeURIComponent(GATEWAY_TOKEN)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400`;
         res.writeHead(302, { Location: "/env-builder", "Set-Cookie": cookie, "Cache-Control": "no-store" });
         return res.end();
       }
-      res.writeHead(200, { "Content-Type": "text/html" });
+      res.writeHead(200, { "Content-Type": "text/html", "Cache-Control": "no-store" });
       return res.end(renderEnvBuilderLogin(true));
     }
     res.writeHead(302, { Location: "/env-builder", "Cache-Control": "no-store" });
@@ -676,31 +676,31 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (pathname === "/env-builder/logout") {
-    res.writeHead(302, { Location: "/env-builder", "Set-Cookie": "hc_env_auth=; Path=/env-builder; HttpOnly; Max-Age=0", "Cache-Control": "no-store" });
+    res.writeHead(302, { Location: "/env-builder", "Set-Cookie": "hc_env_auth=; Path=/; HttpOnly; Max-Age=0", "Cache-Control": "no-store" });
     return res.end();
   }
 
   if (pathname === "/env-builder" || pathname === "/env-builder/") {
     if (isDirectHfSpaceRequest) {
-      res.writeHead(200, { "Content-Type": "text/html" });
+      res.writeHead(200, { "Content-Type": "text/html", "Cache-Control": "no-store" });
       return res.end(renderPrivateRedirect(HF_SPACE_URL));
     }
     if (!isEnvBuilderAuthed(req)) {
-      res.writeHead(200, { "Content-Type": "text/html" });
+      res.writeHead(200, { "Content-Type": "text/html", "Cache-Control": "no-store" });
       return res.end(renderEnvBuilderLogin(false));
     }
-    res.writeHead(200, { "Content-Type": "text/html" });
+    res.writeHead(200, { "Content-Type": "text/html", "Cache-Control": "no-store" });
     return res.end(renderEnvBuilder());
   }
 
   if (pathname === "/env-builder.js") {
     if (!isEnvBuilderAuthed(req)) {
-      res.writeHead(401, { "Content-Type": "text/plain" });
+      res.writeHead(401, { "Content-Type": "text/plain", "Cache-Control": "no-store", "Vary": "Cookie" });
       return res.end("Unauthorized");
     }
     try {
       const js = fs.readFileSync(require("path").join(__dirname, "env-builder.js"), "utf8");
-      res.writeHead(200, { "Content-Type": "application/javascript" });
+      res.writeHead(200, { "Content-Type": "application/javascript", "Cache-Control": "no-store", "Vary": "Cookie" });
       return res.end(js);
     } catch (exc) {
       res.writeHead(404, { "Content-Type": "text/plain" });
