@@ -2066,7 +2066,7 @@ function valueControlHTML(field) {
   const isSecret = !!field.secret;
   const isTextarea = field.type === 'textarea' || field.type === 'model_list';
   const hasPicker = !!field.options_key || Array.isArray(field.options);
-  const inputType = isSecret ? 'password' : (field.type === 'number' ? 'number' : 'text');
+  const inputType = (isSecret || field.type === 'password') ? 'password' : (field.type === 'number' ? 'number' : 'text');
 
   let control = '';
   if (field.type === 'toggle') {
