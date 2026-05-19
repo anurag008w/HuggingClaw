@@ -23,9 +23,13 @@ const JUPYTER_BASE = normalizeBase(process.env.JUPYTER_BASE, "/terminal");
 const GATEWAY_TOKEN = (process.env.GATEWAY_TOKEN || "").trim();
 const DEV_MODE_ENABLED = isTrue(process.env.DEV_MODE);
 // Default true. Only false when DEV_MODE=false or HUGGINGCLAW_JUPYTER_ENABLED=false is explicitly set.
+// HUGGINGCLAW_JUPYTER_ENABLED=true is the explicit user override and always wins.
 const JUPYTER_ENABLED =
-  !/^(false|0|no|off)$/i.test(String(process.env.DEV_MODE || "").trim()) &&
-  !/^(false|0|no|off)$/i.test(String(process.env.HUGGINGCLAW_JUPYTER_ENABLED || "").trim());
+  /^(true|1|yes|on)$/i.test(String(process.env.HUGGINGCLAW_JUPYTER_ENABLED || "").trim()) ||
+  (
+    !/^(false|0|no|off)$/i.test(String(process.env.DEV_MODE || "").trim()) &&
+    !/^(false|0|no|off)$/i.test(String(process.env.HUGGINGCLAW_JUPYTER_ENABLED || "").trim())
+  );
 const startTime = Date.now();
 const LLM_MODEL = process.env.LLM_MODEL || "Not Set";
 const LLM_PROVIDER = LLM_MODEL.includes("/") ? LLM_MODEL.split("/")[0] : "";
@@ -100,7 +104,7 @@ async function detectSpacePrivacy() {
     return;
   }
 
-  const token = (process.env.HF_TOKEN || "").trim();
+  const token = (process.env.HF_TOKEN || process.env.HUGGINGFACE_HUB_TOKEN || "").trim();
   const reqOptions = {
     hostname: "huggingface.co",
     path: `/api/spaces/${SPACE_ID}`,
