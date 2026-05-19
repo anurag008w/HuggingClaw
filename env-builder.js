@@ -619,22 +619,6 @@ const FIELDS = [
   {
     "g": "Core",
     "icon": "⚡",
-    "k": "WS_MIN_PROTOCOL",
-    "lbl": "Min WebSocket protocol",
-    "type": "number",
-    "ph": "1"
-  },
-  {
-    "g": "Core",
-    "icon": "⚡",
-    "k": "WS_MAX_PROTOCOL",
-    "lbl": "Max WebSocket protocol",
-    "type": "number",
-    "ph": "5"
-  },
-  {
-    "g": "Core",
-    "icon": "⚡",
     "k": "GATEWAY_MAX_RESTARTS",
     "lbl": "Gateway max restarts",
     "type": "number",
@@ -829,15 +813,6 @@ const FIELDS = [
   {
     "g": "Core",
     "icon": "⚡",
-    "k": "KEEP_ALIVE_INTERVAL",
-    "lbl": "Keep-alive ping interval (seconds)",
-    "type": "number",
-    "ph": "300",
-    "common": 1
-  },
-  {
-    "g": "Core",
-    "icon": "⚡",
     "k": "OPENCLAW_DISABLE_BONJOUR",
     "lbl": "Disable Bonjour/mDNS discovery",
     "type": "toggle",
@@ -930,22 +905,6 @@ const FIELDS = [
     "lbl": "Jupyter root directory",
     "type": "text",
     "ph": "/home/node"
-  },
-  {
-    "g": "Backup",
-    "icon": "💾",
-    "k": "WORKSPACE_GIT_USER",
-    "lbl": "Workspace git author email",
-    "type": "text",
-    "ph": "openclaw@example.com"
-  },
-  {
-    "g": "Backup",
-    "icon": "💾",
-    "k": "WORKSPACE_GIT_NAME",
-    "lbl": "Workspace git author name",
-    "type": "text",
-    "ph": "OpenClaw Bot"
   },
   {
     "g": "Provider Keys",
