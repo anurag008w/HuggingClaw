@@ -2115,7 +2115,7 @@ function cardHTML(f, origIdx = 0) {
   const tm = TAG_META[f.tag] || TAG_META.optional;
   const badge = `<span class="badge ${tm.cls}">${tm.lbl}</span>`;
 
-  return `<div class="env-card" data-row data-orig-idx="${origIdx}" data-group="${esc(f.g)}" data-search="${esc((f.g + ' ' + f.k + ' ' + (f.lbl || '') + ' ' + (f.tag || '')).toLowerCase())}">
+  return `<div class="env-card" data-row data-orig-idx="${origIdx}" data-group="${esc(f.g)}" data-search="${esc((f.g + ' ' + f.k + ' ' + (f.lbl || '') + ' ' + (f.tag || '')).toLowerCase())}" data-tag="${esc(f.tag || 'optional')}">
     <div class="card-top">
       <input type="checkbox" class="card-check" data-check="${esc(f.k)}" ${f.common ? 'data-common="1"' : ''}>
       <div class="card-info">
@@ -2465,6 +2465,12 @@ refresh();
 
 // ── Events ──
 $('search').oninput = filter;
+$('selectRequired').onclick = () => {
+  document.querySelectorAll('[data-row][data-tag="critical"] [data-check]').forEach(c => c.checked = true);
+  sortAllSections();
+  markSelected();
+  refresh();
+};
 $('selectCommon').onclick = () => {
   document.querySelectorAll('[data-common="1"]').forEach(c => c.checked = true);
   sortAllSections();

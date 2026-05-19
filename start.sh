@@ -676,7 +676,7 @@ CONFIG_JSON=$(jq \
    | (if $spaceHost != "" then
         .gateway.controlUi.allowedOrigins = ["https://" + $spaceHost]
       else . end)
-   | (if $password != "" then
+   | (if ($password != "" and (.gateway.auth.token // "") == "") then
         .gateway.auth.mode = "password" | .gateway.auth.password = $password
       else . end)' <<<"$CONFIG_JSON")
 
