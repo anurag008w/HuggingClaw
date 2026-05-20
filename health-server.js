@@ -3,6 +3,7 @@ const http = require("http");
 const https = require("https");
 const fs = require("fs");
 const net = require("net");
+const { timingSafeEqual } = require("crypto");
 
 function isTrue(value) {
   return /^(true|1|yes|on)$/i.test(String(value || "").trim());
@@ -258,14 +259,10 @@ function parseCookies(req) {
 // Constant-time comparison — prevent timing attacks on token check
 function safeEqual(a, b) {
   if (typeof a !== "string" || typeof b !== "string") return false;
-  // Pad both to the same length so the loop always takes constant time,
-  // preventing token length from being leaked via early-return timing.
-  const len = Math.max(a.length, b.length, 1);
-  const pa = a.padEnd(len, "\0");
-  const pb = b.padEnd(len, "\0");
-  let d = a.length === b.length ? 0 : 1; // length mismatch → always fail
-  for (let i = 0; i < len; i++) d |= pa.charCodeAt(i) ^ pb.charCodeAt(i);
-  return d === 0;
+  const ba = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ba.length !== bb.length) return false;
+  return timingSafeEqual(ba, bb);
 }
 
 function isEnvBuilderAuthed(req) {

@@ -975,6 +975,15 @@ const FIELDS = [
 {
     "g": "Runtime",
     "icon": "⚙️",
+    "k": "SESSIONS_MIN_SYNC_GAP",
+    "lbl": "Sessions min sync gap (seconds)",
+    "type": "number",
+    "ph": "30",
+    "tag": "advanced"
+  },
+{
+    "g": "Runtime",
+    "icon": "⚙️",
     "k": "JUPYTER_ROOT_DIR",
     "lbl": "Jupyter root directory",
     "type": "text",
@@ -995,15 +1004,6 @@ const FIELDS = [
     "icon": "🔑",
     "k": "OPENAI_API_KEY",
     "lbl": "OpenAI (GPT)",
-    "type": "password",
-    "common": 0,
-    "tag": "credential"
-  },
-{
-    "g": "Provider Keys",
-    "icon": "🔑",
-    "k": "GOOGLE_API_KEY",
-    "lbl": "Google AI Studio",
     "type": "password",
     "common": 0,
     "tag": "credential"
@@ -1243,15 +1243,6 @@ const FIELDS = [
     "tag": "credential"
   },
 {
-    "g": "Provider Keys",
-    "icon": "🔑",
-    "k": "CLOUDFLARE_API_TOKEN",
-    "lbl": "Cloudflare API token",
-    "type": "password",
-    "common": 0,
-    "tag": "credential"
-  },
-{
     "g": "Rotation Pools",
     "icon": "🔄",
     "k": "ANTHROPIC_API_KEYS",
@@ -1272,14 +1263,6 @@ const FIELDS = [
     "icon": "🔄",
     "k": "GEMINI_API_KEYS",
     "lbl": "Gemini pool",
-    "type": "text",
-    "tag": "advanced"
-  },
-{
-    "g": "Rotation Pools",
-    "icon": "🔄",
-    "k": "GOOGLE_API_KEYS",
-    "lbl": "Google pool",
     "type": "text",
     "tag": "advanced"
   },
