@@ -752,6 +752,7 @@ def loop() -> int:
         if trigger == "settled":
             print("OpenClaw config changed and settled; syncing immediately.")
         if trigger == "sessions":
+            last_sessions_sync_time = time.monotonic()
             print("Session files changed; syncing immediately.")
         sync_trigger = trigger
 
