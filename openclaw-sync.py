@@ -50,6 +50,7 @@ CONFIG_SETTLE_SECONDS = max(
     0.0,
     float(os.environ.get("OPENCLAW_CONFIG_SETTLE_SECONDS", "3")),
 )
+SESSIONS_MIN_SYNC_GAP = int(os.environ.get("SESSIONS_MIN_SYNC_GAP", "30"))
 HF_TOKEN = os.environ.get("HF_TOKEN", "").strip()
 HF_USERNAME = os.environ.get("HF_USERNAME", "").strip()
 SPACE_AUTHOR_NAME = os.environ.get("SPACE_AUTHOR_NAME", "").strip()
@@ -615,7 +616,10 @@ def wait_for_config_settle(config_marker: tuple[int, int, int]) -> tuple[str, tu
     return ("stopped", current_marker)
 
 
-def wait_for_sync_trigger(config_marker: tuple[int, int, int]) -> tuple[str, tuple[int, int, int]]:
+def wait_for_sync_trigger(
+    config_marker: tuple[int, int, int],
+    last_sessions_sync_time: float = 0.0,
+) -> tuple[str, tuple[int, int, int]]:
     deadline = time.monotonic() + max(0, INTERVAL)
     # BUG FIX: also watch sessions directory so new/updated sessions
     # trigger an immediate sync instead of waiting the full interval.
@@ -628,11 +632,15 @@ def wait_for_sync_trigger(config_marker: tuple[int, int, int]) -> tuple[str, tup
         if current_config_marker != config_marker:
             return wait_for_config_settle(current_config_marker)
 
-        # Sessions changed -> trigger sync immediately (no settle needed;
-        # session files are written atomically by OpenClaw).
-        current_sessions_marker = sessions_marker()
-        if current_sessions_marker != last_sessions_marker:
-            return ("sessions", current_config_marker)
+        sessions_gap_elapsed = (
+            time.monotonic() - last_sessions_sync_time >= SESSIONS_MIN_SYNC_GAP
+        )
+        if sessions_gap_elapsed:
+            # Sessions changed -> trigger sync immediately (no settle needed;
+            # session files are written atomically by OpenClaw).
+            current_sessions_marker = sessions_marker()
+            if current_sessions_marker != last_sessions_marker:
+                return ("sessions", current_config_marker)
 
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -689,11 +697,16 @@ def loop() -> int:
         print("Initial workspace fingerprint captured.")
 
     config_marker = file_marker(OPENCLAW_CONFIG_FILE)
+    last_sessions_sync_time = 0.0
+
+    sync_trigger = "startup"
 
     while not STOP_EVENT.is_set():
         try:
             sync_started_config_marker = file_marker(OPENCLAW_CONFIG_FILE)
             last_fingerprint, last_marker = sync_once(last_fingerprint, last_marker)
+            if sync_trigger == "sessions":
+                last_sessions_sync_time = time.monotonic()
             config_marker = file_marker(OPENCLAW_CONFIG_FILE)
 
             if config_marker != sync_started_config_marker:
@@ -706,14 +719,19 @@ def loop() -> int:
             write_status("error", f"Sync failed: {exc}")
             print(f"Workspace sync failed: {exc}")
             config_marker = file_marker(OPENCLAW_CONFIG_FILE)
+            STOP_EVENT.wait(min(30, SESSIONS_MIN_SYNC_GAP))
 
-        trigger, config_marker = wait_for_sync_trigger(config_marker)
+        trigger, config_marker = wait_for_sync_trigger(
+            config_marker,
+            last_sessions_sync_time=last_sessions_sync_time,
+        )
         if trigger == "stopped":
             break
         if trigger == "settled":
             print("OpenClaw config changed and settled; syncing immediately.")
         if trigger == "sessions":
             print("Session files changed; syncing immediately.")
+        sync_trigger = trigger
 
     return 0
 
