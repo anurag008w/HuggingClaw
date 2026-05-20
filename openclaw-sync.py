@@ -83,6 +83,7 @@ RESET_MARKER = WORKSPACE / ".reset_credentials"
 HF_API = HfApi(token=HF_TOKEN) if HF_TOKEN else None
 STOP_EVENT = threading.Event()
 _REPO_ID_CACHE: str | None = None
+_SESSIONS_FILE_DIGEST_CACHE: dict[str, tuple[int, int, str]] = {}
 WorkspaceMarker: TypeAlias = tuple[int, int, int, str]
 
 
@@ -600,6 +601,9 @@ def sessions_marker() -> tuple[int, int, int, str]:
     newest_mtime = 0
     metadata_hasher = hashlib.sha256()
 
+    global _SESSIONS_FILE_DIGEST_CACHE
+    next_cache: dict[str, tuple[int, int, str]] = {}
+
     for profile_dir in sorted(SESSIONS_ROOT.iterdir()):
         if not profile_dir.is_dir():
             continue
@@ -617,18 +621,30 @@ def sessions_marker() -> tuple[int, int, int, str]:
                 stat = path.stat()
             except OSError:
                 continue
+            size = int(stat.st_size)
+            mtime_ns = int(stat.st_mtime_ns)
+            cache_key = f"{profile_dir.name}\0{rel}"
             digest.update(rel.encode("utf-8"))
             digest.update(b"\0")
-            digest.update(str(int(stat.st_size)).encode("ascii"))
+            digest.update(str(size).encode("ascii"))
             digest.update(b"\0")
-            digest.update(str(int(stat.st_mtime_ns)).encode("ascii"))
+            digest.update(str(mtime_ns).encode("ascii"))
             digest.update(b"\0")
-            try:
-                with path.open("rb") as handle:
-                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                        digest.update(chunk)
-            except (FileNotFoundError, IsADirectoryError, NotADirectoryError):
-                continue
+            cached = _SESSIONS_FILE_DIGEST_CACHE.get(cache_key)
+            if cached is not None and cached[0] == size and cached[1] == mtime_ns:
+                file_digest = cached[2]
+            else:
+                file_hasher = hashlib.sha256()
+                try:
+                    with path.open("rb") as handle:
+                        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                            file_hasher.update(chunk)
+                except (FileNotFoundError, IsADirectoryError, NotADirectoryError):
+                    continue
+                file_digest = file_hasher.hexdigest()
+            next_cache[cache_key] = (size, mtime_ns, file_digest)
+            digest.update(file_digest.encode("ascii"))
+            digest.update(b"\0")
 
         file_count += marker[0]
         total_size += marker[1]
@@ -638,6 +654,7 @@ def sessions_marker() -> tuple[int, int, int, str]:
         metadata_hasher.update(digest.hexdigest().encode("ascii"))
         metadata_hasher.update(b"\0")
 
+    _SESSIONS_FILE_DIGEST_CACHE = next_cache
     return (file_count, total_size, newest_mtime, metadata_hasher.hexdigest())
 
 
