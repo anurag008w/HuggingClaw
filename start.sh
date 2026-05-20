@@ -925,6 +925,17 @@ graceful_shutdown() {
   echo "Shutting down..."
   if [ -f "/home/node/app/openclaw-sync.py" ] && [ -n "${HF_TOKEN:-}" ]; then
     echo "Saving state before exit..."
+    # BUG FIX: kill the background sync loop *before* running the shutdown
+    # syncs.  The loop holds the sync lock while uploading; if it is
+    # mid-upload when sync-once-settled runs, the 8-second timeout fires
+    # before the lock is released and the settled-sync is silently skipped.
+    # Killing the loop first releases the lock immediately (fcntl.flock is
+    # released on process exit) so sync-once-settled can acquire it cleanly.
+    if [ -n "${SYNC_LOOP_PID:-}" ]; then
+      kill "$SYNC_LOOP_PID" 2>/dev/null || true
+      # Give Python a moment to flush and release the lock file.
+      sleep 0.5
+    fi
     timeout 8s python3 /home/node/app/openclaw-sync.py sync-once-settled || \
       echo "Warning: could not complete settled shutdown sync"
     sleep 1

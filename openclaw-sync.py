@@ -75,6 +75,7 @@ EXCLUDED_STATE_NAMES = {
     "browser",
     "npm",
 }
+SESSIONS_DIR = OPENCLAW_HOME / "agents" / "main" / "sessions"
 WHATSAPP_CREDS_DIR = OPENCLAW_HOME / "credentials" / "whatsapp" / "default"
 WHATSAPP_BACKUP_DIR = STATE_DIR / "credentials" / "whatsapp" / "default"
 RESET_MARKER = WORKSPACE / ".reset_credentials"
@@ -525,6 +526,15 @@ def is_valid_json_file(path: Path) -> bool:
         return False
 
 
+def sessions_marker() -> tuple[int, int, int, str]:
+    """Return a lightweight marker for the sessions directory.
+
+    Uses the same metadata_marker() logic so any new, deleted, or modified
+    session file is detected without hashing file contents.
+    """
+    return metadata_marker(SESSIONS_DIR)
+
+
 def wait_for_config_settle(config_marker: tuple[int, int, int]) -> tuple[str, tuple[int, int, int]]:
     stable_since = time.monotonic()
     current_marker = config_marker
@@ -549,11 +559,22 @@ def wait_for_config_settle(config_marker: tuple[int, int, int]) -> tuple[str, tu
 
 def wait_for_sync_trigger(config_marker: tuple[int, int, int]) -> tuple[str, tuple[int, int, int]]:
     deadline = time.monotonic() + max(0, INTERVAL)
+    # BUG FIX: also watch sessions directory so new/updated sessions
+    # trigger an immediate sync instead of waiting the full interval.
+    # Without this, sessions created between 180-second intervals were
+    # lost when the container restarted (e.g. HF Space going to sleep).
+    last_sessions_marker = sessions_marker()
 
     while not STOP_EVENT.is_set():
         current_config_marker = file_marker(OPENCLAW_CONFIG_FILE)
         if current_config_marker != config_marker:
             return wait_for_config_settle(current_config_marker)
+
+        # Sessions changed -> trigger sync immediately (no settle needed;
+        # session files are written atomically by OpenClaw).
+        current_sessions_marker = sessions_marker()
+        if current_sessions_marker != last_sessions_marker:
+            return ("sessions", current_config_marker)
 
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -633,6 +654,8 @@ def loop() -> int:
             break
         if trigger == "settled":
             print("OpenClaw config changed and settled; syncing immediately.")
+        if trigger == "sessions":
+            print("Session files changed; syncing immediately.")
 
     return 0
 
