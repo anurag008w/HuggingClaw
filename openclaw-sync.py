@@ -50,6 +50,7 @@ CONFIG_SETTLE_SECONDS = max(
     0.0,
     float(os.environ.get("OPENCLAW_CONFIG_SETTLE_SECONDS", "3")),
 )
+SESSIONS_MIN_SYNC_GAP = int(os.environ.get("SESSIONS_MIN_SYNC_GAP", "30"))
 HF_TOKEN = os.environ.get("HF_TOKEN", "").strip()
 HF_USERNAME = os.environ.get("HF_USERNAME", "").strip()
 SPACE_AUTHOR_NAME = os.environ.get("SPACE_AUTHOR_NAME", "").strip()
@@ -75,12 +76,14 @@ EXCLUDED_STATE_NAMES = {
     "browser",
     "npm",
 }
+SESSIONS_ROOT = OPENCLAW_HOME / "agents"
 WHATSAPP_CREDS_DIR = OPENCLAW_HOME / "credentials" / "whatsapp" / "default"
 WHATSAPP_BACKUP_DIR = STATE_DIR / "credentials" / "whatsapp" / "default"
 RESET_MARKER = WORKSPACE / ".reset_credentials"
 HF_API = HfApi(token=HF_TOKEN) if HF_TOKEN else None
 STOP_EVENT = threading.Event()
 _REPO_ID_CACHE: str | None = None
+_SESSIONS_FILE_DIGEST_CACHE: dict[str, tuple[int, int, int, str]] = {}
 WorkspaceMarker: TypeAlias = tuple[int, int, int, str]
 
 
@@ -108,6 +111,35 @@ def count_files(path: Path) -> int:
     return sum(1 for child in path.rglob("*") if child.is_file())
 
 
+def copy_state_entry_with_retry(source_path: Path, backup_path: Path, attempts: int = 3) -> None:
+    """Copy one top-level .openclaw entry with short retries for hot files/dirs."""
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            if backup_path.exists():
+                if backup_path.is_dir():
+                    shutil.rmtree(backup_path, ignore_errors=True)
+                else:
+                    backup_path.unlink(missing_ok=True)
+            if source_path.is_dir():
+                shutil.copytree(source_path, backup_path)
+                return
+            if source_path.is_file():
+                shutil.copy2(source_path, backup_path)
+                return
+            return
+        except Exception as exc:
+            last_exc = exc
+            if attempt < attempts:
+                time.sleep(0.2 * attempt)
+                if backup_path.exists():
+                    if backup_path.is_dir():
+                        shutil.rmtree(backup_path, ignore_errors=True)
+                    else:
+                        backup_path.unlink(missing_ok=True)
+                continue
+            raise last_exc
+
 def snapshot_state_into_workspace() -> None:
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -117,18 +149,47 @@ def snapshot_state_into_workspace() -> None:
         staging_dir = STATE_DIR / ".openclaw-staging"
         if staging_dir.exists():
             shutil.rmtree(staging_dir, ignore_errors=True)
-        staging_dir.mkdir(parents=True, exist_ok=True)
+        if OPENCLAW_STATE_BACKUP_DIR.exists():
+            shutil.copytree(OPENCLAW_STATE_BACKUP_DIR, staging_dir)
+        else:
+            staging_dir.mkdir(parents=True, exist_ok=True)
 
+        skipped_entries: list[tuple[str, Exception]] = []
+        copied_entry_names: set[str] = set()
         for source_path in OPENCLAW_HOME.iterdir():
             if source_path.name in EXCLUDED_STATE_NAMES:
                 continue
 
             backup_path = staging_dir / source_path.name
-            if source_path.is_dir():
-                shutil.copytree(source_path, backup_path)
-            elif source_path.is_file():
-                shutil.copy2(source_path, backup_path)
+            try:
+                copy_state_entry_with_retry(source_path, backup_path)
+                copied_entry_names.add(source_path.name)
+            except Exception as entry_exc:
+                skipped_entries.append((source_path.name, entry_exc))
 
+        # If staging was seeded from a previous backup, remove entries that no
+        # longer exist in OPENCLAW_HOME so the backup remains a true mirror of
+        # current state (except entries intentionally excluded from sync).
+        for staged_path in list(staging_dir.iterdir()):
+            if staged_path.name in EXCLUDED_STATE_NAMES:
+                continue
+            if staged_path.name in copied_entry_names:
+                continue
+            if staged_path.exists():
+                if staged_path.is_dir():
+                    shutil.rmtree(staged_path, ignore_errors=True)
+                else:
+                    staged_path.unlink(missing_ok=True)
+
+        # If any top-level state entries could not be copied, keep the last
+        # known-good version for only those entries (staging was seeded from
+        # previous backup). This preserves forward progress for the rest.
+        if skipped_entries:
+            for name, entry_exc in skipped_entries:
+                print(f"Warning: keeping previous state entry {name}: {entry_exc}")
+            print(
+                "Warning: OpenClaw state snapshot had copy failures; updated remaining state entries."
+            )
         # Atomically swap staging → real backup dir
         if OPENCLAW_STATE_BACKUP_DIR.exists():
             shutil.rmtree(OPENCLAW_STATE_BACKUP_DIR, ignore_errors=True)
@@ -525,6 +586,86 @@ def is_valid_json_file(path: Path) -> bool:
         return False
 
 
+def sessions_marker() -> tuple[int, int, int, str]:
+    """Return a lightweight marker for all agent session directories.
+
+    OpenClaw can use agent profiles beyond "main". Watch every
+    */sessions path under .openclaw/agents so session changes always trigger
+    syncs regardless of profile name.
+    """
+    if not SESSIONS_ROOT.exists():
+        return (0, 0, 0, "")
+
+    file_count = 0
+    total_size = 0
+    newest_mtime = 0
+    metadata_hasher = hashlib.sha256()
+
+    global _SESSIONS_FILE_DIGEST_CACHE
+    next_cache: dict[str, tuple[int, int, int, str]] = {}
+
+    for profile_dir in sorted(SESSIONS_ROOT.iterdir()):
+        if not profile_dir.is_dir():
+            continue
+        sessions_dir = profile_dir / "sessions"
+        if not sessions_dir.exists():
+            continue
+        # Use content fingerprinting for sessions so we detect changes even
+        # when file size + mtime metadata appear unchanged across quick writes.
+        # (Some tooling can rewrite files in-place with preserved timestamps.)
+        marker = metadata_marker(sessions_dir)
+        digest = hashlib.sha256()
+        for path in sorted(p for p in sessions_dir.rglob("*") if p.is_file()):
+            rel = path.relative_to(sessions_dir).as_posix()
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            size = int(stat.st_size)
+            mtime_ns = int(stat.st_mtime_ns)
+            ctime_ns = int(stat.st_ctime_ns)
+            cache_key = f"{profile_dir.name}\0{rel}"
+            digest.update(rel.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(str(size).encode("ascii"))
+            digest.update(b"\0")
+            digest.update(str(mtime_ns).encode("ascii"))
+            digest.update(b"\0")
+            digest.update(str(ctime_ns).encode("ascii"))
+            digest.update(b"\0")
+            cached = _SESSIONS_FILE_DIGEST_CACHE.get(cache_key)
+            if (
+                cached is not None
+                and cached[0] == size
+                and cached[1] == mtime_ns
+                and cached[2] == ctime_ns
+            ):
+                file_digest = cached[3]
+            else:
+                file_hasher = hashlib.sha256()
+                try:
+                    with path.open("rb") as handle:
+                        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                            file_hasher.update(chunk)
+                except (FileNotFoundError, IsADirectoryError, NotADirectoryError):
+                    continue
+                file_digest = file_hasher.hexdigest()
+            next_cache[cache_key] = (size, mtime_ns, ctime_ns, file_digest)
+            digest.update(file_digest.encode("ascii"))
+            digest.update(b"\0")
+
+        file_count += marker[0]
+        total_size += marker[1]
+        newest_mtime = max(newest_mtime, marker[2])
+        metadata_hasher.update(profile_dir.name.encode("utf-8"))
+        metadata_hasher.update(b"\0")
+        metadata_hasher.update(digest.hexdigest().encode("ascii"))
+        metadata_hasher.update(b"\0")
+
+    _SESSIONS_FILE_DIGEST_CACHE = next_cache
+    return (file_count, total_size, newest_mtime, metadata_hasher.hexdigest())
+
+
 def wait_for_config_settle(config_marker: tuple[int, int, int]) -> tuple[str, tuple[int, int, int]]:
     stable_since = time.monotonic()
     current_marker = config_marker
@@ -547,13 +688,31 @@ def wait_for_config_settle(config_marker: tuple[int, int, int]) -> tuple[str, tu
     return ("stopped", current_marker)
 
 
-def wait_for_sync_trigger(config_marker: tuple[int, int, int]) -> tuple[str, tuple[int, int, int]]:
+def wait_for_sync_trigger(
+    config_marker: tuple[int, int, int],
+    last_sessions_sync_time: float = 0.0,
+) -> tuple[str, tuple[int, int, int]]:
     deadline = time.monotonic() + max(0, INTERVAL)
+    # BUG FIX: also watch sessions directory so new/updated sessions
+    # trigger an immediate sync instead of waiting the full interval.
+    # Without this, sessions created between 180-second intervals were
+    # lost when the container restarted (e.g. HF Space going to sleep).
+    last_sessions_marker = sessions_marker()
 
     while not STOP_EVENT.is_set():
         current_config_marker = file_marker(OPENCLAW_CONFIG_FILE)
         if current_config_marker != config_marker:
             return wait_for_config_settle(current_config_marker)
+
+        sessions_gap_elapsed = (
+            time.monotonic() - last_sessions_sync_time >= SESSIONS_MIN_SYNC_GAP
+        )
+        if sessions_gap_elapsed:
+            # Sessions changed -> trigger sync immediately (no settle needed;
+            # session files are written atomically by OpenClaw).
+            current_sessions_marker = sessions_marker()
+            if current_sessions_marker != last_sessions_marker:
+                return ("sessions", current_config_marker)
 
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -610,11 +769,16 @@ def loop() -> int:
         print("Initial workspace fingerprint captured.")
 
     config_marker = file_marker(OPENCLAW_CONFIG_FILE)
+    last_sessions_sync_time = 0.0
+
+    sync_trigger = "startup"
 
     while not STOP_EVENT.is_set():
         try:
             sync_started_config_marker = file_marker(OPENCLAW_CONFIG_FILE)
             last_fingerprint, last_marker = sync_once(last_fingerprint, last_marker)
+            if sync_trigger == "sessions":
+                last_sessions_sync_time = time.monotonic()
             config_marker = file_marker(OPENCLAW_CONFIG_FILE)
 
             if config_marker != sync_started_config_marker:
@@ -627,12 +791,19 @@ def loop() -> int:
             write_status("error", f"Sync failed: {exc}")
             print(f"Workspace sync failed: {exc}")
             config_marker = file_marker(OPENCLAW_CONFIG_FILE)
+            STOP_EVENT.wait(min(30, SESSIONS_MIN_SYNC_GAP))
 
-        trigger, config_marker = wait_for_sync_trigger(config_marker)
+        trigger, config_marker = wait_for_sync_trigger(
+            config_marker,
+            last_sessions_sync_time=last_sessions_sync_time,
+        )
         if trigger == "stopped":
             break
         if trigger == "settled":
             print("OpenClaw config changed and settled; syncing immediately.")
+        if trigger == "sessions":
+            print("Session files changed; syncing immediately.")
+        sync_trigger = trigger
 
     return 0
 

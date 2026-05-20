@@ -57,7 +57,6 @@ secrets:
 - [💻 Local Development](#-local-development)
 - [🔗 CLI Access](#-cli-access)
 - [💻 JupyterLab Terminal](#-jupyterlab-terminal)
-- [🔍 Merge Comparison](#-merge-comparison)
 - [🏗️ Architecture](#-architecture)
 - [💓 Staying Alive](#-staying-alive)
 - [🐛 Troubleshooting](#-troubleshooting)
@@ -178,6 +177,7 @@ HuggingClaw automatically syncs your workspace (chats, settings, sessions) to a 
 | `SYNC_INTERVAL` | `180` | Full backup frequency in seconds |
 | `OPENCLAW_CONFIG_WATCH_INTERVAL` | `1` | How often to check `openclaw.json` for immediate settings sync |
 | `OPENCLAW_CONFIG_SETTLE_SECONDS` | `3` | How long `openclaw.json` must stay valid and unchanged before syncing |
+| `SESSIONS_MIN_SYNC_GAP` | `30` | Minimum seconds between session-triggered immediate syncs |
 
 ## 📦 Ephemeral Package Re-install *(Optional)*
 
@@ -242,7 +242,7 @@ Configure password access and network restrictions:
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
-| `OPENCLAW_PASSWORD` | — | Enable simple password auth instead of token |
+| `OPENCLAW_PASSWORD` | — | Enable simple password auth instead of token (applies only when `GATEWAY_TOKEN` is empty) |
 | `TRUSTED_PROXIES` | — | Comma-separated IPs of HF proxies |
 | `ALLOWED_ORIGINS` | — | Comma-separated allowed origins for Control UI |
 | `CLOUDFLARE_KEEPALIVE_ENABLED` | `true` | Set to `false` to disable the automatic Cloudflare KeepAlive worker |
@@ -371,19 +371,10 @@ The merged Space includes the Hugging Face JupyterLab template behavior inside t
 | `/app/` | OpenClaw Control UI | `7860` | Mounted behind the local reverse proxy |
 | `/terminal/` | JupyterLab terminal | `8888` | Auto-enabled when `GATEWAY_TOKEN` is set; uses `GATEWAY_TOKEN` as auth token unless `JUPYTER_TOKEN` is set separately. Set `DEV_MODE=false` to disable. |
 
-When enabled, the terminal notebook root is `/home/node`, so you can inspect HuggingClaw files, logs, workspace state, and runtime scripts from the browser.
+When enabled, the terminal notebook root defaults to `/home/node` (stable + writable by default). To browse a broader tree, set `JUPYTER_ROOT_DIR=/home`. Handy shortcuts are also created: `HuggingClaw`, `HuggingClaw-Workspace`, and `OpenClaw-Home`.
 
 > [!IMPORTANT]
 > No extra secret needed — `GATEWAY_TOKEN` is automatically reused as `JUPYTER_TOKEN`. Set a separate `JUPYTER_TOKEN` secret only if you want a different terminal credential.
-
-## 🔍 Merge Comparison
-
-This repository is a merge of two sources:
-
-- `anurag162008/HuggingClaw`: OpenClaw gateway, dashboard, Cloudflare proxy/keep-alive, Telegram/WhatsApp helpers, backup sync, key rotation, docs, and security metadata.
-- Hugging Face `SpacesExamples/jupyterlab` template: JupyterLab Docker behavior, token login UX, Hugging Face-branded login template, pinned Jupyter packages, and Git LFS defaults for large model/data artifacts.
-
-The main merge-specific change is the single-port router: HF Spaces exposes `7861`, while the router keeps OpenClaw at `/app/` and JupyterLab at `/terminal/` without leaking internal redirects such as `http://127.0.0.1:8888/...`.
 
 ## 🏗️ Architecture
 
