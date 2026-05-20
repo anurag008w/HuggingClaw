@@ -22,6 +22,8 @@ const JUPYTER_PORT = Number.parseInt(process.env.JUPYTER_PORT || "8888", 10);
 const JUPYTER_HOST = "127.0.0.1";
 const JUPYTER_BASE = normalizeBase(process.env.JUPYTER_BASE, "/terminal");
 const GATEWAY_TOKEN = (process.env.GATEWAY_TOKEN || "").trim();
+const SESSION_COOKIE = "hc_session";
+const LOGIN_PATH = "/login";
 const DEV_MODE_ENABLED = isTrue(process.env.DEV_MODE);
 // Explicit HUGGINGCLAW_JUPYTER_ENABLED=true enables Jupyter.
 // Otherwise DEV_MODE=true enables it unless HUGGINGCLAW_JUPYTER_ENABLED is explicitly false.
@@ -256,18 +258,58 @@ function parseCookies(req) {
   return Object.fromEntries(h.split(";").map(c => c.trim().split("=")).filter(p => p.length >= 2).map(([k, ...v]) => [k.trim(), decodeURIComponent(v.join("=").trim())]));
 }
 
-// Constant-time comparison — prevent timing attacks on token check
-function safeEqual(a, b) {
-  if (typeof a !== "string" || typeof b !== "string") return false;
-  const ba = Buffer.from(a);
-  const bb = Buffer.from(b);
-  if (ba.length !== bb.length) return false;
-  return timingSafeEqual(ba, bb);
+// Constant-time comparison using crypto — prevent timing attacks
+function timingSafeEqualString(a, b) {
+  if (!a || !b) return false;
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
 }
 
-function isEnvBuilderAuthed(req) {
-  if (!GATEWAY_TOKEN) return true; // unprotected when no token set
-  return safeEqual(parseCookies(req).hc_env_auth || "", GATEWAY_TOKEN);
+function expectedSessionValue() {
+  if (!GATEWAY_TOKEN) return "";
+  return crypto.createHmac("sha256", GATEWAY_TOKEN).update("huggingclaw-session-v1").digest("hex");
+}
+
+function isHttpsRequest(req) {
+  return req.headers["x-forwarded-proto"] === "https";
+}
+
+function buildSessionCookie(req) {
+  const secure = isHttpsRequest(req) ? "; Secure" : "";
+  return `${SESSION_COOKIE}=${encodeURIComponent(expectedSessionValue())}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400${secure}`;
+}
+
+function getBearerToken(req) {
+  const match = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || "");
+  return match ? match[1] : "";
+}
+
+function isAuthorized(req) {
+  if (!GATEWAY_TOKEN) return true;
+  return (
+    timingSafeEqualString(getBearerToken(req), GATEWAY_TOKEN) ||
+    timingSafeEqualString(parseCookies(req)[SESSION_COOKIE], expectedSessionValue())
+  );
+}
+
+function sanitizeNext(value) {
+  if (!value || typeof value !== "string") return "/";
+  if (!value.startsWith("/") || value.startsWith("//")) return "/";
+  return value;
+}
+
+function loginUrl(nextPath) {
+  return `${LOGIN_PATH}?next=${encodeURIComponent(sanitizeNext(nextPath))}`;
+}
+
+function requireAuth(req, res) {
+  if (isAuthorized(req)) return true;
+  const parsed = parseRequestUrl(req.url);
+  res.writeHead(302, { Location: loginUrl(parsed.pathname + parsed.search), "Cache-Control": "no-store" });
+  res.end();
+  return false;
 }
 
 function readBody(req) {
@@ -279,10 +321,11 @@ function readBody(req) {
   });
 }
 
-function renderEnvBuilderLogin(error = false) {
+function renderLoginPage(nextPath = "/", error = false) {
+  const safeNext = sanitizeNext(nextPath);
   return `<!doctype html><html lang="en"><head>
   <meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>HuggingClaw — Env Builder</title>
+  <title>HuggingClaw</title>
   <style>
     :root{color-scheme:dark;--bg:#08080f;--panel:#12111b;--line:#26243a;--text:#f6f4ff;--muted:#7f7a9e;--bad:#fb7185}
     *{box-sizing:border-box}body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);padding:24px}
@@ -290,19 +333,20 @@ function renderEnvBuilderLogin(error = false) {
     h1{margin:0 0 8px;font-size:1.4rem}
     .sub{color:var(--muted);font-size:.82rem;margin:0 0 24px}
     .row{display:flex;gap:8px;margin-top:16px}
-    input{flex:1;background:#0d0c18;border:1px solid var(--line);border-radius:7px;padding:10px 12px;color:var(--text);font-size:.95rem;outline:none}
+    input{flex:1;background:#0d0c18;border:1px solid var(--line);border-radius:7px;padding:10px 12px;color:var(--text);font-size:.95rem;outline:none;transition:border-color .15s}
     input:focus{border-color:#6366f1}
-    button{background:#fff;color:#000;border:none;border-radius:7px;padding:10px 20px;font-weight:700;font-size:.95rem;cursor:pointer;transition:opacity .15s}
+    button{background:#fff;color:#000;border:none;border-radius:7px;padding:10px 20px;font-weight:700;font-size:.95rem;cursor:pointer;transition:opacity .15s;white-space:nowrap}
     button:hover{opacity:.85}
     .err{color:var(--bad);font-size:.82rem;margin-top:10px}
     code{background:#232234;border:1px solid #34324c;border-radius:5px;padding:2px 6px;font-size:.88em}
   </style></head><body>
   <div class="card">
-    <h1>⚙️ Env Builder</h1>
+    <h1>🦞 HuggingClaw</h1>
     <p class="sub">Enter your <code>GATEWAY_TOKEN</code> to continue</p>
-    <form method="post" action="/env-builder/login">
+    <form method="post" action="${LOGIN_PATH}">
+      <input type="hidden" name="next" value="${escapeHtml(safeNext)}" />
       <div class="row">
-        <input type="password" name="token" placeholder="GATEWAY_TOKEN" autofocus autocomplete="current-password">
+        <input type="password" name="token" placeholder="GATEWAY_TOKEN" autofocus autocomplete="current-password" required>
         <button type="submit">Unlock</button>
       </div>
       ${error ? '<p class="err">Invalid token — try again</p>' : ""}
@@ -678,24 +722,37 @@ const server = http.createServer(async (req, res) => {
     !isSameOriginNav &&
     !isFromHFApp;
 
-  if (pathname === "/env-builder/login") {
+  if (pathname === LOGIN_PATH) {
+    if (isAuthorized(req)) {
+      const parsed = parseRequestUrl(req.url);
+      const next = sanitizeNext(parsed.searchParams.get("next") || "/");
+      res.writeHead(302, { Location: next, "Cache-Control": "no-store" });
+      return res.end();
+    }
+    if (req.method === "GET") {
+      const parsed = parseRequestUrl(req.url);
+      const next = sanitizeNext(parsed.searchParams.get("next") || "/");
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+      return res.end(renderLoginPage(next, false));
+    }
     if (req.method === "POST") {
       const body = await readBody(req);
-      const token = decodeURIComponent((body.match(/(?:^|&)token=([^&]*)/) || [])[1] || "").replace(/\+/g, " ");
-      if (safeEqual(token, GATEWAY_TOKEN)) {
-        const cookie = `hc_env_auth=${encodeURIComponent(GATEWAY_TOKEN)}; Path=/; HttpOnly; SameSite=None; Secure; Partitioned; Max-Age=86400`;
-        res.writeHead(302, { Location: "/env-builder", "Set-Cookie": cookie, "Cache-Control": "no-store" });
+      const params = new URLSearchParams(body);
+      const submittedToken = params.get("token") || "";
+      const next = sanitizeNext(params.get("next") || "/");
+      if (!GATEWAY_TOKEN || timingSafeEqualString(submittedToken, GATEWAY_TOKEN)) {
+        res.writeHead(302, { Location: next, "Set-Cookie": buildSessionCookie(req), "Cache-Control": "no-store" });
         return res.end();
       }
-      res.writeHead(200, { "Content-Type": "text/html", "Cache-Control": "no-store" });
-      return res.end(renderEnvBuilderLogin(true));
+      res.writeHead(401, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+      return res.end(renderLoginPage(next, true));
     }
-    res.writeHead(302, { Location: "/env-builder", "Cache-Control": "no-store" });
-    return res.end();
+    res.writeHead(405, { Allow: "GET, POST" });
+    return res.end("Method Not Allowed");
   }
 
-  if (pathname === "/env-builder/logout") {
-    res.writeHead(302, { Location: "/env-builder", "Set-Cookie": "hc_env_auth=; Path=/; HttpOnly; SameSite=None; Secure; Partitioned; Max-Age=0", "Cache-Control": "no-store" });
+  if (pathname === "/logout") {
+    res.writeHead(302, { Location: LOGIN_PATH, "Set-Cookie": `${SESSION_COOKIE}=; Path=/; HttpOnly; Max-Age=0`, "Cache-Control": "no-store" });
     return res.end();
   }
 
@@ -704,19 +761,13 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { "Content-Type": "text/html", "Cache-Control": "no-store" });
       return res.end(renderPrivateRedirect(HF_SPACE_URL));
     }
-    if (!isEnvBuilderAuthed(req)) {
-      res.writeHead(200, { "Content-Type": "text/html", "Cache-Control": "no-store" });
-      return res.end(renderEnvBuilderLogin(false));
-    }
-    res.writeHead(200, { "Content-Type": "text/html", "Cache-Control": "no-store" });
+    if (!requireAuth(req, res)) return;
+    res.writeHead(200, { "Content-Type": "text/html" });
     return res.end(renderEnvBuilder());
   }
 
   if (pathname === "/env-builder.js") {
-    if (!isEnvBuilderAuthed(req)) {
-      res.writeHead(401, { "Content-Type": "text/plain" });
-      return res.end("Unauthorized");
-    }
+    if (!requireAuth(req, res)) return;
     try {
       const js = fs.readFileSync(require("path").join(__dirname, "env-builder.js"), "utf8");
       res.writeHead(200, { "Content-Type": "application/javascript", "Cache-Control": "no-store" });
@@ -751,6 +802,7 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { "Content-Type": "text/html" });
       return res.end(renderPrivateRedirect(HF_SPACE_URL));
     }
+    if (!requireAuth(req, res)) return;
     return proxyHTTP(req, res, JUPYTER_HOST, JUPYTER_PORT, {
       publicPrefix: JUPYTER_BASE,
       // Jupyter is started with --ServerApp.base_url=/terminal/, so keep the
