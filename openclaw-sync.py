@@ -143,7 +143,10 @@ def snapshot_state_into_workspace() -> None:
         staging_dir = STATE_DIR / ".openclaw-staging"
         if staging_dir.exists():
             shutil.rmtree(staging_dir, ignore_errors=True)
-        staging_dir.mkdir(parents=True, exist_ok=True)
+        if OPENCLAW_STATE_BACKUP_DIR.exists():
+            shutil.copytree(OPENCLAW_STATE_BACKUP_DIR, staging_dir)
+        else:
+            staging_dir.mkdir(parents=True, exist_ok=True)
 
         skipped_entries: list[tuple[str, Exception]] = []
         for source_path in OPENCLAW_HOME.iterdir():
@@ -156,21 +159,19 @@ def snapshot_state_into_workspace() -> None:
             except Exception as entry_exc:
                 skipped_entries.append((source_path.name, entry_exc))
 
-        # If any top-level state entries could not be copied, keep the
-        # previous known-good snapshot instead of replacing it with a partial
-        # backup. We'll retry next pass.
+        # If any top-level state entries could not be copied, keep the last
+        # known-good version for only those entries (staging was seeded from
+        # previous backup). This preserves forward progress for the rest.
         if skipped_entries:
             for name, entry_exc in skipped_entries:
-                print(f"Warning: skipping state entry {name}: {entry_exc}")
+                print(f"Warning: keeping previous state entry {name}: {entry_exc}")
             print(
-                "Warning: OpenClaw state snapshot incomplete; keeping previous backup and retrying next sync."
+                "Warning: OpenClaw state snapshot had copy failures; updated remaining state entries."
             )
-            shutil.rmtree(staging_dir, ignore_errors=True)
-        else:
-            # Atomically swap staging → real backup dir
-            if OPENCLAW_STATE_BACKUP_DIR.exists():
-                shutil.rmtree(OPENCLAW_STATE_BACKUP_DIR, ignore_errors=True)
-            staging_dir.rename(OPENCLAW_STATE_BACKUP_DIR)
+        # Atomically swap staging → real backup dir
+        if OPENCLAW_STATE_BACKUP_DIR.exists():
+            shutil.rmtree(OPENCLAW_STATE_BACKUP_DIR, ignore_errors=True)
+        staging_dir.rename(OPENCLAW_STATE_BACKUP_DIR)
     except Exception as exc:
         # Clean up staging on failure so it doesn't interfere next time
         staging_dir = STATE_DIR / ".openclaw-staging"
