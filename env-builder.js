@@ -472,6 +472,24 @@ const FIELDS = [
     "tag": "advanced"
   },
 {
+    "g": "Plugins",
+    "icon": "🔄",
+    "k": "KEY_BLACKLIST_COOLDOWN_MS",
+    "lbl": "Key rotation base backoff (ms) — time a key is skipped after first 429/rate-limit (doubles on repeated failures; 24h after max strikes)",
+    "type": "text",
+    "ph": "60000",
+    "tag": "advanced"
+  },
+{
+    "g": "Plugins",
+    "icon": "🔄",
+    "k": "KEY_MAX_STRIKES",
+    "lbl": "Key rotation max strikes — consecutive 429/quota errors before a key is suspended for 24h",
+    "type": "text",
+    "ph": "3",
+    "tag": "advanced"
+  },
+{
     "g": "Startup",
     "icon": "⚡",
     "k": "DEV_MODE",
@@ -1309,7 +1327,7 @@ const FIELDS = [
     "g": "Rotation Pools",
     "icon": "🔄",
     "k": "MOONSHOT_API_KEYS",
-    "lbl": "Moonshot / Kimi pool",
+    "lbl": "Moonshot pool (merged with KIMI_API_KEYS into one rotation pool)",
     "type": "text",
     "tag": "advanced"
   },
@@ -1858,7 +1876,7 @@ const FIELDS = [
     "g": "Rotation Pools",
     "icon": "🔄",
     "k": "KIMI_API_KEYS",
-    "lbl": "Kimi pool",
+    "lbl": "Kimi pool (merged with MOONSHOT_API_KEYS into one rotation pool)",
     "type": "text",
     "tag": "advanced"
   },
