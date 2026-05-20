@@ -482,6 +482,7 @@ function proxyHTTP(req, res, targetHost, targetPort, options = {}) {
     "x-forwarded-host": req.headers.host,
     "x-forwarded-proto": "https",
     "x-forwarded-prefix": options.publicPrefix || "",
+    ...(options.extraHeaders || {}),
   };
 
   const canReplayRequest = req.method === "GET" || req.method === "HEAD";
@@ -630,12 +631,15 @@ const server = http.createServer(async (req, res) => {
       return res.end(renderPrivateRedirect(HF_SPACE_URL));
     }
     if (!requireAuth(req, res)) return;
+    // Inject the Jupyter token so JupyterLab skips its own login screen.
+    const jToken = (process.env.JUPYTER_TOKEN || "").trim();
     return proxyHTTP(req, res, JUPYTER_HOST, JUPYTER_PORT, {
       publicPrefix: JUPYTER_BASE,
       // Jupyter is started with --ServerApp.base_url=/terminal/, so keep the
       // /terminal prefix when proxying. Stripping it breaks static/theme URLs.
       stripPrefix: "",
       retryWithoutPrefixOn404: false,
+      extraHeaders: jToken ? { authorization: `token ${jToken}` } : {},
     });
   }
 
