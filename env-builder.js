@@ -975,6 +975,15 @@ const FIELDS = [
 {
     "g": "Runtime",
     "icon": "⚙️",
+    "k": "SESSIONS_MIN_SYNC_GAP",
+    "lbl": "Sessions min sync gap (seconds)",
+    "type": "number",
+    "ph": "30",
+    "tag": "advanced"
+  },
+{
+    "g": "Runtime",
+    "icon": "⚙️",
     "k": "JUPYTER_ROOT_DIR",
     "lbl": "Jupyter root directory",
     "type": "text",

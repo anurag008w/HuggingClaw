@@ -154,6 +154,7 @@ def snapshot_state_into_workspace() -> None:
             staging_dir.mkdir(parents=True, exist_ok=True)
 
         skipped_entries: list[tuple[str, Exception]] = []
+        copied_entry_names: set[str] = set()
         for source_path in OPENCLAW_HOME.iterdir():
             if source_path.name in EXCLUDED_STATE_NAMES:
                 continue
@@ -161,8 +162,23 @@ def snapshot_state_into_workspace() -> None:
             backup_path = staging_dir / source_path.name
             try:
                 copy_state_entry_with_retry(source_path, backup_path)
+                copied_entry_names.add(source_path.name)
             except Exception as entry_exc:
                 skipped_entries.append((source_path.name, entry_exc))
+
+        # If staging was seeded from a previous backup, remove entries that no
+        # longer exist in OPENCLAW_HOME so the backup remains a true mirror of
+        # current state (except entries intentionally excluded from sync).
+        for staged_path in list(staging_dir.iterdir()):
+            if staged_path.name in EXCLUDED_STATE_NAMES:
+                continue
+            if staged_path.name in copied_entry_names:
+                continue
+            if staged_path.exists():
+                if staged_path.is_dir():
+                    shutil.rmtree(staged_path, ignore_errors=True)
+                else:
+                    staged_path.unlink(missing_ok=True)
 
         # If any top-level state entries could not be copied, keep the last
         # known-good version for only those entries (staging was seeded from

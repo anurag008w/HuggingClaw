@@ -177,6 +177,7 @@ HuggingClaw automatically syncs your workspace (chats, settings, sessions) to a 
 | `SYNC_INTERVAL` | `180` | Full backup frequency in seconds |
 | `OPENCLAW_CONFIG_WATCH_INTERVAL` | `1` | How often to check `openclaw.json` for immediate settings sync |
 | `OPENCLAW_CONFIG_SETTLE_SECONDS` | `3` | How long `openclaw.json` must stay valid and unchanged before syncing |
+| `SESSIONS_MIN_SYNC_GAP` | `30` | Minimum seconds between session-triggered immediate syncs |
 
 ## 📦 Ephemeral Package Re-install *(Optional)*
 
