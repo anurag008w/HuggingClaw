@@ -61,7 +61,11 @@ EXCLUDE = {
 
 
 def enabled():
-    dev = is_true(os.environ.get("DEV_MODE", ""))
+    jupyter_override = os.environ.get("HUGGINGCLAW_JUPYTER_ENABLED", "")
+    if jupyter_override.strip():
+        dev = is_true(jupyter_override)
+    else:
+        dev = is_true(os.environ.get("DEV_MODE", ""))
     separate_dataset = DATASET_NAME != BACKUP_DATASET_NAME
     if ENABLE and dev and HF_TOKEN and not separate_dataset:
         print("DevData sync disabled: DEVDATA_DATASET_NAME must be separate from BACKUP_DATASET_NAME.")
@@ -97,22 +101,41 @@ import fnmatch as _fnmatch
 SECRET_FILENAME_PATTERNS = {
     ".env",           # dotenv files — almost always contain API keys
     ".env.*",         # .env.local, .env.production, etc.
-    "*secret*",       # any file/dir whose name contains "secret"
-    "*secrets*",
-    "*_secret*",
-    "*-secret*",
-    "*key*",          # private keys, API key files
-    "*_key*",
-    "*-key*",
-    "*token*",        # token files
-    "*_token*",
-    "*-token*",
+    "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+    "authorized_keys",
+    "known_hosts",
+    "secret",
+    "secrets",
+    "secret.*",
+    "*.secret",
+    "*_secret",
+    "*_secret.*",
+    "*-secret",
+    "*-secret.*",
+    "token",
+    "token.*",
+    "*.token",
+    "*_token",
+    "*_token.*",
+    "*-token",
+    "*-token.*",
+    "api_token",
+    "access_token",
+    "refresh_token",
+    "credentials",    # common credential file names
+    "credentials.*",
+    "auth.json",
+    "auth.yaml",
+    "auth.yml",
+    "auth.toml",
+    "auth.ini",
     "*.pem",          # TLS/SSH private keys
     "*.key",          # generic key files
     "*.p12",          # PKCS#12 bundles
     "*.pfx",
-    "credentials",    # common credential file names
-    "credentials.*",
     ".netrc",         # stores plaintext passwords
     ".htpasswd",
 }

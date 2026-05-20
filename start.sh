@@ -99,6 +99,11 @@ if [ "$DEV_MODE_ENABLED" != "true" ] && [ -z "${DEV_MODE:-}" ] && [ -n "${GATEWA
   DEV_MODE_ENABLED=true
   : # auto-enable is silent; set DEV_MODE=false to opt out
 fi
+if [ "$DEV_MODE_ENABLED" = "true" ]; then
+  export DEV_MODE=true
+else
+  export DEV_MODE=false
+fi
 SYNC_INTERVAL="$(trim_var "${SYNC_INTERVAL:-180}")"
 DEVDATA_DATASET_NAME="$(trim_var "${DEVDATA_DATASET_NAME:-huggingclaw-devdata}")"
 DEVDATA_SYNC_INTERVAL="$(trim_var "${DEVDATA_SYNC_INTERVAL:-180}")"
@@ -250,7 +255,6 @@ promote_first_pool_key() {
 promote_first_pool_key "ANTHROPIC_API_KEY" "ANTHROPIC_API_KEYS"
 promote_first_pool_key "OPENAI_API_KEY" "OPENAI_API_KEYS"
 promote_first_pool_key "GEMINI_API_KEY" "GEMINI_API_KEYS"
-promote_first_pool_key "GEMINI_API_KEY" "GOOGLE_API_KEYS"
 promote_first_pool_key "DEEPSEEK_API_KEY" "DEEPSEEK_API_KEYS"
 promote_first_pool_key "OPENROUTER_API_KEY" "OPENROUTER_API_KEYS"
 promote_first_pool_key "KILOCODE_API_KEY" "KILOCODE_API_KEYS"
@@ -283,11 +287,6 @@ if [ -z "${MOONSHOT_API_KEY:-}" ] && [ -n "${KIMI_API_KEY:-}" ]; then
   export MOONSHOT_API_KEY="$KIMI_API_KEY"
 fi
 promote_first_pool_key "HUGGINGFACE_HUB_TOKEN" "HUGGINGFACE_HUB_TOKENS"
-
-# Compatibility aliases for Google provider secrets some users already have.
-if [ -z "${GEMINI_API_KEY:-}" ] && [ -n "${GOOGLE_API_KEY:-}" ]; then
-  export GEMINI_API_KEY="$GOOGLE_API_KEY"
-fi
 
 # ── Setup directories ──
 mkdir -p /home/node/.openclaw/agents/main/sessions
@@ -323,7 +322,7 @@ else
   echo "HF_TOKEN not set — running without dataset persistence."
 fi
 
-CLOUDFLARE_WORKERS_TOKEN="${CLOUDFLARE_WORKERS_TOKEN:-${CLOUDFLARE_API_TOKEN:-}}"
+CLOUDFLARE_WORKERS_TOKEN="${CLOUDFLARE_WORKERS_TOKEN:-}"
 export CLOUDFLARE_WORKERS_TOKEN
 CF_PROXY_ENV_FILE="/tmp/huggingclaw-cloudflare-proxy.env"
 if [ -n "${CLOUDFLARE_WORKERS_TOKEN:-}" ] || [ -n "${CLOUDFLARE_PROXY_URL:-}" ]; then
