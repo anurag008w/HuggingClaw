@@ -455,3 +455,23 @@ Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for gui
 MIT — see [LICENSE](LICENSE) for details.
 
 *Made with ❤️ by [@somratpro](https://github.com/somratpro) for the OpenClaw community.*
+
+## 🧩 Consent-Gated Local Bridge (Optional)
+
+If you want OpenClaw to run approved actions on your own local PC with persistent consent, use the local bridge module in this repo.
+
+- Provisioning-token consent grant, then trusted token-based access.
+- Environment-based modes (`disabled`, `paired`, `trusted`).
+- Policy-protected shell/file actions with allowlist + denylist.
+
+Quick setup:
+
+```bash
+python3 -m pip install --user flask && bash local-bridge/install.sh
+~/.huggingclaw/local-bridge/start-local-bridge.sh
+```
+
+Read full details in `local-bridge/README.md`.
+
+
+For direct wiring in this project, set `HC_LOCAL_BRIDGE_URL` and `HC_LOCAL_BRIDGE_TOKEN` in HF settings, then call `/local-bridge/execute` through HuggingClaw.

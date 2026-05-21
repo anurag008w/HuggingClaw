@@ -51,6 +51,16 @@ const DEVDATA_ENABLED = JUPYTER_ENABLED && HF_BACKUP_ENABLED && DEVDATA_SEPARATE
 const APP_BASE = normalizeBase(process.env.APP_BASE, "/app");
 const SYNC_STATUS_FILE = "/tmp/sync-status.json";
 
+const LOCAL_BRIDGE_URL_RAW = (process.env.HC_LOCAL_BRIDGE_URL || "").trim();
+const LOCAL_BRIDGE_TOKEN = (process.env.HC_LOCAL_BRIDGE_TOKEN || "").trim();
+const LOCAL_BRIDGE_ENABLED = !!LOCAL_BRIDGE_URL_RAW;
+let LOCAL_BRIDGE_TARGET = null;
+try {
+  LOCAL_BRIDGE_TARGET = LOCAL_BRIDGE_ENABLED ? new URL(LOCAL_BRIDGE_URL_RAW) : null;
+} catch {
+  LOCAL_BRIDGE_TARGET = null;
+}
+
 // ── Private Space redirect support ──
 // HF automatically sets SPACE_ID as "username/spacename" in every Space container.
 const SPACE_ID = (process.env.SPACE_ID || "").trim();
@@ -635,7 +645,8 @@ function proxyHTTP(req, res, targetHost, targetPort, options = {}) {
   // configured with base paths. If a backend still returns 404, retry with the
   // mount prefix stripped; that covers images built before the base-path config
   // took effect and avoids the common HF Spaces "404 at /app or /terminal" trap.
-  proxyOnce(url.pathname + url.search, !!options.retryWithoutPrefixOn404);
+  const firstPath = typeof options.forcePath === "string" ? options.forcePath : (url.pathname + url.search);
+  proxyOnce(firstPath, !!options.retryWithoutPrefixOn404);
 }
 
 // ── HTTP server ──
@@ -791,6 +802,29 @@ const server = http.createServer(async (req, res) => {
     ]);
     res.writeHead(200, { "Content-Type": "text/html" });
     return res.end(renderDashboard({ uptimeHuman: formatUptime(Date.now() - startTime), gatewayReady, jupyterReady, sync: getSyncStatus(), whatsapp: readGuardianStatus(), keepalive: getKeepaliveStatus() }));
+  }
+
+
+  // Optional: local bridge passthrough for cloud->local execution.
+  // Configure HC_LOCAL_BRIDGE_URL (e.g. http://127.0.0.1:4317) and
+  // HC_LOCAL_BRIDGE_TOKEN (trusted token minted by /consent/grant).
+  if (pathname === "/local-bridge" || pathname.startsWith("/local-bridge/")) {
+    if (!LOCAL_BRIDGE_TARGET) {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ error: "local bridge not configured" }));
+    }
+    if (!requireAuth(req, res)) return;
+    const lbPath = pathname === "/local-bridge"
+      ? "/health"
+      : pathname.slice("/local-bridge".length) + parseRequestUrl(req.url).search;
+    const lbHeaders = LOCAL_BRIDGE_TOKEN ? { "x-hc-bridge-token": LOCAL_BRIDGE_TOKEN } : {};
+    return proxyHTTP(req, res, LOCAL_BRIDGE_TARGET.hostname, Number(LOCAL_BRIDGE_TARGET.port || (LOCAL_BRIDGE_TARGET.protocol === "https:" ? 443 : 80)), {
+      publicPrefix: "/local-bridge",
+      stripPrefix: "/local-bridge",
+      retryWithoutPrefixOn404: false,
+      extraHeaders: lbHeaders,
+      forcePath: lbPath,
+    });
   }
 
   // JupyterLab terminal
