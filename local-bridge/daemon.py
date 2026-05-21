@@ -34,6 +34,35 @@ DEFAULT_POLICY = {
     "max_write_bytes": 200000,
 }
 
+MODE_POLICY_PATCHES = {
+    "disabled": {
+        "allow_shell": False,
+        "allow_read": False,
+        "allow_write": False,
+        "allow_delete": False,
+    },
+    "paired": {
+        "allow_shell": True,
+        "allow_read": True,
+        "allow_write": False,
+        "allow_delete": False,
+    },
+    "trusted": {
+        "allow_shell": True,
+        "allow_read": True,
+        "allow_write": True,
+        "allow_delete": True,
+    },
+}
+
+
+def _effective_policy() -> dict[str, Any]:
+    policy = _read_json(POLICY_FILE)
+    patch = MODE_POLICY_PATCHES.get(MODE, {})
+    for key, value in patch.items():
+        policy[key] = value
+    return policy
+
 
 def _ensure_state() -> None:
     WORKDIR.mkdir(parents=True, exist_ok=True)
@@ -142,7 +171,7 @@ def execute() -> Any:
 
     payload = request.get_json(silent=True) or {}
     action = payload.get("action")
-    policy = _read_json(POLICY_FILE)
+    policy = _effective_policy()
 
     if action == "shell.run":
         if not policy.get("allow_shell", False):

@@ -10,9 +10,9 @@ This module provides a **consent-gated local daemon** for HuggingClaw/OpenClaw u
 
 Set `HC_LOCAL_BRIDGE_MODE`:
 
-- `disabled`: daemon refuses privileged requests.
-- `paired`: provisioning-token based grant creates trusted session token(s).
-- `trusted`: same as paired, but for dedicated single-user boxes where persistent consent is intended.
+- `disabled`: no execute access (all shell/read/write/delete denied).
+- `paired`: shell + read allowed; write/delete denied by mode profile.
+- `trusted`: shell + read + write + delete allowed by mode profile.
 
 ## One-command setup
 
@@ -83,3 +83,14 @@ Then OpenClaw-side callers can hit:
 - `POST /local-bridge/consent/revoke_all` (if you route provisioning token separately)
 
 Requests are protected by HuggingClaw gateway auth + bridge trusted token header injection.
+
+
+## Mode-based capability distribution
+
+| Mode | shell.run | file.read | file.write | file.delete |
+|---|---|---|---|---|
+| `disabled` | ❌ | ❌ | ❌ | ❌ |
+| `paired` | ✅ | ✅ | ❌ | ❌ |
+| `trusted` | ✅ | ✅ | ✅ | ✅ |
+
+> Note: Desktop streaming/control and mouse/keyboard automation are **not** part of this bridge currently.

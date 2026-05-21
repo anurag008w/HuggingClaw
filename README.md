@@ -463,6 +463,7 @@ If you want OpenClaw to run approved actions on your own local PC with persisten
 - Provisioning-token consent grant, then trusted token-based access.
 - Environment-based modes (`disabled`, `paired`, `trusted`).
 - Policy-protected shell/file actions with allowlist + denylist.
+- Mode profiles: `disabled` (no access), `paired` (shell+read), `trusted` (shell+read+write+delete).
 
 Quick setup:
 
