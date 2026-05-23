@@ -2422,8 +2422,12 @@ function sortSectionsBySelection() {
   if (!wrap) return;
   const sections = [...wrap.querySelectorAll('.sec[data-section]')];
   if (!sections.length) return;
+  const query = $('search')?.value?.trim() || '';
+  const totalSelected = document.querySelectorAll('[data-check]:checked').length;
 
-  if (activeGroup !== 'All') {
+  // Preserve stable/original ordering unless user is in All view with active selections
+  // and no search query. This avoids unexpected jumps for existing users while typing.
+  if (activeGroup !== 'All' || totalSelected === 0 || query) {
     sections
       .sort((a, b) => Number(a.dataset.origSectionIdx) - Number(b.dataset.origSectionIdx))
       .forEach(sec => wrap.appendChild(sec));
