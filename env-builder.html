@@ -817,16 +817,65 @@ body {
 }
 @media (max-width: 900px) {
   :root { --panel-w: 280px; --sidebar-w: 180px; }
+  .cards { grid-template-columns: 1fr; }
+  .toolbar { padding: 10px 12px; gap: 8px; }
+  .sections-scroll { padding: 12px 12px 72px; }
+  .panel-scroll { padding: 12px; gap: 12px; }
 }
 
 @media (max-width: 700px) {
-  .right-panel { display: none; }
-  :root { --sidebar-w: 160px; }
+  :root { --sidebar-w: 150px; --panel-w: min(84vw, 320px); }
+  .topbar { padding: 0 12px; gap: 10px; }
+  .topbar-wordmark { font-size: 13px; }
+  .topbar-pill { display: none; }
+  .layout { height: calc(100vh - 52px); }
+  .main { min-width: 0; }
+  .right-panel {
+    display: flex;
+    width: var(--panel-w);
+  }
+  .search-wrap { max-width: none; min-width: 130px; }
+  .btn { padding: 6px 10px; font-size: 11px; }
+  #summaryBlock .pblock-body,
+  #bundleBlock .pblock-body,
+  #importBlock .pblock-body {
+    max-height: 200px;
+  }
 }
 
 @media (max-width: 520px) {
   .sidebar-wrap { display: none; }
   .topbar-divider, .topbar-title { display: none; }
+  .toolbar { flex-wrap: wrap; }
+  .tb-sep { display: none; }
+  .content-wrap {
+    flex-direction: column;
+  }
+  .sections-scroll {
+    order: 1;
+    min-height: 54vh;
+    max-height: 60vh;
+    border-bottom: 1px solid var(--border);
+  }
+  .right-panel {
+    order: 2;
+    width: 100%;
+    border-left: none;
+    border-top: 1px solid var(--border);
+    max-height: 40vh;
+  }
+  .panel-scroll { padding: 10px; }
+  .pblock-head { padding: 8px 10px; }
+  .pblock-body { padding: 10px; }
+  #summaryBlock .pblock-body,
+  #bundleBlock .pblock-body,
+  #importBlock .pblock-body {
+    max-height: none;
+  }
+  .row-btns .btn {
+    flex: 1 1 calc(50% - 6px);
+    justify-content: center;
+  }
 }
 
 /* ── Tag Legend (collapsible) ── */
