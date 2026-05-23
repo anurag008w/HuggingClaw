@@ -222,7 +222,7 @@ Errors are always printed as `ERROR:` lines in Space logs. By default HuggingCla
 Advanced/backward-compatible variables still work if you prefer package-specific fields: `HUGGINGCLAW_APT_PACKAGES`, `HUGGINGCLAW_PIP_PACKAGES`, `HUGGINGCLAW_NPM_PACKAGES`, `HUGGINGCLAW_OPENCLAW_PLUGINS`, `HUGGINGCLAW_STARTUP_COMMANDS`, `HUGGINGCLAW_STARTUP_COMMAND_1`...`100`, `HUGGINGCLAW_STARTUP_SCRIPT`, and `HUGGINGCLAW_STARTUP_SCRIPT_B64`.
 
 > [!IMPORTANT]
-> `sudo` is available for package-manager commands only (`apt`, `apt-get`, and `dpkg`). This is enough for `sudo apt-get update` and `sudo apt-get install -y ...`, but it is not unrestricted root access. Apt-installed packages still disappear on Space restart, so put them in `HUGGINGCLAW_RUN` or let the shell wrapper record the command in `startup.sh`.
+> `sudo` is available for package-manager commands only (`apt`, `apt-get`, and `dpkg`) and is not unrestricted root access. In terminal shells, common user-space commands (for example `sudo unzip`, `sudo tar`, `sudo curl`, `sudo pip`) are passed through and run without escalation for convenience. Apt-installed packages still disappear on Space restart, so put them in `HUGGINGCLAW_RUN` or let the shell wrapper record the command in `startup.sh`.
 
 ## 💓 Staying Alive *(Recommended on Free HF Spaces)*
 
@@ -267,6 +267,15 @@ GEMINI_API_KEYS=AIza-key1,AIza-key2
 
 > [!TIP]
 > By default, `LLM_API_KEY` fallback is enabled for compatibility. Set `LLM_API_KEY_FALLBACK_ENABLED=false` if you want strict provider-only activation.
+
+Failure handling behavior:
+- Retryable failures (rate-limit/quota + common transient upstream/network errors) penalize the current key with cooldown/strikes, so the **next request** avoids that key when possible.
+- The rotator **does not auto-replay the same failed request**; retries for the same request should be handled by caller/application logic.
+
+Optional tuning:
+- `KEY_MAX_INFLIGHT_PER_KEY` (default `3`) — soft concurrent request cap per key.
+- `KEY_ROTATOR_DIAGNOSTICS=true` — emit periodic provider/key health snapshots.
+- `KEY_ROTATOR_DIAGNOSTICS_INTERVAL_MS` (default `60000`) — diagnostics interval.
 
 Supported per-provider variables: `ANTHROPIC_API_KEYS`, `OPENAI_API_KEYS`, `GEMINI_API_KEYS`, `DEEPSEEK_API_KEYS`, `GROQ_API_KEYS`, `MISTRAL_API_KEYS`, `OPENROUTER_API_KEYS`, `XAI_API_KEYS`, `NVIDIA_API_KEYS`, `COHERE_API_KEYS`, `TOGETHER_API_KEYS`, `CEREBRAS_API_KEYS`, and more — see `.env.example` for the full list.
 

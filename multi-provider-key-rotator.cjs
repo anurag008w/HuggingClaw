@@ -31,6 +31,17 @@ const MAX_STRIKES = Math.max(
   1,
   parseInt(process.env.KEY_MAX_STRIKES || '', 10) || 3,
 );
+const MAX_INFLIGHT_PER_KEY = Math.max(
+  1,
+  parseInt(process.env.KEY_MAX_INFLIGHT_PER_KEY || '', 10) || 3,
+);
+const DIAGNOSTICS_ENABLED = /^(1|true|yes|on)$/i.test(
+  String(process.env.KEY_ROTATOR_DIAGNOSTICS || '').trim(),
+);
+const DIAGNOSTICS_INTERVAL_MS = Math.max(
+  10_000,
+  parseInt(process.env.KEY_ROTATOR_DIAGNOSTICS_INTERVAL_MS || '', 10) || 60_000,
+);
 // Permanently blacklisted keys retry after this long (default 24 h).
 // "Permanent" just means very long — avoids truly forever loops on app restart.
 const PERM_BLACKLIST_MS = 24 * 60 * 60 * 1000;
@@ -120,7 +131,7 @@ const providerState = PROVIDERS.map(p => {
   // FIX: idx tracks position in the ACTIVE (non-permanently-removed) pool.
   // We never remove keys from the array — we just skip blacklisted ones.
   // idx advances only when a key is ACTUALLY picked (no drift for skipped keys).
-  return { ...p, keys, keyState, idx: 0 };
+  return { ...p, keys, keyState, inFlight: new Map(), idx: 0 };
 });
 
 // LLM_API_KEY fallback summary
@@ -191,6 +202,29 @@ function recordSuccess(p, key) {
   }
 }
 
+function classifyRetryableFailure(status, errCode) {
+  const retryableStatus = new Set([408, 425, 429, 500, 502, 503, 504, 529, 402]);
+  const retryableErrorCodes = new Set([
+    'ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ENOTFOUND',
+    'ECONNREFUSED', 'EPIPE',
+  ]);
+  if (typeof status === 'number') return retryableStatus.has(status);
+  if (errCode) return retryableErrorCodes.has(String(errCode).toUpperCase());
+  return false;
+}
+
+function beginInFlight(p, key) {
+  if (!p || !key) return;
+  p.inFlight.set(key, (p.inFlight.get(key) || 0) + 1);
+}
+
+function endInFlight(p, key) {
+  if (!p || !key) return;
+  const next = Math.max(0, (p.inFlight.get(key) || 0) - 1);
+  if (next === 0) p.inFlight.delete(key);
+  else p.inFlight.set(key, next);
+}
+
 // ─── Round-robin selection ────────────────────────────────────────────────────
 
 /**
@@ -213,13 +247,25 @@ function nextKey(p) {
 
   const total = p.keys.length;
 
+  let bestPick = null;
   for (let offset = 0; offset < total; offset++) {
     const i   = (p.idx + offset) % total;
     const key = p.keys[i];
     if (isActive(p, key)) {
-      p.idx = (i + 1) % total;   // next call starts AFTER the key we just picked
-      return key;
+      const inflight = p.inFlight.get(key) || 0;
+      if (inflight < MAX_INFLIGHT_PER_KEY) {
+        p.idx = (i + 1) % total;   // next call starts AFTER the key we just picked
+        log(`[key-rotator] ${p.name}: picked ...${key.slice(-6)} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
+        return key;
+      }
+      if (!bestPick || inflight < bestPick.inflight) bestPick = { i, key, inflight };
     }
+  }
+
+  if (bestPick) {
+    p.idx = (bestPick.i + 1) % total;
+    warn(`[key-rotator] ${p.name}: all active keys saturated, reusing ...${bestPick.key.slice(-6)} inflight=${bestPick.inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
+    return bestPick.key;
   }
 
   // All keys are sitting out — pick the one closest to recovering
@@ -267,11 +313,46 @@ function setAuthHeader(headers, key) {
 
 function handleStatus(p, key, status) {
   if (!p || !key) return;
-  if (status === 429 || status === 402) {
+  if (classifyRetryableFailure(status)) {
     recordFailure(p, key);
+    warn(`[key-rotator] ${p.name}: retryable status=${status} on ...${key.slice(-6)}`);
   } else if (status >= 200 && status < 400) {
     recordSuccess(p, key);
   }
+}
+
+function handleTransportError(p, key, err) {
+  if (!p || !key) return;
+  const code = err?.code ? String(err.code).toUpperCase() : '';
+  if (classifyRetryableFailure(undefined, code)) {
+    recordFailure(p, key);
+    warn(`[key-rotator] ${p.name}: retryable network code=${code} on ...${key.slice(-6)}`);
+  }
+}
+
+function startDiagnostics() {
+  if (!DIAGNOSTICS_ENABLED) return;
+  setInterval(() => {
+    const now = Date.now();
+    const snapshot = providerState.map(p => {
+      const keyStats = p.keys.map(k => {
+        const ks = p.keyState.get(k) || makeKeyState();
+        return {
+          keySuffix: k.slice(-6),
+          active: ks.blacklistedUntil === 0 || now >= ks.blacklistedUntil,
+          strikes: ks.strikes,
+          inFlight: p.inFlight.get(k) || 0,
+        };
+      });
+      const active = keyStats.filter(s => s.active).length;
+      const suspended = keyStats.length - active;
+      const avgStrikes = keyStats.length
+        ? Number((keyStats.reduce((sum, s) => sum + s.strikes, 0) / keyStats.length).toFixed(2))
+        : 0;
+      return { provider: p.name, total: keyStats.length, active, suspended, avgStrikes, keys: keyStats };
+    });
+    log('[key-rotator] diagnostics', JSON.stringify({ ts: new Date().toISOString(), providers: snapshot }));
+  }, DIAGNOSTICS_INTERVAL_MS).unref?.();
 }
 
 // ─── Patch globalThis.fetch ───────────────────────────────────────────────────
@@ -293,6 +374,7 @@ function patchFetch() {
         const key = nextKey(provider);
         if (key) {
           usedKey = key; usedProvider = provider;
+          beginInFlight(usedProvider, usedKey);
           if (provider.queryParam) {
             const url = new URL(typeof input === 'string' ? input : input.url);
             url.searchParams.set('key', key);
@@ -314,9 +396,14 @@ function patchFetch() {
 
     let response;
     try { response = await orig(input, init); }
-    catch (err) { throw err; }
+    catch (err) {
+      try { handleTransportError(usedProvider, usedKey, err); } catch (_) {}
+      try { endInFlight(usedProvider, usedKey); } catch (_) {}
+      throw err;
+    }
 
     try { handleStatus(usedProvider, usedKey, response.status); } catch (_) {}
+    try { endInFlight(usedProvider, usedKey); } catch (_) {}
     return response;
   };
 }
@@ -337,6 +424,7 @@ function patchHttpModule(mod) {
         const key = nextKey(provider);
         if (key) {
           usedKey = key; usedProvider = provider;
+          beginInFlight(usedProvider, usedKey);
           if (provider.queryParam) {
             const u = new URL(String(
               typeof options === 'string' || options instanceof URL
@@ -369,9 +457,14 @@ function patchHttpModule(mod) {
         if (event === 'response') {
           const res = rest[0];
           try { handleStatus(usedProvider, usedKey, res?.statusCode); } catch (_) {}
+          try { endInFlight(usedProvider, usedKey); } catch (_) {}
         }
         return _emit(event, ...rest);
       };
+      req.on('error', (err) => {
+        try { handleTransportError(usedProvider, usedKey, err); } catch (_) {}
+        try { endInFlight(usedProvider, usedKey); } catch (_) {}
+      });
     }
     return req;
   };
@@ -382,5 +475,6 @@ function patchHttpModule(mod) {
 patchFetch();
 patchHttpModule(http);
 patchHttpModule(https);
+startDiagnostics();
 
-log(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:24h`);
+log(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:24h max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'}`);
