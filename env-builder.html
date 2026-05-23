@@ -136,11 +136,13 @@ body {
 
 .sidebar-scroll {
   flex: 1;
-  overflow-y: auto;
+  overflow-y: scroll;
   padding: 14px 10px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border2) transparent;
 }
 
-.sidebar-scroll::-webkit-scrollbar { width: 4px; }
+.sidebar-scroll::-webkit-scrollbar { width: 8px; }
 .sidebar-scroll::-webkit-scrollbar-track { background: transparent; }
 .sidebar-scroll::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 4px; }
 
@@ -355,19 +357,24 @@ body {
 
 /* ── ENV Card ── */
 .env-card {
+  position: relative;
   background: var(--bg2);
   border: 1px solid var(--border);
   border-radius: var(--r2);
   padding: 12px;
-  transition: border-color .2s, background .2s;
+  transition: border-color .2s, background .2s, transform .15s, box-shadow .2s;
 }
 
-.env-card:hover { border-color: var(--border2); }
+.env-card:hover {
+  border-color: var(--border2);
+  transform: translateY(-1px);
+}
 .env-card.hidden { display: none; }
 
 .env-card.selected {
   border-color: var(--amber-glow);
   background: linear-gradient(135deg, var(--bg2) 80%, rgba(245,166,35,.04));
+  box-shadow: inset 0 0 0 1px rgba(245,166,35,.14), 0 10px 24px rgba(0,0,0,.22);
 }
 
 /* Critical cards get a red left-border accent */
@@ -379,11 +386,32 @@ body {
 }
 .env-card:has(.badge-critical).selected {
   border-left-color: #f05f5f;
+  background: linear-gradient(135deg, rgba(240,80,80,.10), rgba(240,80,80,.04) 24%, var(--bg2) 74%);
 }
 
 /* Credential cards get an amber left-border accent */
 .env-card:has(.badge-credential) {
   border-left: 3px solid rgba(220,140,60,.3);
+}
+
+.env-card:has(.badge-credential).selected {
+  background: linear-gradient(135deg, rgba(220,140,60,.12), rgba(220,140,60,.04) 24%, var(--bg2) 74%);
+}
+
+.env-card:has(.badge-feature).selected {
+  background: linear-gradient(135deg, rgba(70,140,250,.12), rgba(70,140,250,.04) 24%, var(--bg2) 74%);
+}
+
+.env-card:has(.badge-optional).selected {
+  background: linear-gradient(135deg, rgba(61,214,140,.12), rgba(61,214,140,.04) 24%, var(--bg2) 74%);
+}
+
+.env-card:has(.badge-advanced).selected {
+  background: linear-gradient(135deg, rgba(176,122,224,.12), rgba(176,122,224,.04) 24%, var(--bg2) 74%);
+}
+
+.env-card:has(.badge-build).selected {
+  background: linear-gradient(135deg, rgba(240,185,60,.12), rgba(240,185,60,.04) 24%, var(--bg2) 74%);
 }
 
 .card-top {
@@ -415,11 +443,19 @@ body {
   text-overflow: ellipsis;
 }
 
+.env-card.selected .card-key {
+  color: #f4f7ff;
+}
+
 .card-lbl {
   font-size: 11px;
   color: var(--text3);
   margin-top: 2px;
   line-height: 1.35;
+}
+
+.env-card.selected .card-lbl {
+  color: #b9c2d6;
 }
 
 .badge {
@@ -595,6 +631,9 @@ body {
   border: 1px solid var(--border);
   border-radius: var(--r2);
   overflow: hidden;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .pblock-head {
@@ -616,7 +655,33 @@ body {
   gap: 6px;
 }
 
-.pblock-body { padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+.pblock-body {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-y: scroll;
+  overflow-x: hidden;
+}
+
+#summaryBlock .pblock-body,
+#bundleBlock .pblock-body,
+#importBlock .pblock-body {
+  height: auto;
+  max-height: none;
+}
+
+#summaryBlock,
+#bundleBlock,
+#importBlock {
+  height: 300px;
+}
+
+.pblock-body::-webkit-scrollbar { width: 4px; }
+.pblock-body::-webkit-scrollbar-track { background: transparent; }
+.pblock-body::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 4px; }
 
 .pblock-body textarea,
 .pblock-body input[type="text"] {
@@ -666,6 +731,8 @@ body {
 }
 
 .sum-key {
+  appearance: none;
+  cursor: pointer;
   font-family: var(--mono);
   font-size: 9.5px;
   color: var(--text2);
@@ -673,6 +740,24 @@ body {
   border: 1px solid var(--border2);
   border-radius: 4px;
   padding: 2px 6px;
+  line-height: 1.3;
+}
+
+.sum-key:hover {
+  color: var(--amber2);
+  border-color: var(--amber-glow);
+}
+
+.sum-key:focus-visible,
+.card-check:focus-visible,
+.btn:focus-visible,
+.mini-btn:focus-visible,
+.tog:focus-visible,
+.picker-select:focus-visible,
+.card-input input:focus-visible,
+.card-input textarea:focus-visible {
+  outline: 2px solid var(--amber2);
+  outline-offset: 2px;
 }
 
 /* ── Custom Env section ── */
@@ -742,16 +827,83 @@ body {
 }
 @media (max-width: 900px) {
   :root { --panel-w: 280px; --sidebar-w: 180px; }
+  .cards { grid-template-columns: 1fr; }
+  .toolbar { padding: 10px 12px; gap: 8px; }
+  .sections-scroll { padding: 12px 12px 72px; }
+  .panel-scroll { padding: 12px; gap: 12px; }
 }
 
 @media (max-width: 700px) {
-  .right-panel { display: none; }
-  :root { --sidebar-w: 160px; }
+  :root { --sidebar-w: 150px; --panel-w: min(84vw, 320px); }
+  .topbar { padding: 0 12px; gap: 10px; }
+  .topbar-wordmark { font-size: 13px; }
+  .topbar-pill { display: none; }
+  .layout { height: calc(100vh - 52px); }
+  .main { min-width: 0; }
+  .right-panel {
+    display: flex;
+    width: var(--panel-w);
+  }
+  .search-wrap { max-width: none; min-width: 130px; }
+  .btn { padding: 6px 10px; font-size: 11px; }
+  #summaryBlock .pblock-body,
+  #bundleBlock .pblock-body,
+  #importBlock .pblock-body {
+    height: auto;
+  }
+  #summaryBlock,
+  #bundleBlock,
+  #importBlock {
+    height: 260px;
+  }
 }
 
 @media (max-width: 520px) {
   .sidebar-wrap { display: none; }
   .topbar-divider, .topbar-title { display: none; }
+  .toolbar { flex-wrap: wrap; }
+  .tb-sep { display: none; }
+  .content-wrap {
+    flex-direction: column;
+  }
+  .sections-scroll {
+    order: 1;
+    min-height: 54vh;
+    max-height: 60vh;
+    border-bottom: 1px solid var(--border);
+  }
+  .right-panel {
+    order: 2;
+    width: 100%;
+    border-left: none;
+    border-top: 1px solid var(--border);
+    max-height: 40vh;
+  }
+  .panel-scroll { padding: 10px; }
+  .pblock-head { padding: 8px 10px; }
+  .pblock-body { padding: 10px; }
+  #summaryBlock .pblock-body,
+  #bundleBlock .pblock-body,
+  #importBlock .pblock-body {
+    height: auto;
+  }
+  #summaryBlock,
+  #bundleBlock,
+  #importBlock {
+    height: 220px;
+  }
+  .row-btns .btn {
+    flex: 1 1 calc(50% - 6px);
+    justify-content: center;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation: none !important;
+    transition: none !important;
+  }
 }
 
 /* ── Tag Legend (collapsible) ── */
@@ -901,7 +1053,7 @@ body {
       <aside class="right-panel">
         <div class="panel-scroll">
 
-          <div class="pblock">
+          <div class="pblock" id="summaryBlock">
             <div class="pblock-head">
               <span class="pblock-title">📊 Summary</span>
             </div>
@@ -911,7 +1063,7 @@ body {
           </div>
 
           <!-- Output -->
-          <div class="pblock">
+          <div class="pblock" id="bundleBlock">
             <div class="pblock-head">
               <span class="pblock-title">📦 Bundle Output</span>
             </div>
@@ -929,7 +1081,7 @@ body {
           </div>
 
           <!-- Import -->
-          <div class="pblock">
+          <div class="pblock" id="importBlock">
             <div class="pblock-head">
               <span class="pblock-title">📥 Import</span>
             </div>
