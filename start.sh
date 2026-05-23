@@ -1282,6 +1282,7 @@ _hc_apt_install() {
     return 1
   fi
 }
+ensure_archive_tools || HC_STARTUP_FAILURES=$((HC_STARTUP_FAILURES + 1))
 apt-get() {
   case "${1:-}" in
     install)
