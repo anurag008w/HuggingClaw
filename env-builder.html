@@ -661,9 +661,11 @@ body {
   flex-direction: column;
   gap: 8px;
   min-height: 0;
+  height: 0;
   flex: 1 1 auto;
-  overflow-y: scroll;
+  overflow-y: auto;
   overflow-x: hidden;
+  scrollbar-gutter: stable both-edges;
 }
 
 #summaryBlock .pblock-body,
@@ -682,6 +684,7 @@ body {
 .pblock-body::-webkit-scrollbar { width: 4px; }
 .pblock-body::-webkit-scrollbar-track { background: transparent; }
 .pblock-body::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 4px; }
+.pblock-body::-webkit-scrollbar-thumb:hover { background: #3a455d; }
 
 .pblock-body textarea,
 .pblock-body input[type="text"] {
