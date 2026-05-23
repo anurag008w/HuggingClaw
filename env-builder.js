@@ -2503,6 +2503,33 @@ function sortSectionsBySelection() {
     .forEach(sec => wrap.appendChild(sec));
 }
 
+function sortSectionsBySelection() {
+  const wrap = $('sections');
+  if (!wrap) return;
+  const sections = [...wrap.querySelectorAll('.sec[data-section]')];
+  if (!sections.length) return;
+  const query = $('search')?.value?.trim() || '';
+  const totalSelected = document.querySelectorAll('[data-check]:checked').length;
+
+  // Preserve stable/original ordering unless user is in All view with active selections
+  // and no search query. This avoids unexpected jumps for existing users while typing.
+  if (activeGroup !== 'All' || totalSelected === 0 || query) {
+    sections
+      .sort((a, b) => Number(a.dataset.origSectionIdx) - Number(b.dataset.origSectionIdx))
+      .forEach(sec => wrap.appendChild(sec));
+    return;
+  }
+
+  sections
+    .sort((a, b) => {
+      const aChecked = a.querySelectorAll('[data-check]:checked').length;
+      const bChecked = b.querySelectorAll('[data-check]:checked').length;
+      if (bChecked !== aChecked) return bChecked - aChecked;
+      return Number(a.dataset.origSectionIdx) - Number(b.dataset.origSectionIdx);
+    })
+    .forEach(sec => wrap.appendChild(sec));
+}
+
 function bindFieldEvents() {
   document.querySelectorAll('[data-check]').forEach(el => el.addEventListener('change', () => { markSelected(); refresh(); }));
   document.querySelectorAll('[data-key]').forEach(el => el.addEventListener('input', refresh));
