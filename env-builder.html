@@ -657,18 +657,20 @@ body {
   flex-direction: column;
   gap: 8px;
   min-height: 0;
-  overflow-y: auto;
+  overflow-y: scroll;
+  overflow-x: hidden;
 }
 
 #summaryBlock .pblock-body,
 #bundleBlock .pblock-body,
 #importBlock .pblock-body {
+  height: 240px;
   max-height: 240px;
 }
 
 #bundleBlock .pblock-body,
 #importBlock .pblock-body {
-  min-height: 220px;
+  min-height: 240px;
 }
 
 .pblock-body::-webkit-scrollbar { width: 4px; }
@@ -841,6 +843,8 @@ body {
   #summaryBlock .pblock-body,
   #bundleBlock .pblock-body,
   #importBlock .pblock-body {
+    height: 200px;
+    min-height: 200px;
     max-height: 200px;
   }
 }
@@ -872,6 +876,8 @@ body {
   #summaryBlock .pblock-body,
   #bundleBlock .pblock-body,
   #importBlock .pblock-body {
+    height: 180px;
+    min-height: 180px;
     max-height: 180px;
   }
   .row-btns .btn {
