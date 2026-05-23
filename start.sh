@@ -604,6 +604,15 @@ ensure_archive_tools() {
   return 1
 }
 
+archive_tools_ready() {
+  command -v zip >/dev/null 2>&1 \
+    && command -v unzip >/dev/null 2>&1 \
+    && command -v tar >/dev/null 2>&1 \
+    && command -v gzip >/dev/null 2>&1 \
+    && command -v xz >/dev/null 2>&1 \
+    && command -v 7z >/dev/null 2>&1
+}
+
 # On Debian/Ubuntu, /usr/bin/chromium is often a shell wrapper while the real
 # ELF binary lives under /usr/lib/chromium/*. Prefer a real ELF binary, then
 # fall back to wrapper launchers (Playwright/OpenClaw can execute those too).
@@ -922,6 +931,9 @@ else
 fi
 if [ -n "${CLOUDFLARE_PROXY_URL:-}" ]; then
   echo "Proxy     : ${CLOUDFLARE_PROXY_URL}"
+fi
+if archive_tools_ready; then
+  echo "Archives  : ready (zip/unzip/tar/gzip/xz/7z)"
 fi
 # HUGGINGCLAW_JUPYTER_ENABLED env var se override allow karo
 # (env-builder "Enable Jupyter terminal" toggle yahi set karta hai)
