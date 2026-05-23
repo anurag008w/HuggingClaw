@@ -595,6 +595,7 @@ body {
   border: 1px solid var(--border);
   border-radius: var(--r2);
   overflow: hidden;
+  min-height: 0;
 }
 
 .pblock-head {
@@ -616,7 +617,24 @@ body {
   gap: 6px;
 }
 
-.pblock-body { padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+.pblock-body {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+#summaryBlock .pblock-body,
+#bundleBlock .pblock-body,
+#importBlock .pblock-body {
+  max-height: 240px;
+}
+
+.pblock-body::-webkit-scrollbar { width: 4px; }
+.pblock-body::-webkit-scrollbar-track { background: transparent; }
+.pblock-body::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 4px; }
 
 .pblock-body textarea,
 .pblock-body input[type="text"] {
@@ -666,6 +684,7 @@ body {
 }
 
 .sum-key {
+  cursor: pointer;
   font-family: var(--mono);
   font-size: 9.5px;
   color: var(--text2);
@@ -673,6 +692,11 @@ body {
   border: 1px solid var(--border2);
   border-radius: 4px;
   padding: 2px 6px;
+}
+
+.sum-key:hover {
+  color: var(--amber2);
+  border-color: var(--amber-glow);
 }
 
 /* ── Custom Env section ── */
@@ -901,7 +925,7 @@ body {
       <aside class="right-panel">
         <div class="panel-scroll">
 
-          <div class="pblock">
+          <div class="pblock" id="summaryBlock">
             <div class="pblock-head">
               <span class="pblock-title">📊 Summary</span>
             </div>
@@ -911,7 +935,7 @@ body {
           </div>
 
           <!-- Output -->
-          <div class="pblock">
+          <div class="pblock" id="bundleBlock">
             <div class="pblock-head">
               <span class="pblock-title">📦 Bundle Output</span>
             </div>
@@ -929,7 +953,7 @@ body {
           </div>
 
           <!-- Import -->
-          <div class="pblock">
+          <div class="pblock" id="importBlock">
             <div class="pblock-head">
               <span class="pblock-title">📥 Import</span>
             </div>

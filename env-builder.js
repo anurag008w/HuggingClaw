@@ -2180,11 +2180,31 @@ function refresh() {
   const keys = Object.keys(obj).sort();
   const s = $('summary');
   if (keys.length) {
-    s.innerHTML = `<strong>${keys.length}</strong> variable${keys.length > 1 ? 's' : ''} selected<div class="sum-keys">${keys.map(k => `<span class="sum-key">${esc(k)}</span>`).join('')}</div>`;
+    s.innerHTML = `<strong>${keys.length}</strong> variable${keys.length > 1 ? 's' : ''} selected<div class="sum-keys">${keys.map(k => `<button type="button" class="sum-key" data-jump-key="${esc(k)}">${esc(k)}</button>`).join('')}</div>`;
   } else {
     s.innerHTML = 'No variables selected yet.';
   }
   updateCounts();
+}
+
+function jumpToEnvKey(key) {
+  const card = document.querySelector(`[data-check="${CSS.escape(key)}"]`)?.closest('[data-row]');
+  if (!card) return;
+  const group = card.dataset.group;
+  if (group && activeGroup !== 'All' && activeGroup !== group) {
+    activeGroup = group;
+    renderSidebar();
+    filter();
+  }
+  card.classList.remove('hidden');
+  card.closest('.sec')?.classList.remove('sec-hidden');
+  const scroller = document.querySelector('.sections-scroll');
+  card.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+  if (scroller) {
+    scroller.scrollTop = scroller.scrollTop;
+  }
+  const input = card.querySelector('[data-key]');
+  if (input) input.focus({ preventScroll: true });
 }
 
 function markSelected() {
@@ -2508,3 +2528,8 @@ $('generateBundle').onclick = () => generateBundle();
 $('copyBundle').onclick = () => copyText($('bundleOut').value);
 $('copyEnvLine').onclick = () => copyText($('envLineOut').value);
 $('copyJson').onclick = () => copyText(JSON.stringify(collect(), null, 2));
+$('summary').addEventListener('click', e => {
+  const btn = e.target.closest('[data-jump-key]');
+  if (!btn) return;
+  jumpToEnvKey(btn.dataset.jumpKey);
+});
