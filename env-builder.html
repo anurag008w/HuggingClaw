@@ -355,19 +355,39 @@ body {
 
 /* ── ENV Card ── */
 .env-card {
+  position: relative;
   background: var(--bg2);
   border: 1px solid var(--border);
   border-radius: var(--r2);
   padding: 12px;
-  transition: border-color .2s, background .2s;
+  transition: border-color .2s, background .2s, transform .15s, box-shadow .2s;
 }
 
-.env-card:hover { border-color: var(--border2); }
+.env-card:hover {
+  border-color: var(--border2);
+  transform: translateY(-1px);
+}
 .env-card.hidden { display: none; }
 
 .env-card.selected {
   border-color: var(--amber-glow);
   background: linear-gradient(135deg, var(--bg2) 80%, rgba(245,166,35,.04));
+  box-shadow: inset 0 0 0 1px rgba(245,166,35,.14), 0 10px 24px rgba(0,0,0,.22);
+}
+
+.env-card.selected::after {
+  content: "✓ Selected";
+  position: absolute;
+  right: 10px;
+  bottom: 9px;
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: .4px;
+  color: var(--amber2);
+  background: rgba(245,166,35,.12);
+  border: 1px solid rgba(245,166,35,.28);
+  border-radius: 20px;
+  padding: 1px 7px;
 }
 
 /* Critical cards get a red left-border accent */
@@ -379,11 +399,32 @@ body {
 }
 .env-card:has(.badge-critical).selected {
   border-left-color: #f05f5f;
+  background: linear-gradient(135deg, rgba(240,80,80,.10), rgba(240,80,80,.04) 24%, var(--bg2) 74%);
 }
 
 /* Credential cards get an amber left-border accent */
 .env-card:has(.badge-credential) {
   border-left: 3px solid rgba(220,140,60,.3);
+}
+
+.env-card:has(.badge-credential).selected {
+  background: linear-gradient(135deg, rgba(220,140,60,.12), rgba(220,140,60,.04) 24%, var(--bg2) 74%);
+}
+
+.env-card:has(.badge-feature).selected {
+  background: linear-gradient(135deg, rgba(70,140,250,.12), rgba(70,140,250,.04) 24%, var(--bg2) 74%);
+}
+
+.env-card:has(.badge-optional).selected {
+  background: linear-gradient(135deg, rgba(61,214,140,.12), rgba(61,214,140,.04) 24%, var(--bg2) 74%);
+}
+
+.env-card:has(.badge-advanced).selected {
+  background: linear-gradient(135deg, rgba(176,122,224,.12), rgba(176,122,224,.04) 24%, var(--bg2) 74%);
+}
+
+.env-card:has(.badge-build).selected {
+  background: linear-gradient(135deg, rgba(240,185,60,.12), rgba(240,185,60,.04) 24%, var(--bg2) 74%);
 }
 
 .card-top {
@@ -415,11 +456,19 @@ body {
   text-overflow: ellipsis;
 }
 
+.env-card.selected .card-key {
+  color: #f4f7ff;
+}
+
 .card-lbl {
   font-size: 11px;
   color: var(--text3);
   margin-top: 2px;
   line-height: 1.35;
+}
+
+.env-card.selected .card-lbl {
+  color: #b9c2d6;
 }
 
 .badge {
