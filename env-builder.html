@@ -929,6 +929,10 @@ body {
 }
 .legend-summary::-webkit-details-marker { display: none; }
 .legend-chips { display: flex; gap: 5px; flex-wrap: wrap; flex: 1; }
+.legend-chip-btn {
+  cursor: pointer;
+  appearance: none;
+}
 .legend-hint {
   font-size: 10px;
   color: var(--text3);
@@ -938,26 +942,7 @@ body {
 .tag-legend[open] .legend-hint { opacity: 0; }
 .toolbar-hint { color: var(--muted); font-size: 12px; margin-right: 10px; white-space: nowrap; }
 .legend-body {
-  padding: 8px 12px 10px;
-  border-top: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.legend-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 11px;
-  color: var(--text2);
-}
-.legend-row .badge { flex-shrink: 0; width: 74px; text-align: center; }
-.legend-tip {
-  font-size: 9.5px;
-  color: var(--text3);
-  margin-top: 4px;
-  padding-top: 6px;
-  border-top: 1px solid var(--border);
+  display: none;
 }
 </style>
 </head>
@@ -1019,24 +1004,16 @@ body {
         <details class="tag-legend" id="tagLegend">
           <summary class="legend-summary">
             <span class="legend-chips">
-              <span class="badge badge-critical">critical</span>
-              <span class="badge badge-credential">credential</span>
-              <span class="badge badge-feature">feature</span>
-              <span class="badge badge-optional">optional</span>
-              <span class="badge badge-advanced">advanced</span>
-              <span class="badge badge-build">build-time</span>
+              <button type="button" class="badge badge-critical legend-chip-btn" data-tag-filter="critical">critical</button>
+              <button type="button" class="badge badge-credential legend-chip-btn" data-tag-filter="credential">credential</button>
+              <button type="button" class="badge badge-feature legend-chip-btn" data-tag-filter="feature">feature</button>
+              <button type="button" class="badge badge-optional legend-chip-btn" data-tag-filter="optional">optional</button>
+              <button type="button" class="badge badge-advanced legend-chip-btn" data-tag-filter="advanced">advanced</button>
+              <button type="button" class="badge badge-build legend-chip-btn" data-tag-filter="build">build-time</button>
             </span>
-            <span class="legend-hint">what do these mean?</span>
+            <span class="legend-hint">click chip to filter</span>
           </summary>
-          <div class="legend-body">
-            <div class="legend-row"><span class="badge badge-critical">critical</span><span>Space won't work without this</span></div>
-            <div class="legend-row"><span class="badge badge-credential">credential</span><span>Sensitive key or token — never share</span></div>
-            <div class="legend-row"><span class="badge badge-feature">feature</span><span>Enables a specific optional feature</span></div>
-            <div class="legend-row"><span class="badge badge-optional">optional</span><span>Safe to change — nothing breaks</span></div>
-            <div class="legend-row"><span class="badge badge-advanced">advanced</span><span>Power-user setting — wrong value causes issues</span></div>
-            <div class="legend-row"><span class="badge badge-build">build-time</span><span>Needs HF Space rebuild to fully take effect</span></div>
-            <div class="legend-tip">💡 Type a tag name in search to filter by it</div>
-          </div>
+          <div class="legend-body"></div>
         </details>
         <div id="sections"></div>
 

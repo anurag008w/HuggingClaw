@@ -2645,6 +2645,17 @@ $('generateBundle').onclick = () => generateBundle();
 $('copyBundle').onclick = () => copyText($('bundleOut').value);
 $('copyEnvLine').onclick = () => copyText($('envLineOut').value);
 $('copyJson').onclick = () => copyText(JSON.stringify(collect(), null, 2));
+document.querySelectorAll('[data-tag-filter]').forEach(btn => {
+  btn.addEventListener('click', e => {
+    e.preventDefault();
+    const tag = btn.dataset.tagFilter;
+    if (!tag) return;
+    $('search').value = tag;
+    filter();
+    const legend = $('tagLegend');
+    if (legend) legend.open = false;
+  });
+});
 $('summary').addEventListener('click', e => {
   const btn = e.target.closest('[data-jump-key]');
   if (!btn) return;
