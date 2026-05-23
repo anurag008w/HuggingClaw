@@ -490,6 +490,33 @@ const FIELDS = [
     "tag": "advanced"
   },
 {
+    "g": "Plugins",
+    "icon": "🔄",
+    "k": "KEY_MAX_INFLIGHT_PER_KEY",
+    "lbl": "Key rotation per-key soft concurrency cap",
+    "type": "text",
+    "ph": "3",
+    "tag": "advanced"
+  },
+{
+    "g": "Plugins",
+    "icon": "📊",
+    "k": "KEY_ROTATOR_DIAGNOSTICS",
+    "lbl": "Enable key-rotator diagnostics logs",
+    "type": "toggle",
+    "ph": "false",
+    "tag": "advanced"
+  },
+{
+    "g": "Plugins",
+    "icon": "📊",
+    "k": "KEY_ROTATOR_DIAGNOSTICS_INTERVAL_MS",
+    "lbl": "Key-rotator diagnostics interval (ms)",
+    "type": "text",
+    "ph": "60000",
+    "tag": "advanced"
+  },
+{
     "g": "Startup",
     "icon": "⚡",
     "k": "DEV_MODE",
@@ -573,6 +600,24 @@ const FIELDS = [
     "lbl": "Stop on startup failure",
     "type": "toggle",
     "ph": "false",
+    "tag": "advanced"
+  },
+{
+    "g": "Startup",
+    "icon": "📦",
+    "k": "HUGGINGCLAW_ARCHIVE_TOOLS_BOOTSTRAP",
+    "lbl": "Auto-install archive tools on boot",
+    "type": "toggle",
+    "ph": "true",
+    "tag": "advanced"
+  },
+{
+    "g": "Startup",
+    "icon": "📦",
+    "k": "HUGGINGCLAW_ARCHIVE_TOOLS_BOOTSTRAP_QUIET",
+    "lbl": "Quiet archive bootstrap logs",
+    "type": "toggle",
+    "ph": "true",
     "tag": "advanced"
   },
 {
