@@ -2260,6 +2260,7 @@ function filter() {
   const cs = $('customSec');
   if (cs) cs.style.display = (activeGroup === 'All' || activeGroup === 'Custom Env') ? '' : 'none';
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.group === activeGroup));
+  sortSectionsBySelection();
 }
 
 function clearForm() {
@@ -2416,6 +2417,29 @@ function sortAllSections() {
   });
 }
 
+function sortSectionsBySelection() {
+  const wrap = $('sections');
+  if (!wrap) return;
+  const sections = [...wrap.querySelectorAll('.sec[data-section]')];
+  if (!sections.length) return;
+
+  if (activeGroup !== 'All') {
+    sections
+      .sort((a, b) => Number(a.dataset.origSectionIdx) - Number(b.dataset.origSectionIdx))
+      .forEach(sec => wrap.appendChild(sec));
+    return;
+  }
+
+  sections
+    .sort((a, b) => {
+      const aChecked = a.querySelectorAll('[data-check]:checked').length;
+      const bChecked = b.querySelectorAll('[data-check]:checked').length;
+      if (bChecked !== aChecked) return bChecked - aChecked;
+      return Number(a.dataset.origSectionIdx) - Number(b.dataset.origSectionIdx);
+    })
+    .forEach(sec => wrap.appendChild(sec));
+}
+
 function bindFieldEvents() {
   document.querySelectorAll('[data-check]').forEach(el => el.addEventListener('change', () => { sortSection(el.closest('[data-row]')); markSelected(); refresh(); }));
   document.querySelectorAll('[data-key]').forEach(el => el.addEventListener('input', refresh));
@@ -2435,11 +2459,12 @@ function renderSections() {
   const wrap = $('sections');
   if (!wrap) return;
   wrap.innerHTML = '';
-  Object.entries(grouped).forEach(([grp, items]) => {
+  Object.entries(grouped).forEach(([grp, items], secIdx) => {
     try {
       const sec = document.createElement('div');
       sec.className = 'sec';
       sec.dataset.section = grp;
+      sec.dataset.origSectionIdx = String(secIdx);
       sec.innerHTML = `
         <div class="sec-header">
           <span class="sec-icon">${ICONS[grp] || '📁'}</span>
@@ -2454,6 +2479,7 @@ function renderSections() {
     }
   });
   bindFieldEvents();
+  sortSectionsBySelection();
 }
 
 function copyText(text) {
