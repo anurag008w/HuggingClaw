@@ -1980,6 +1980,7 @@ function parseEnv(text) {
 
 function showToast(msg = 'Copied!') {
   const t = $('toast');
+  if (!t) return;
   t.textContent = msg;
   t.classList.add('show');
   setTimeout(() => t.classList.remove('show'), 1500);
@@ -2196,6 +2197,7 @@ function refresh() {
 }
 
 function jumpToEnvKey(key) {
+  if (!key) return;
   const card = document.querySelector(`[data-check="${CSS.escape(key)}"]`)?.closest('[data-row]');
   if (!card) {
     const customRow = document.querySelector(`[data-custom-row][data-custom-key="${CSS.escape(key)}"]`);
@@ -2215,11 +2217,7 @@ function jumpToEnvKey(key) {
   }
   card.classList.remove('hidden');
   card.closest('.sec')?.classList.remove('sec-hidden');
-  const scroller = document.querySelector('.sections-scroll');
   card.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
-  if (scroller) {
-    scroller.scrollTop = scroller.scrollTop;
-  }
   const input = card.querySelector('[data-key]');
   if (input) input.focus({ preventScroll: true });
 }
@@ -2459,7 +2457,20 @@ function renderSections() {
 }
 
 function copyText(text) {
-  return navigator.clipboard.writeText(text).then(
+  const clipboardApi = navigator?.clipboard?.writeText;
+  if (typeof clipboardApi !== 'function') {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    ta.remove();
+    showToast('Copied ✓');
+    return Promise.resolve();
+  }
+  return clipboardApi.call(navigator.clipboard, text).then(
     () => showToast('Copied ✓'),
     () => {
       const ta = document.createElement('textarea');
@@ -2548,5 +2559,12 @@ $('copyJson').onclick = () => copyText(JSON.stringify(collect(), null, 2));
 $('summary').addEventListener('click', e => {
   const btn = e.target.closest('[data-jump-key]');
   if (!btn) return;
+  jumpToEnvKey(btn.dataset.jumpKey);
+});
+$('summary').addEventListener('keydown', e => {
+  const btn = e.target.closest('[data-jump-key]');
+  if (!btn) return;
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  e.preventDefault();
   jumpToEnvKey(btn.dataset.jumpKey);
 });

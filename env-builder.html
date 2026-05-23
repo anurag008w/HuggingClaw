@@ -750,6 +750,18 @@ body {
   border-color: var(--amber-glow);
 }
 
+.sum-key:focus-visible,
+.card-check:focus-visible,
+.btn:focus-visible,
+.mini-btn:focus-visible,
+.tog:focus-visible,
+.picker-select:focus-visible,
+.card-input input:focus-visible,
+.card-input textarea:focus-visible {
+  outline: 2px solid var(--amber2);
+  outline-offset: 2px;
+}
+
 /* ── Custom Env section ── */
 #customSec {
   margin-top: 8px;
@@ -875,6 +887,14 @@ body {
   .row-btns .btn {
     flex: 1 1 calc(50% - 6px);
     justify-content: center;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation: none !important;
+    transition: none !important;
   }
 }
 
