@@ -454,6 +454,7 @@ fi
 #   NVIDIA_MODELS=model1,model2
 #   OPENAI_MODELS=gpt-4o-mini,gpt-4.1
 # This helps when provider auto-discovery does not populate models reliably.
+INJECTED_MODELS_PROVIDERS='{}'
 inject_provider_models_from_env() {
   local provider="$1"
   local models_env="$2"
@@ -476,15 +477,21 @@ inject_provider_models_from_env() {
     | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
     | awk 'NF' \
     | jq -R . \
-    | jq -s 'map({id: ., name: .}) | unique_by(.id)')
+    | jq -s --arg provider "$provider" '
+        map(if contains("/") then . else ($provider + "/" + .) end)
+        | map({id: ., name: .})
+        | unique_by(.id)')
 
   CONFIG_JSON=$(jq \
     --arg provider "$provider" \
     --argjson models "$models_json" \
-    'if .models.providers[$provider] then
-       .models.mode = "merge"
-       | .models.providers[$provider].models = $models
-     else . end' <<<"$CONFIG_JSON")
+    '.models.mode = "merge"
+     | .models.providers[$provider] = ((.models.providers[$provider] // {}) + {models: $models})' <<<"$CONFIG_JSON")
+
+  INJECTED_MODELS_PROVIDERS=$(jq \
+    --arg provider "$provider" \
+    --argjson models "$models_json" \
+    '.[$provider] = ((.[$provider] // {}) + {models: $models})' <<<"$INJECTED_MODELS_PROVIDERS")
 }
 
 # Built-in provider model envs (optional)
@@ -564,6 +571,38 @@ ensure_chromium_for_browser_plugin() {
 }
 HC_STARTUP_FAILURES=0
 ensure_chromium_for_browser_plugin || HC_STARTUP_FAILURES=$((HC_STARTUP_FAILURES + 1))
+
+ARCHIVE_TOOLS_BOOTSTRAP_ENABLED="${HUGGINGCLAW_ARCHIVE_TOOLS_BOOTSTRAP:-true}"
+ARCHIVE_TOOLS_BOOTSTRAP_QUIET="${HUGGINGCLAW_ARCHIVE_TOOLS_BOOTSTRAP_QUIET:-true}"
+
+ensure_archive_tools() {
+  # Jupyter terminal users often need basic archive tooling for zip/tar/gz/xz.
+  # Install only missing binaries, and only through apt wrapper.
+  local missing=()
+  command -v unzip >/dev/null 2>&1 || missing+=("unzip")
+  command -v zip >/dev/null 2>&1 || missing+=("zip")
+  command -v tar >/dev/null 2>&1 || missing+=("tar")
+  command -v gzip >/dev/null 2>&1 || missing+=("gzip")
+  command -v xz >/dev/null 2>&1 || missing+=("xz-utils")
+  command -v 7z >/dev/null 2>&1 || missing+=("p7zip-full")
+  [ "${#missing[@]}" -gt 0 ] || return 0
+
+  if ! hc_is_true "$ARCHIVE_TOOLS_BOOTSTRAP_ENABLED"; then
+    return 0
+  fi
+
+  if ! hc_is_true "$ARCHIVE_TOOLS_BOOTSTRAP_QUIET"; then
+    echo "Archive tools missing (${missing[*]}), attempting runtime install..."
+  fi
+  if _hc_apt_install "${missing[@]}"; then
+    if ! hc_is_true "$ARCHIVE_TOOLS_BOOTSTRAP_QUIET"; then
+      echo "Archive tools installed."
+    fi
+    return 0
+  fi
+  echo "Warning: failed to install archive tools (${missing[*]}). You can still install manually via HUGGINGCLAW_RUN." >&2
+  return 1
+}
 
 # On Debian/Ubuntu, /usr/bin/chromium is often a shell wrapper while the real
 # ELF binary lives under /usr/lib/chromium/*. Prefer a real ELF binary, then
@@ -795,6 +834,7 @@ if [ -f "$EXISTING_CONFIG" ]; then
     --arg consoleLevel "$OPENCLAW_CONSOLE_LOG_LEVEL" \
     --arg consoleStyle "$OPENCLAW_CONSOLE_LOG_STYLE" \
     --argjson desired "$CONFIG_JSON" \
+    --argjson injectedModelsProviders "$INJECTED_MODELS_PROVIDERS" \
     --argjson fileLogConfigured "$OPENCLAW_FILE_LOG_LEVEL_CONFIGURED" \
     --argjson consoleLogConfigured "$OPENCLAW_CONSOLE_LOG_LEVEL_CONFIGURED" \
     --argjson consoleStyleConfigured "$OPENCLAW_CONSOLE_LOG_STYLE_CONFIGURED" \
@@ -808,6 +848,16 @@ if [ -f "$EXISTING_CONFIG" ]; then
      | if $fileLogConfigured then .logging.level = $fileLevel else . end
      | if $consoleLogConfigured then .logging.consoleLevel = $consoleLevel else . end
      | if $consoleStyleConfigured then .logging.consoleStyle = $consoleStyle else . end
+     | .models = ((.models // {}) + {"mode": (($desired.models.mode // .models.mode) // "merge")})
+     | if (($injectedModelsProviders | length) > 0) then
+         ($injectedModelsProviders | to_entries) as $entries
+         | reduce $entries[] as $e (.;
+             .models.providers[$e.key] = ((.models.providers[$e.key] // {})
+               + {models: (($e.value.models // []) | unique_by(.id))})
+           )
+       else
+         .
+       end
      | .channels = ((.channels // {}) * ($desired.channels // {}))
      | .plugins.allow = (((.plugins.allow // []) + ($desired.plugins.allow // [])) | unique)
      | .plugins.deny = (((.plugins.deny // []) + ($desired.plugins.deny // [])) | unique)
@@ -1052,6 +1102,7 @@ start_jupyter_once() {
       --no-browser \
       --IdentityProvider.token="$JUPYTER_TOKEN" \
       --ServerApp.base_url=/terminal/ \
+      --ContentsManager.allow_hidden=True \
       --ServerApp.terminals_enabled=True \
       --ServerApp.terminado_settings='{"shell_command":["/bin/bash","-i"]}' \
       --ServerApp.allow_origin='*' \
@@ -1219,6 +1270,7 @@ _hc_apt_install() {
     return 1
   fi
 }
+ensure_archive_tools || HC_STARTUP_FAILURES=$((HC_STARTUP_FAILURES + 1))
 apt-get() {
   case "${1:-}" in
     install)
@@ -1270,6 +1322,34 @@ apt() {
     *)
       command apt "$@"
       return $?
+      ;;
+  esac
+}
+
+sudo() {
+  # Keep privilege boundary strict: only apt/apt-get/dpkg may escalate.
+  # For common user-space commands, transparently run without sudo so users
+  # who habitually type "sudo <cmd>" do not hit unnecessary failures.
+  local cmd="${1:-}"
+  shift || true
+  case "$cmd" in
+    apt|apt-get|dpkg)
+      if command -v command >/dev/null 2>&1 && command -v sudo >/dev/null 2>&1; then
+        command sudo "$cmd" "$@"
+      else
+        "$cmd" "$@"
+      fi
+      ;;
+    unzip|zip|tar|gzip|gunzip|xz|7z|curl|wget|python|python3|pip|pip3|npm|npx|node|git|ls|cat|cp|mv|rm|mkdir|chmod|touch)
+      "$cmd" "$@"
+      ;;
+    "")
+      echo "usage: sudo <command> [args...]" >&2
+      return 1
+      ;;
+    *)
+      echo "sudo: $cmd is not permitted in this environment (only apt/apt-get/dpkg escalation is allowed)." >&2
+      return 1
       ;;
   esac
 }

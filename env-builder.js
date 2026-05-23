@@ -490,6 +490,33 @@ const FIELDS = [
     "tag": "advanced"
   },
 {
+    "g": "Plugins",
+    "icon": "🔄",
+    "k": "KEY_MAX_INFLIGHT_PER_KEY",
+    "lbl": "Key rotation per-key soft concurrency cap",
+    "type": "text",
+    "ph": "3",
+    "tag": "advanced"
+  },
+{
+    "g": "Plugins",
+    "icon": "📊",
+    "k": "KEY_ROTATOR_DIAGNOSTICS",
+    "lbl": "Enable key-rotator diagnostics logs",
+    "type": "toggle",
+    "ph": "false",
+    "tag": "advanced"
+  },
+{
+    "g": "Plugins",
+    "icon": "📊",
+    "k": "KEY_ROTATOR_DIAGNOSTICS_INTERVAL_MS",
+    "lbl": "Key-rotator diagnostics interval (ms)",
+    "type": "text",
+    "ph": "60000",
+    "tag": "advanced"
+  },
+{
     "g": "Startup",
     "icon": "⚡",
     "k": "DEV_MODE",
@@ -573,6 +600,24 @@ const FIELDS = [
     "lbl": "Stop on startup failure",
     "type": "toggle",
     "ph": "false",
+    "tag": "advanced"
+  },
+{
+    "g": "Startup",
+    "icon": "📦",
+    "k": "HUGGINGCLAW_ARCHIVE_TOOLS_BOOTSTRAP",
+    "lbl": "Auto-install archive tools on boot",
+    "type": "toggle",
+    "ph": "true",
+    "tag": "advanced"
+  },
+{
+    "g": "Startup",
+    "icon": "📦",
+    "k": "HUGGINGCLAW_ARCHIVE_TOOLS_BOOTSTRAP_QUIET",
+    "lbl": "Quiet archive bootstrap logs",
+    "type": "toggle",
+    "ph": "true",
     "tag": "advanced"
   },
 {
@@ -1980,6 +2025,7 @@ function parseEnv(text) {
 
 function showToast(msg = 'Copied!') {
   const t = $('toast');
+  if (!t) return;
   t.textContent = msg;
   t.classList.add('show');
   setTimeout(() => t.classList.remove('show'), 1500);
@@ -1988,6 +2034,64 @@ function showToast(msg = 'Copied!') {
 let activeGroup = 'All';
 let customCount = 0;
 const GROUPS = ['All', ...[...new Set(FIELDS.map(f => f.g))], 'Custom Env'];
+
+function ensureAllSelectedSection() {
+  const wrap = $('sections');
+  if (!wrap) return null;
+  let sec = document.getElementById('allSelectedSec');
+  if (sec) return sec;
+  sec = document.createElement('div');
+  sec.id = 'allSelectedSec';
+  sec.className = 'sec';
+  sec.innerHTML = `
+    <div class="sec-header">
+      <span class="sec-icon">✅</span>
+      <span class="sec-title">Selected First</span>
+      <span class="sec-count" id="allSelectedCount">0</span>
+      <div class="sec-line"></div>
+    </div>
+    <div class="cards" id="allSelectedCards"></div>`;
+  wrap.prepend(sec);
+  return sec;
+}
+
+function rebalanceAllSelectedCards() {
+  const sec = ensureAllSelectedSection();
+  if (!sec) return;
+  const selectedCardsWrap = document.getElementById('allSelectedCards');
+  if (!selectedCardsWrap) return;
+
+  // Restore cards when not in All view.
+  if (activeGroup !== 'All') {
+    [...selectedCardsWrap.querySelectorAll('[data-row]')].forEach(card => {
+      const grp = card.dataset.group;
+      const target = document.querySelector(`.sec[data-section="${CSS.escape(grp)}"] .cards`);
+      if (target) target.appendChild(card);
+    });
+    sec.classList.add('sec-hidden');
+    const countEl = $('allSelectedCount'); if (countEl) countEl.textContent = '0';
+    return;
+  }
+
+  // Move checked cards from regular sections to top selected bucket.
+  document.querySelectorAll('.sec[data-section] .cards [data-row]').forEach(card => {
+    const checked = !!card.querySelector('[data-check]')?.checked;
+    if (checked) selectedCardsWrap.appendChild(card);
+  });
+
+  // Move unchecked cards out of selected bucket back to original section.
+  [...selectedCardsWrap.querySelectorAll('[data-row]')].forEach(card => {
+    const checked = !!card.querySelector('[data-check]')?.checked;
+    if (checked) return;
+    const grp = card.dataset.group;
+    const target = document.querySelector(`.sec[data-section="${CSS.escape(grp)}"] .cards`);
+    if (target) target.appendChild(card);
+  });
+
+  const count = selectedCardsWrap.querySelectorAll('[data-row]').length;
+  const countEl = $('allSelectedCount'); if (countEl) countEl.textContent = String(count);
+  sec.classList.toggle('sec-hidden', count === 0);
+}
 
 function renderSidebar() {
   const sb = $('sidebar');
@@ -2118,6 +2222,14 @@ function addCustomRow(key = '', val = '', enabled = false) {
   $('customRows').appendChild(row);
 
   row.querySelectorAll('input').forEach(el => el.addEventListener('input', refresh));
+  const keyInput = row.querySelector(`[data-ck="${id}"]`);
+  const syncCustomKey = () => {
+    const customKey = (keyInput?.value || '').trim();
+    if (customKey) row.dataset.customKey = customKey;
+    else delete row.dataset.customKey;
+  };
+  row.querySelector(`[data-ck="${id}"]`)?.addEventListener('input', syncCustomKey);
+  syncCustomKey();
   row.querySelector('button').onclick = () => {
     const on = row.dataset.enabled !== '1';
     row.dataset.enabled = on ? '1' : '0';
@@ -2180,11 +2292,37 @@ function refresh() {
   const keys = Object.keys(obj).sort();
   const s = $('summary');
   if (keys.length) {
-    s.innerHTML = `<strong>${keys.length}</strong> variable${keys.length > 1 ? 's' : ''} selected<div class="sum-keys">${keys.map(k => `<span class="sum-key">${esc(k)}</span>`).join('')}</div>`;
+    s.innerHTML = `<strong>${keys.length}</strong> variable${keys.length > 1 ? 's' : ''} selected<div class="sum-keys">${keys.map(k => `<button type="button" class="sum-key" data-jump-key="${esc(k)}">${esc(k)}</button>`).join('')}</div>`;
   } else {
     s.innerHTML = 'No variables selected yet.';
   }
   updateCounts();
+}
+
+function jumpToEnvKey(key) {
+  if (!key) return;
+  const card = document.querySelector(`[data-check="${CSS.escape(key)}"]`)?.closest('[data-row]');
+  if (!card) {
+    const customRow = document.querySelector(`[data-custom-row][data-custom-key="${CSS.escape(key)}"]`);
+    if (!customRow) return;
+    activeGroup = 'Custom Env';
+    renderSidebar();
+    filter();
+    customRow.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+    customRow.querySelector('input')?.focus({ preventScroll: true });
+    return;
+  }
+  const group = card.dataset.group;
+  if (group && activeGroup !== 'All' && activeGroup !== group) {
+    activeGroup = group;
+    renderSidebar();
+    filter();
+  }
+  card.classList.remove('hidden');
+  card.closest('.sec')?.classList.remove('sec-hidden');
+  card.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+  const input = card.querySelector('[data-key]');
+  if (input) input.focus({ preventScroll: true });
 }
 
 function markSelected() {
@@ -2209,6 +2347,7 @@ function updateCounts() {
 }
 
 function filter() {
+  rebalanceAllSelectedCards();
   const q = $('search').value.trim().toLowerCase();
   document.querySelectorAll('.sec[data-section]').forEach(sec => {
     const grp = sec.dataset.section;
@@ -2225,6 +2364,7 @@ function filter() {
   const cs = $('customSec');
   if (cs) cs.style.display = (activeGroup === 'All' || activeGroup === 'Custom Env') ? '' : 'none';
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.group === activeGroup));
+  sortSectionsBySelection();
 }
 
 function clearForm() {
@@ -2355,7 +2495,6 @@ function toggleField(key) {
   const chk = document.querySelector(`[data-check="${CSS.escape(key)}"]`);
   if (chk) {
     chk.checked = on;
-    sortSection(inp.closest('[data-row]'));
     markSelected();
   }
   refresh();
@@ -2379,10 +2518,38 @@ function sortAllSections() {
     rest.sort((a, b) => Number(a.dataset.origIdx) - Number(b.dataset.origIdx));
     [...checked, ...rest].forEach(c => cards.appendChild(c));
   });
+  rebalanceAllSelectedCards();
+}
+
+function sortSectionsBySelection() {
+  const wrap = $('sections');
+  if (!wrap) return;
+  const sections = [...wrap.querySelectorAll('.sec[data-section]')];
+  if (!sections.length) return;
+  const query = $('search')?.value?.trim() || '';
+  const totalSelected = document.querySelectorAll('[data-check]:checked').length;
+
+  // Preserve stable/original ordering unless user is in All view with active selections
+  // and no search query. This avoids unexpected jumps for existing users while typing.
+  if (activeGroup !== 'All' || totalSelected === 0 || query) {
+    sections
+      .sort((a, b) => Number(a.dataset.origSectionIdx) - Number(b.dataset.origSectionIdx))
+      .forEach(sec => wrap.appendChild(sec));
+    return;
+  }
+
+  sections
+    .sort((a, b) => {
+      const aChecked = a.querySelectorAll('[data-check]:checked').length;
+      const bChecked = b.querySelectorAll('[data-check]:checked').length;
+      if (bChecked !== aChecked) return bChecked - aChecked;
+      return Number(a.dataset.origSectionIdx) - Number(b.dataset.origSectionIdx);
+    })
+    .forEach(sec => wrap.appendChild(sec));
 }
 
 function bindFieldEvents() {
-  document.querySelectorAll('[data-check]').forEach(el => el.addEventListener('change', () => { sortSection(el.closest('[data-row]')); markSelected(); refresh(); }));
+  document.querySelectorAll('[data-check]').forEach(el => el.addEventListener('change', () => { markSelected(); refresh(); }));
   document.querySelectorAll('[data-key]').forEach(el => el.addEventListener('input', refresh));
   document.querySelectorAll('[data-toggle]').forEach(btn => btn.addEventListener('click', () => toggleField(btn.dataset.toggle)));
   document.querySelectorAll('[data-pick-for]').forEach(sel => sel.addEventListener('change', () => handlePickerChange(sel)));
@@ -2400,11 +2567,12 @@ function renderSections() {
   const wrap = $('sections');
   if (!wrap) return;
   wrap.innerHTML = '';
-  Object.entries(grouped).forEach(([grp, items]) => {
+  Object.entries(grouped).forEach(([grp, items], secIdx) => {
     try {
       const sec = document.createElement('div');
       sec.className = 'sec';
       sec.dataset.section = grp;
+      sec.dataset.origSectionIdx = String(secIdx);
       sec.innerHTML = `
         <div class="sec-header">
           <span class="sec-icon">${ICONS[grp] || '📁'}</span>
@@ -2419,10 +2587,24 @@ function renderSections() {
     }
   });
   bindFieldEvents();
+  sortSectionsBySelection();
 }
 
 function copyText(text) {
-  return navigator.clipboard.writeText(text).then(
+  const clipboardApi = navigator?.clipboard?.writeText;
+  if (typeof clipboardApi !== 'function') {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    ta.remove();
+    showToast('Copied ✓');
+    return Promise.resolve();
+  }
+  return clipboardApi.call(navigator.clipboard, text).then(
     () => showToast('Copied ✓'),
     () => {
       const ta = document.createElement('textarea');
@@ -2508,3 +2690,26 @@ $('generateBundle').onclick = () => generateBundle();
 $('copyBundle').onclick = () => copyText($('bundleOut').value);
 $('copyEnvLine').onclick = () => copyText($('envLineOut').value);
 $('copyJson').onclick = () => copyText(JSON.stringify(collect(), null, 2));
+document.querySelectorAll('[data-tag-filter]').forEach(btn => {
+  btn.addEventListener('click', e => {
+    e.preventDefault();
+    const tag = btn.dataset.tagFilter;
+    if (!tag) return;
+    $('search').value = tag;
+    filter();
+    const legend = $('tagLegend');
+    if (legend) legend.open = false;
+  });
+});
+$('summary').addEventListener('click', e => {
+  const btn = e.target.closest('[data-jump-key]');
+  if (!btn) return;
+  jumpToEnvKey(btn.dataset.jumpKey);
+});
+$('summary').addEventListener('keydown', e => {
+  const btn = e.target.closest('[data-jump-key]');
+  if (!btn) return;
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  e.preventDefault();
+  jumpToEnvKey(btn.dataset.jumpKey);
+});
