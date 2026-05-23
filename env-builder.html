@@ -136,11 +136,13 @@ body {
 
 .sidebar-scroll {
   flex: 1;
-  overflow-y: auto;
+  overflow-y: scroll;
   padding: 14px 10px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border2) transparent;
 }
 
-.sidebar-scroll::-webkit-scrollbar { width: 4px; }
+.sidebar-scroll::-webkit-scrollbar { width: 8px; }
 .sidebar-scroll::-webkit-scrollbar-track { background: transparent; }
 .sidebar-scroll::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 4px; }
 
@@ -373,21 +375,6 @@ body {
   border-color: var(--amber-glow);
   background: linear-gradient(135deg, var(--bg2) 80%, rgba(245,166,35,.04));
   box-shadow: inset 0 0 0 1px rgba(245,166,35,.14), 0 10px 24px rgba(0,0,0,.22);
-}
-
-.env-card.selected::after {
-  content: "✓ Selected";
-  position: absolute;
-  right: 10px;
-  bottom: 9px;
-  font-family: var(--mono);
-  font-size: 9px;
-  letter-spacing: .4px;
-  color: var(--amber2);
-  background: rgba(245,166,35,.12);
-  border: 1px solid rgba(245,166,35,.28);
-  border-radius: 20px;
-  padding: 1px 7px;
 }
 
 /* Critical cards get a red left-border accent */
@@ -645,6 +632,8 @@ body {
   border-radius: var(--r2);
   overflow: hidden;
   min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .pblock-head {
@@ -672,18 +661,30 @@ body {
   flex-direction: column;
   gap: 8px;
   min-height: 0;
+  height: 0;
+  flex: 1 1 auto;
   overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable both-edges;
 }
 
 #summaryBlock .pblock-body,
 #bundleBlock .pblock-body,
 #importBlock .pblock-body {
-  max-height: 240px;
+  height: auto;
+  max-height: none;
+}
+
+#summaryBlock,
+#bundleBlock,
+#importBlock {
+  height: 300px;
 }
 
 .pblock-body::-webkit-scrollbar { width: 4px; }
 .pblock-body::-webkit-scrollbar-track { background: transparent; }
 .pblock-body::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 4px; }
+.pblock-body::-webkit-scrollbar-thumb:hover { background: #3a455d; }
 
 .pblock-body textarea,
 .pblock-body input[type="text"] {
@@ -851,7 +852,12 @@ body {
   #summaryBlock .pblock-body,
   #bundleBlock .pblock-body,
   #importBlock .pblock-body {
-    max-height: 200px;
+    height: auto;
+  }
+  #summaryBlock,
+  #bundleBlock,
+  #importBlock {
+    height: 260px;
   }
 }
 
@@ -882,7 +888,12 @@ body {
   #summaryBlock .pblock-body,
   #bundleBlock .pblock-body,
   #importBlock .pblock-body {
-    max-height: none;
+    height: auto;
+  }
+  #summaryBlock,
+  #bundleBlock,
+  #importBlock {
+    height: 220px;
   }
   .row-btns .btn {
     flex: 1 1 calc(50% - 6px);

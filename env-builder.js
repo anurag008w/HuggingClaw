@@ -1990,6 +1990,64 @@ let activeGroup = 'All';
 let customCount = 0;
 const GROUPS = ['All', ...[...new Set(FIELDS.map(f => f.g))], 'Custom Env'];
 
+function ensureAllSelectedSection() {
+  const wrap = $('sections');
+  if (!wrap) return null;
+  let sec = document.getElementById('allSelectedSec');
+  if (sec) return sec;
+  sec = document.createElement('div');
+  sec.id = 'allSelectedSec';
+  sec.className = 'sec';
+  sec.innerHTML = `
+    <div class="sec-header">
+      <span class="sec-icon">✅</span>
+      <span class="sec-title">Selected First</span>
+      <span class="sec-count" id="allSelectedCount">0</span>
+      <div class="sec-line"></div>
+    </div>
+    <div class="cards" id="allSelectedCards"></div>`;
+  wrap.prepend(sec);
+  return sec;
+}
+
+function rebalanceAllSelectedCards() {
+  const sec = ensureAllSelectedSection();
+  if (!sec) return;
+  const selectedCardsWrap = document.getElementById('allSelectedCards');
+  if (!selectedCardsWrap) return;
+
+  // Restore cards when not in All view.
+  if (activeGroup !== 'All') {
+    [...selectedCardsWrap.querySelectorAll('[data-row]')].forEach(card => {
+      const grp = card.dataset.group;
+      const target = document.querySelector(`.sec[data-section="${CSS.escape(grp)}"] .cards`);
+      if (target) target.appendChild(card);
+    });
+    sec.classList.add('sec-hidden');
+    const countEl = $('allSelectedCount'); if (countEl) countEl.textContent = '0';
+    return;
+  }
+
+  // Move checked cards from regular sections to top selected bucket.
+  document.querySelectorAll('.sec[data-section] .cards [data-row]').forEach(card => {
+    const checked = !!card.querySelector('[data-check]')?.checked;
+    if (checked) selectedCardsWrap.appendChild(card);
+  });
+
+  // Move unchecked cards out of selected bucket back to original section.
+  [...selectedCardsWrap.querySelectorAll('[data-row]')].forEach(card => {
+    const checked = !!card.querySelector('[data-check]')?.checked;
+    if (checked) return;
+    const grp = card.dataset.group;
+    const target = document.querySelector(`.sec[data-section="${CSS.escape(grp)}"] .cards`);
+    if (target) target.appendChild(card);
+  });
+
+  const count = selectedCardsWrap.querySelectorAll('[data-row]').length;
+  const countEl = $('allSelectedCount'); if (countEl) countEl.textContent = String(count);
+  sec.classList.toggle('sec-hidden', count === 0);
+}
+
 function renderSidebar() {
   const sb = $('sidebar');
   sb.innerHTML = '<div class="sb-label">Groups</div>';
@@ -2244,6 +2302,7 @@ function updateCounts() {
 }
 
 function filter() {
+  rebalanceAllSelectedCards();
   const q = $('search').value.trim().toLowerCase();
   document.querySelectorAll('.sec[data-section]').forEach(sec => {
     const grp = sec.dataset.section;
@@ -2391,7 +2450,6 @@ function toggleField(key) {
   const chk = document.querySelector(`[data-check="${CSS.escape(key)}"]`);
   if (chk) {
     chk.checked = on;
-    sortSection(inp.closest('[data-row]'));
     markSelected();
   }
   refresh();
@@ -2415,6 +2473,34 @@ function sortAllSections() {
     rest.sort((a, b) => Number(a.dataset.origIdx) - Number(b.dataset.origIdx));
     [...checked, ...rest].forEach(c => cards.appendChild(c));
   });
+  rebalanceAllSelectedCards();
+}
+
+function sortSectionsBySelection() {
+  const wrap = $('sections');
+  if (!wrap) return;
+  const sections = [...wrap.querySelectorAll('.sec[data-section]')];
+  if (!sections.length) return;
+  const query = $('search')?.value?.trim() || '';
+  const totalSelected = document.querySelectorAll('[data-check]:checked').length;
+
+  // Preserve stable/original ordering unless user is in All view with active selections
+  // and no search query. This avoids unexpected jumps for existing users while typing.
+  if (activeGroup !== 'All' || totalSelected === 0 || query) {
+    sections
+      .sort((a, b) => Number(a.dataset.origSectionIdx) - Number(b.dataset.origSectionIdx))
+      .forEach(sec => wrap.appendChild(sec));
+    return;
+  }
+
+  sections
+    .sort((a, b) => {
+      const aChecked = a.querySelectorAll('[data-check]:checked').length;
+      const bChecked = b.querySelectorAll('[data-check]:checked').length;
+      if (bChecked !== aChecked) return bChecked - aChecked;
+      return Number(a.dataset.origSectionIdx) - Number(b.dataset.origSectionIdx);
+    })
+    .forEach(sec => wrap.appendChild(sec));
 }
 
 function sortSectionsBySelection() {
@@ -2445,7 +2531,7 @@ function sortSectionsBySelection() {
 }
 
 function bindFieldEvents() {
-  document.querySelectorAll('[data-check]').forEach(el => el.addEventListener('change', () => { sortSection(el.closest('[data-row]')); markSelected(); refresh(); }));
+  document.querySelectorAll('[data-check]').forEach(el => el.addEventListener('change', () => { markSelected(); refresh(); }));
   document.querySelectorAll('[data-key]').forEach(el => el.addEventListener('input', refresh));
   document.querySelectorAll('[data-toggle]').forEach(btn => btn.addEventListener('click', () => toggleField(btn.dataset.toggle)));
   document.querySelectorAll('[data-pick-for]').forEach(sel => sel.addEventListener('change', () => handlePickerChange(sel)));
