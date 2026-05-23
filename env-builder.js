@@ -2118,6 +2118,14 @@ function addCustomRow(key = '', val = '', enabled = false) {
   $('customRows').appendChild(row);
 
   row.querySelectorAll('input').forEach(el => el.addEventListener('input', refresh));
+  const keyInput = row.querySelector(`[data-ck="${id}"]`);
+  const syncCustomKey = () => {
+    const customKey = (keyInput?.value || '').trim();
+    if (customKey) row.dataset.customKey = customKey;
+    else delete row.dataset.customKey;
+  };
+  row.querySelector(`[data-ck="${id}"]`)?.addEventListener('input', syncCustomKey);
+  syncCustomKey();
   row.querySelector('button').onclick = () => {
     const on = row.dataset.enabled !== '1';
     row.dataset.enabled = on ? '1' : '0';
@@ -2189,7 +2197,16 @@ function refresh() {
 
 function jumpToEnvKey(key) {
   const card = document.querySelector(`[data-check="${CSS.escape(key)}"]`)?.closest('[data-row]');
-  if (!card) return;
+  if (!card) {
+    const customRow = document.querySelector(`[data-custom-row][data-custom-key="${CSS.escape(key)}"]`);
+    if (!customRow) return;
+    activeGroup = 'Custom Env';
+    renderSidebar();
+    filter();
+    customRow.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+    customRow.querySelector('input')?.focus({ preventScroll: true });
+    return;
+  }
   const group = card.dataset.group;
   if (group && activeGroup !== 'All' && activeGroup !== group) {
     activeGroup = group;
