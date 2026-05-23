@@ -476,15 +476,16 @@ inject_provider_models_from_env() {
     | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
     | awk 'NF' \
     | jq -R . \
-    | jq -s 'map({id: ., name: .}) | unique_by(.id)')
+    | jq -s --arg provider "$provider" '
+        map(if contains("/") then . else ($provider + "/" + .) end)
+        | map({id: ., name: .})
+        | unique_by(.id)')
 
   CONFIG_JSON=$(jq \
     --arg provider "$provider" \
     --argjson models "$models_json" \
-    'if .models.providers[$provider] then
-       .models.mode = "merge"
-       | .models.providers[$provider].models = $models
-     else . end' <<<"$CONFIG_JSON")
+    '.models.mode = "merge"
+     | .models.providers[$provider] = ((.models.providers[$provider] // {}) + {models: $models})' <<<"$CONFIG_JSON")
 }
 
 # Built-in provider model envs (optional)
