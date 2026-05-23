@@ -454,6 +454,7 @@ fi
 #   NVIDIA_MODELS=model1,model2
 #   OPENAI_MODELS=gpt-4o-mini,gpt-4.1
 # This helps when provider auto-discovery does not populate models reliably.
+INJECTED_MODELS_PROVIDERS='{}'
 inject_provider_models_from_env() {
   local provider="$1"
   local models_env="$2"
@@ -476,15 +477,21 @@ inject_provider_models_from_env() {
     | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
     | awk 'NF' \
     | jq -R . \
-    | jq -s 'map({id: ., name: .}) | unique_by(.id)')
+    | jq -s --arg provider "$provider" '
+        map(if contains("/") then . else ($provider + "/" + .) end)
+        | map({id: ., name: .})
+        | unique_by(.id)')
 
   CONFIG_JSON=$(jq \
     --arg provider "$provider" \
     --argjson models "$models_json" \
-    'if .models.providers[$provider] then
-       .models.mode = "merge"
-       | .models.providers[$provider].models = $models
-     else . end' <<<"$CONFIG_JSON")
+    '.models.mode = "merge"
+     | .models.providers[$provider] = ((.models.providers[$provider] // {}) + {models: $models})' <<<"$CONFIG_JSON")
+
+  INJECTED_MODELS_PROVIDERS=$(jq \
+    --arg provider "$provider" \
+    --argjson models "$models_json" \
+    '.[$provider] = ((.[$provider] // {}) + {models: $models})' <<<"$INJECTED_MODELS_PROVIDERS")
 }
 
 # Built-in provider model envs (optional)
@@ -795,6 +802,7 @@ if [ -f "$EXISTING_CONFIG" ]; then
     --arg consoleLevel "$OPENCLAW_CONSOLE_LOG_LEVEL" \
     --arg consoleStyle "$OPENCLAW_CONSOLE_LOG_STYLE" \
     --argjson desired "$CONFIG_JSON" \
+    --argjson injectedModelsProviders "$INJECTED_MODELS_PROVIDERS" \
     --argjson fileLogConfigured "$OPENCLAW_FILE_LOG_LEVEL_CONFIGURED" \
     --argjson consoleLogConfigured "$OPENCLAW_CONSOLE_LOG_LEVEL_CONFIGURED" \
     --argjson consoleStyleConfigured "$OPENCLAW_CONSOLE_LOG_STYLE_CONFIGURED" \
@@ -808,6 +816,16 @@ if [ -f "$EXISTING_CONFIG" ]; then
      | if $fileLogConfigured then .logging.level = $fileLevel else . end
      | if $consoleLogConfigured then .logging.consoleLevel = $consoleLevel else . end
      | if $consoleStyleConfigured then .logging.consoleStyle = $consoleStyle else . end
+     | .models = ((.models // {}) + {"mode": (($desired.models.mode // .models.mode) // "merge")})
+     | if (($injectedModelsProviders | length) > 0) then
+         ($injectedModelsProviders | to_entries) as $entries
+         | reduce $entries[] as $e (.;
+             .models.providers[$e.key] = ((.models.providers[$e.key] // {})
+               + {models: (($e.value.models // []) | unique_by(.id))})
+           )
+       else
+         .
+       end
      | .channels = ((.channels // {}) * ($desired.channels // {}))
      | .plugins.allow = (((.plugins.allow // []) + ($desired.plugins.allow // [])) | unique)
      | .plugins.deny = (((.plugins.deny // []) + ($desired.plugins.deny // [])) | unique)
