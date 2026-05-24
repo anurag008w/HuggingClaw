@@ -280,6 +280,7 @@ Optional tuning:
 - `KEY_PERM_SUSPEND_MS` (default `57600000`) — long suspend duration for exhausted/auth-invalid keys (**capped at 16h max**).
 - `KEY_FAILURE_DECAY_MS` (default `900000`) — recent-failure decay window used to deprioritize keys.
 - `KEY_MAX_INFLIGHT_PER_KEY` (default `3`) — soft concurrent request cap per key.
+- `SESSIONS_BYPASS_SIZE_LIMIT` (default `true`) — do not apply generic max-file-size exclusion to `agents/*/sessions` backup files.
 - `KEY_FETCH_MAX_RETRIES` (default `2`) — auto-retry count for retryable failures on **GET/HEAD/OPTIONS/POST** with a different key.
 - `KEY_FETCH_RETRY_BASE_DELAY_MS` (default `250`) — base delay for retry backoff (respects `Retry-After`, capped to 10s).
 - `KEY_ROTATOR_DIAGNOSTICS=true` — emit periodic provider/key health snapshots.
