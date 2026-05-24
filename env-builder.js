@@ -536,6 +536,15 @@ const FIELDS = [
   },
 {
     "g": "Plugins",
+    "icon": "🔄",
+    "k": "KEY_FETCH_RETRY_BASE_DELAY_MS",
+    "lbl": "Base delay between auto-retries (ms, capped to 10s)",
+    "type": "text",
+    "ph": "250",
+    "tag": "advanced"
+  },
+{
+    "g": "Plugins",
     "icon": "📊",
     "k": "KEY_ROTATOR_DIAGNOSTICS",
     "lbl": "Enable key-rotator diagnostics logs",

@@ -52,6 +52,10 @@ const FETCH_MAX_RETRIES = Math.max(
   0,
   Math.min(2, parseInt(process.env.KEY_FETCH_MAX_RETRIES || '', 10) || 2),
 );
+const FETCH_RETRY_BASE_DELAY_MS = Math.max(
+  0,
+  Math.min(10_000, parseInt(process.env.KEY_FETCH_RETRY_BASE_DELAY_MS || '', 10) || 250),
+);
 const DIAGNOSTICS_ENABLED = /^(1|true|yes|on)$/i.test(
   String(process.env.KEY_ROTATOR_DIAGNOSTICS || '').trim(),
 );
@@ -391,6 +395,22 @@ function startDiagnostics() {
   }, DIAGNOSTICS_INTERVAL_MS).unref?.();
 }
 
+function sleep(ms) {
+  if (!ms || ms <= 0) return Promise.resolve();
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseRetryAfterMs(value) {
+  if (!value) return 0;
+  const raw = String(value).trim();
+  if (!raw) return 0;
+  const sec = Number(raw);
+  if (Number.isFinite(sec) && sec >= 0) return Math.min(10_000, Math.round(sec * 1000));
+  const ts = Date.parse(raw);
+  if (Number.isFinite(ts)) return Math.min(10_000, Math.max(0, ts - Date.now()));
+  return 0;
+}
+
 // ─── Patch globalThis.fetch ───────────────────────────────────────────────────
 
 function patchFetch() {
@@ -453,7 +473,13 @@ function patchFetch() {
 
           const shouldRetry = attempt < maxAttempts && classifyRetryableFailure(response.status);
           if (shouldRetry) {
+            const retryAfterMs = parseRetryAfterMs(response.headers?.get?.('retry-after'));
+            const backoffMs = Math.min(
+              10_000,
+              Math.max(retryAfterMs, FETCH_RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1)),
+            );
             warn(`[key-rotator] ${provider.name}: fetch retry ${attempt}/${maxAttempts - 1} after status=${response.status}`);
+            await sleep(backoffMs);
             continue;
           }
           return response;
@@ -464,7 +490,9 @@ function patchFetch() {
           const code = err?.code ? String(err.code).toUpperCase() : '';
           const shouldRetry = attempt < maxAttempts && classifyRetryableFailure(undefined, code);
           if (shouldRetry) {
+            const backoffMs = Math.min(10_000, FETCH_RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1));
             warn(`[key-rotator] ${provider.name}: fetch retry ${attempt}/${maxAttempts - 1} after network code=${code || 'unknown'}`);
+            await sleep(backoffMs);
             continue;
           }
           throw err;

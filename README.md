@@ -281,6 +281,7 @@ Optional tuning:
 - `KEY_FAILURE_DECAY_MS` (default `900000`) — recent-failure decay window used to deprioritize keys.
 - `KEY_MAX_INFLIGHT_PER_KEY` (default `3`) — soft concurrent request cap per key.
 - `KEY_FETCH_MAX_RETRIES` (default `2`) — auto-retry count for retryable failures on **GET/HEAD/OPTIONS** with a different key.
+- `KEY_FETCH_RETRY_BASE_DELAY_MS` (default `250`) — base delay for retry backoff (respects `Retry-After`, capped to 10s).
 - `KEY_ROTATOR_DIAGNOSTICS=true` — emit periodic provider/key health snapshots.
 - `KEY_ROTATOR_DIAGNOSTICS_INTERVAL_MS` (default `60000`) — diagnostics interval.
 
