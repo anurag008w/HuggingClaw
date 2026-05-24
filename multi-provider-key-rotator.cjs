@@ -450,12 +450,13 @@ function patchFetch() {
   const orig = globalThis.fetch.bind(globalThis);
 
   globalThis.fetch = async function patchedFetch(input, init = {}) {
+    const urlLike = typeof input === 'string' || input instanceof URL
+      ? input
+      : (input && typeof input.url === 'string' ? input.url : null);
+    const provider = matchProvider(resolveHostname(urlLike));
+    if (!provider) return await orig(input, init);
+
     try {
-      const urlLike = typeof input === 'string' || input instanceof URL
-        ? input
-        : (input && typeof input.url === 'string' ? input.url : null);
-      const provider = matchProvider(resolveHostname(urlLike));
-      if (!provider) return await orig(input, init);
 
       const baseRequest = new Request(input, init);
       const method = String(baseRequest.method || 'GET').toUpperCase();
@@ -537,7 +538,7 @@ function patchFetch() {
       if (lastErr) throw lastErr;
       return await orig(baseRequest);
     } catch (err) {
-      warn('[key-rotator] fetch patch error:', err?.message || err);
+      warn(`[key-rotator] ${provider.name}: fetch patch error:`, err?.message || err);
       throw err;
     }
   };
