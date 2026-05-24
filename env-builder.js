@@ -604,24 +604,6 @@ const FIELDS = [
   },
 {
     "g": "Startup",
-    "icon": "📦",
-    "k": "HUGGINGCLAW_ARCHIVE_TOOLS_BOOTSTRAP",
-    "lbl": "Auto-install archive tools on boot",
-    "type": "toggle",
-    "ph": "true",
-    "tag": "advanced"
-  },
-{
-    "g": "Startup",
-    "icon": "📦",
-    "k": "HUGGINGCLAW_ARCHIVE_TOOLS_BOOTSTRAP_QUIET",
-    "lbl": "Quiet archive bootstrap logs",
-    "type": "toggle",
-    "ph": "true",
-    "tag": "advanced"
-  },
-{
-    "g": "Startup",
     "icon": "⚡",
     "k": "HUGGINGCLAW_RUN",
     "lbl": "Startup command (one-liner)",

@@ -221,9 +221,6 @@ Errors are always printed as `ERROR:` lines in Space logs. By default HuggingCla
 
 Advanced/backward-compatible variables still work if you prefer package-specific fields: `HUGGINGCLAW_APT_PACKAGES`, `HUGGINGCLAW_PIP_PACKAGES`, `HUGGINGCLAW_NPM_PACKAGES`, `HUGGINGCLAW_OPENCLAW_PLUGINS`, `HUGGINGCLAW_STARTUP_COMMANDS`, `HUGGINGCLAW_STARTUP_COMMAND_1`...`100`, `HUGGINGCLAW_STARTUP_SCRIPT`, and `HUGGINGCLAW_STARTUP_SCRIPT_B64`.
 
-Archive utility bootstrap controls:
-- `HUGGINGCLAW_ARCHIVE_TOOLS_BOOTSTRAP=true` (default) installs missing archive utilities (`unzip`, `zip`, `tar`, `gzip`, `xz`, `7z`) at startup via the existing apt path.
-- `HUGGINGCLAW_ARCHIVE_TOOLS_BOOTSTRAP_QUIET=true` (default) suppresses routine archive bootstrap logs; set to `false` for verbose output.
 
 > [!IMPORTANT]
 > `sudo` is available for package-manager commands only (`apt`, `apt-get`, and `dpkg`) and is not unrestricted root access. In terminal shells, common user-space commands (for example `sudo unzip`, `sudo tar`, `sudo curl`, `sudo pip`) are passed through and run without escalation for convenience. Apt-installed packages still disappear on Space restart, so put them in `HUGGINGCLAW_RUN` or let the shell wrapper record the command in `startup.sh`.

@@ -572,47 +572,6 @@ ensure_chromium_for_browser_plugin() {
 HC_STARTUP_FAILURES=0
 ensure_chromium_for_browser_plugin || HC_STARTUP_FAILURES=$((HC_STARTUP_FAILURES + 1))
 
-ARCHIVE_TOOLS_BOOTSTRAP_ENABLED="${HUGGINGCLAW_ARCHIVE_TOOLS_BOOTSTRAP:-true}"
-ARCHIVE_TOOLS_BOOTSTRAP_QUIET="${HUGGINGCLAW_ARCHIVE_TOOLS_BOOTSTRAP_QUIET:-true}"
-
-ensure_archive_tools() {
-  # Jupyter terminal users often need basic archive tooling for zip/tar/gz/xz.
-  # Install only missing binaries, and only through apt wrapper.
-  local missing=()
-  command -v unzip >/dev/null 2>&1 || missing+=("unzip")
-  command -v zip >/dev/null 2>&1 || missing+=("zip")
-  command -v tar >/dev/null 2>&1 || missing+=("tar")
-  command -v gzip >/dev/null 2>&1 || missing+=("gzip")
-  command -v xz >/dev/null 2>&1 || missing+=("xz-utils")
-  command -v 7z >/dev/null 2>&1 || missing+=("p7zip-full")
-  [ "${#missing[@]}" -gt 0 ] || return 0
-
-  if ! hc_is_true "$ARCHIVE_TOOLS_BOOTSTRAP_ENABLED"; then
-    return 0
-  fi
-
-  if ! hc_is_true "$ARCHIVE_TOOLS_BOOTSTRAP_QUIET"; then
-    echo "Archive tools missing (${missing[*]}), attempting runtime install..."
-  fi
-  if _hc_apt_install "${missing[@]}"; then
-    if ! hc_is_true "$ARCHIVE_TOOLS_BOOTSTRAP_QUIET"; then
-      echo "Archive tools installed."
-    fi
-    return 0
-  fi
-  echo "Warning: failed to install archive tools (${missing[*]}). You can still install manually via HUGGINGCLAW_RUN." >&2
-  return 1
-}
-
-archive_tools_ready() {
-  command -v zip >/dev/null 2>&1 \
-    && command -v unzip >/dev/null 2>&1 \
-    && command -v tar >/dev/null 2>&1 \
-    && command -v gzip >/dev/null 2>&1 \
-    && command -v xz >/dev/null 2>&1 \
-    && command -v 7z >/dev/null 2>&1
-}
-
 # On Debian/Ubuntu, /usr/bin/chromium is often a shell wrapper while the real
 # ELF binary lives under /usr/lib/chromium/*. Prefer a real ELF binary, then
 # fall back to wrapper launchers (Playwright/OpenClaw can execute those too).
@@ -931,9 +890,6 @@ else
 fi
 if [ -n "${CLOUDFLARE_PROXY_URL:-}" ]; then
   echo "Proxy     : ${CLOUDFLARE_PROXY_URL}"
-fi
-if archive_tools_ready; then
-  echo "Archives  : ready (zip/unzip/tar/gzip/xz/7z)"
 fi
 # HUGGINGCLAW_JUPYTER_ENABLED env var se override allow karo
 # (env-builder "Enable Jupyter terminal" toggle yahi set karta hai)
@@ -1282,7 +1238,6 @@ _hc_apt_install() {
     return 1
   fi
 }
-ensure_archive_tools || HC_STARTUP_FAILURES=$((HC_STARTUP_FAILURES + 1))
 apt-get() {
   case "${1:-}" in
     install)
