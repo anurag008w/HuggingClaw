@@ -35,6 +35,14 @@ const MAX_INFLIGHT_PER_KEY = Math.max(
   1,
   parseInt(process.env.KEY_MAX_INFLIGHT_PER_KEY || '', 10) || 3,
 );
+const COOLDOWN_JITTER_PCT = Math.min(
+  50,
+  Math.max(0, parseInt(process.env.KEY_BLACKLIST_JITTER_PCT || '', 10) || 15),
+);
+const FAILURE_DECAY_MS = Math.max(
+  30_000,
+  parseInt(process.env.KEY_FAILURE_DECAY_MS || '', 10) || 15 * 60_000,
+);
 const DIAGNOSTICS_ENABLED = /^(1|true|yes|on)$/i.test(
   String(process.env.KEY_ROTATOR_DIAGNOSTICS || '').trim(),
 );
@@ -99,7 +107,7 @@ function normalizeKeys(...inputs) {
 // Per-key state: { strikes, blacklistedUntil }
 // strikes   – consecutive 429/402 count; resets on success
 // blacklistedUntil – epoch ms; 0 = active
-function makeKeyState() { return { strikes: 0, blacklistedUntil: 0 }; }
+function makeKeyState() { return { strikes: 0, blacklistedUntil: 0, lastFailureAt: 0 }; }
 
 const providerState = PROVIDERS.map(p => {
   const llmFallbackEnabled = !/^(0|false|no|off)$/.test(
@@ -176,6 +184,7 @@ function recordFailure(p, key) {
   if (!ks) { ks = makeKeyState(); p.keyState.set(key, ks); }
 
   ks.strikes = Math.min(ks.strikes + 1, MAX_STRIKES);
+  ks.lastFailureAt = Date.now();
 
   let cooldown;
   if (ks.strikes >= MAX_STRIKES) {
@@ -184,6 +193,8 @@ function recordFailure(p, key) {
   } else {
     // Exponential: 1× → 4× (strikes 1 and 2)
     cooldown = BASE_COOLDOWN_MS * Math.pow(4, ks.strikes - 1);
+    const jitter = 1 + ((Math.random() * 2 - 1) * (COOLDOWN_JITTER_PCT / 100));
+    cooldown = Math.max(1000, Math.round(cooldown * jitter));
     const secs = Math.round(cooldown / 1000);
     log(`[key-rotator] ${p.name}: ...${key.slice(-6)} strike ${ks.strikes}/${MAX_STRIKES} — backoff ${secs}s`);
   }
@@ -198,6 +209,7 @@ function recordSuccess(p, key) {
   const ks = p.keyState.get(key);
   if (ks && ks.strikes > 0) {
     ks.strikes = 0;
+    ks.lastFailureAt = 0;
     log(`[key-rotator] ${p.name}: ...${key.slice(-6)} recovered — strikes reset`);
   }
 }
@@ -258,7 +270,12 @@ function nextKey(p) {
         log(`[key-rotator] ${p.name}: picked ...${key.slice(-6)} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
         return key;
       }
-      if (!bestPick || inflight < bestPick.inflight) bestPick = { i, key, inflight };
+      if (!bestPick) bestPick = { i, key, inflight, score: Number.POSITIVE_INFINITY };
+      const ks = p.keyState.get(key) || makeKeyState();
+      const recentFailPenalty = ks.lastFailureAt > 0 && (Date.now() - ks.lastFailureAt) < FAILURE_DECAY_MS ? 100 : 0;
+      const strikePenalty = (ks.strikes || 0) * 10;
+      const score = recentFailPenalty + strikePenalty + inflight;
+      if (score < bestPick.score) bestPick = { i, key, inflight, score };
     }
   }
 
@@ -313,6 +330,16 @@ function setAuthHeader(headers, key) {
 
 function handleStatus(p, key, status) {
   if (!p || !key) return;
+  if (status === 401 || status === 403) {
+    // Usually invalid/expired key. Suspend long to avoid repeatedly poisoning requests.
+    let ks = p.keyState.get(key);
+    if (!ks) { ks = makeKeyState(); p.keyState.set(key, ks); }
+    ks.strikes = MAX_STRIKES;
+    ks.lastFailureAt = Date.now();
+    ks.blacklistedUntil = Date.now() + PERM_BLACKLIST_MS;
+    warn(`[key-rotator] ${p.name}: ...${key.slice(-6)} auth-failed (${status}) — suspended for 24 h`);
+    return;
+  }
   if (classifyRetryableFailure(status)) {
     recordFailure(p, key);
     warn(`[key-rotator] ${p.name}: retryable status=${status} on ...${key.slice(-6)}`);
