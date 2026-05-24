@@ -176,6 +176,10 @@ if (PROXY_URL) {
         let mergedHeaders;
         if (request) {
             mergedHeaders = new Headers(request.headers);
+            if (init?.headers) {
+              const initHeaders = new Headers(init.headers);
+              initHeaders.forEach((v, k) => mergedHeaders.set(k, v));
+            }
         } else {
             mergedHeaders = new Headers(init?.headers || {});
         }
@@ -226,9 +230,9 @@ if (PROXY_URL) {
             headers: mergedHeaders,
             redirect: request.redirect,
           };
-          if (request.body) {
+          if (request.body && !request.bodyUsed) {
             fetchOpts.body = request.body;
-            fetchOpts.duplex = "half";
+            fetchOpts.duplex = request.duplex || "half";
           }
           return logProxyError(
             originalFetch(String(proxiedUrl), fetchOpts),
