@@ -804,6 +804,15 @@ write_json_atomic() {
   mv "$tmp" "$dest"
 }
 
+backup_config_copy() {
+  local src="$1"
+  [ -f "$src" ] || return 0
+  local stamp backup
+  stamp="$(date +%Y%m%d-%H%M%S)"
+  backup="${src}.backup.${stamp}"
+  cp -a "$src" "$backup" 2>/dev/null || cp "$src" "$backup" 2>/dev/null || true
+}
+
 # Write config
 EXISTING_CONFIG="/home/node/.openclaw/openclaw.json"
 WHATSAPP_CONFIG_ENABLED=false
@@ -818,6 +827,7 @@ if [ -f "$EXISTING_CONFIG" ]; then
   if ! validate_json_file "$EXISTING_CONFIG"; then
     echo "Restored config is invalid JSON — backing up and regenerating from runtime config."
     cp "$EXISTING_CONFIG" "${EXISTING_CONFIG}.invalid.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+    backup_config_copy "$EXISTING_CONFIG"
     if write_json_atomic "$EXISTING_CONFIG" "$CONFIG_JSON"; then
       echo "Fresh valid config written."
     else
@@ -883,6 +893,7 @@ if [ -f "$EXISTING_CONFIG" ]; then
     "$EXISTING_CONFIG" 2>/dev/null)
 
     if [ -n "$PATCHED" ]; then
+      backup_config_copy "$EXISTING_CONFIG"
       if write_json_atomic "$EXISTING_CONFIG" "$PATCHED"; then
         echo "Config patched successfully."
       else
