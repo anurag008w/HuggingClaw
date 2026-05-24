@@ -475,7 +475,7 @@ const FIELDS = [
     "g": "Plugins",
     "icon": "🔄",
     "k": "KEY_BLACKLIST_COOLDOWN_MS",
-    "lbl": "Key rotation base backoff (ms) — time a key is skipped after first 429/rate-limit (doubles on repeated failures; 24h after max strikes)",
+    "lbl": "Key rotation base backoff (ms) — time a key is skipped after first 429/rate-limit (doubles on repeated failures; long suspend after max strikes)",
     "type": "text",
     "ph": "60000",
     "tag": "advanced"
@@ -493,9 +493,18 @@ const FIELDS = [
     "g": "Plugins",
     "icon": "🔄",
     "k": "KEY_MAX_STRIKES",
-    "lbl": "Key rotation max strikes — consecutive 429/quota errors before a key is suspended for 24h",
+    "lbl": "Key rotation max strikes — consecutive 429/quota errors before long suspend",
     "type": "text",
     "ph": "3",
+    "tag": "advanced"
+  },
+{
+    "g": "Plugins",
+    "icon": "🔄",
+    "k": "KEY_PERM_SUSPEND_MS",
+    "lbl": "Long suspend duration (ms) for exhausted/auth-invalid keys (max 16h cap)",
+    "type": "text",
+    "ph": "57600000",
     "tag": "advanced"
   },
 {

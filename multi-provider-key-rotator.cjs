@@ -43,6 +43,11 @@ const FAILURE_DECAY_MS = Math.max(
   30_000,
   parseInt(process.env.KEY_FAILURE_DECAY_MS || '', 10) || 15 * 60_000,
 );
+const MAX_PERM_SUSPEND_MS = 16 * 60 * 60 * 1000;
+const PERM_SUSPEND_MS = Math.min(
+  MAX_PERM_SUSPEND_MS,
+  Math.max(60_000, parseInt(process.env.KEY_PERM_SUSPEND_MS || '', 10) || MAX_PERM_SUSPEND_MS),
+);
 const DIAGNOSTICS_ENABLED = /^(1|true|yes|on)$/i.test(
   String(process.env.KEY_ROTATOR_DIAGNOSTICS || '').trim(),
 );
@@ -50,9 +55,9 @@ const DIAGNOSTICS_INTERVAL_MS = Math.max(
   10_000,
   parseInt(process.env.KEY_ROTATOR_DIAGNOSTICS_INTERVAL_MS || '', 10) || 60_000,
 );
-// Permanently blacklisted keys retry after this long (default 24 h).
-// "Permanent" just means very long — avoids truly forever loops on app restart.
-const PERM_BLACKLIST_MS = 24 * 60 * 60 * 1000;
+// Long suspend window for exhausted/invalid keys.
+// Capped to 16h to avoid oversuppressing pools for too long.
+const formatHours = (ms) => (ms / (60 * 60 * 1000)).toFixed(ms % (60 * 60 * 1000) === 0 ? 0 : 2);
 
 // ─── Provider definitions ────────────────────────────────────────────────────
 
@@ -174,7 +179,7 @@ function isActive(p, key) {
  * Strike logic:
  *   strike 1 → BASE_COOLDOWN_MS  (e.g. 60 s  — probably rate-limit)
  *   strike 2 → BASE_COOLDOWN_MS × 4            (240 s)
- *   strike 3 → PERM_BLACKLIST_MS (24 h — treat as quota exhausted, skip all day)
+ *   strike 3 → PERM_SUSPEND_MS (max 16 h — treat as quota exhausted, skip long)
  *
  * A successful response resets strikes so a key that was temporarily
  * rate-limited and recovered is treated as fresh again.
@@ -188,8 +193,8 @@ function recordFailure(p, key) {
 
   let cooldown;
   if (ks.strikes >= MAX_STRIKES) {
-    cooldown = PERM_BLACKLIST_MS;
-    warn(`[key-rotator] ${p.name}: ...${key.slice(-6)} reached ${MAX_STRIKES} strikes — suspended for 24 h (quota likely exhausted)`);
+    cooldown = PERM_SUSPEND_MS;
+    warn(`[key-rotator] ${p.name}: ...${key.slice(-6)} reached ${MAX_STRIKES} strikes — suspended for ${formatHours(PERM_SUSPEND_MS)} h (quota likely exhausted)`);
   } else {
     // Exponential: 1× → 4× (strikes 1 and 2)
     cooldown = BASE_COOLDOWN_MS * Math.pow(4, ks.strikes - 1);
@@ -336,8 +341,8 @@ function handleStatus(p, key, status) {
     if (!ks) { ks = makeKeyState(); p.keyState.set(key, ks); }
     ks.strikes = MAX_STRIKES;
     ks.lastFailureAt = Date.now();
-    ks.blacklistedUntil = Date.now() + PERM_BLACKLIST_MS;
-    warn(`[key-rotator] ${p.name}: ...${key.slice(-6)} auth-failed (${status}) — suspended for 24 h`);
+    ks.blacklistedUntil = Date.now() + PERM_SUSPEND_MS;
+    warn(`[key-rotator] ${p.name}: ...${key.slice(-6)} auth-failed (${status}) — suspended for ${formatHours(PERM_SUSPEND_MS)} h`);
     return;
   }
   if (classifyRetryableFailure(status)) {
@@ -504,4 +509,4 @@ patchHttpModule(http);
 patchHttpModule(https);
 startDiagnostics();
 
-log(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:24h max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'}`);
+log(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:${formatHours(PERM_SUSPEND_MS)}h (cap 16h) max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'}`);
