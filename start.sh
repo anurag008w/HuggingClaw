@@ -824,19 +824,8 @@ if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
   TELEGRAM_CONFIG_ENABLED=true
 fi
 if [ -f "$EXISTING_CONFIG" ]; then
-  if ! validate_json_file "$EXISTING_CONFIG"; then
-    echo "Restored config is invalid JSON — backing up and regenerating from runtime config."
-    cp "$EXISTING_CONFIG" "${EXISTING_CONFIG}.invalid.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
-    backup_config_copy "$EXISTING_CONFIG"
-    if write_json_atomic "$EXISTING_CONFIG" "$CONFIG_JSON"; then
-      echo "Fresh valid config written."
-    else
-      echo "ERROR: failed to recover config JSON; aborting startup." >&2
-      exit 1
-    fi
-  else
-    echo "Restored config found — patching required fields and runtime channel/plugin toggles..."
-    PATCHED=$(jq \
+  echo "Restored config found — patching required fields and runtime channel/plugin toggles..."
+  PATCHED=$(jq \
     --arg token "$GATEWAY_TOKEN" \
     --arg model "$LLM_MODEL" \
     --arg fileLevel "$OPENCLAW_FILE_LOG_LEVEL" \
@@ -892,17 +881,25 @@ if [ -f "$EXISTING_CONFIG" ]; then
        end' \
     "$EXISTING_CONFIG" 2>/dev/null)
 
-    if [ -n "$PATCHED" ]; then
-      backup_config_copy "$EXISTING_CONFIG"
-      if write_json_atomic "$EXISTING_CONFIG" "$PATCHED"; then
-        echo "Config patched successfully."
-      else
-        echo "Patch produced invalid JSON — writing fresh config."
-        write_json_atomic "$EXISTING_CONFIG" "$CONFIG_JSON" || { echo "ERROR: could not write valid fallback config" >&2; exit 1; }
-      fi
+  if [ -n "$PATCHED" ]; then
+    backup_config_copy "$EXISTING_CONFIG"
+    if write_json_atomic "$EXISTING_CONFIG" "$PATCHED"; then
+      echo "Config patched successfully."
     else
-      echo "Patch failed — writing fresh config."
+      echo "Patch produced invalid JSON — writing fresh config."
       write_json_atomic "$EXISTING_CONFIG" "$CONFIG_JSON" || { echo "ERROR: could not write valid fallback config" >&2; exit 1; }
+    fi
+  else
+    echo "Patch failed."
+    # Validate only on patch failure (as requested). If restored config is invalid,
+    # quarantine it and regenerate from runtime config; otherwise keep it untouched.
+    if ! validate_json_file "$EXISTING_CONFIG"; then
+      echo "Restored config is invalid JSON — backing up and regenerating from runtime config."
+      cp "$EXISTING_CONFIG" "${EXISTING_CONFIG}.invalid.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+      backup_config_copy "$EXISTING_CONFIG"
+      write_json_atomic "$EXISTING_CONFIG" "$CONFIG_JSON" || { echo "ERROR: could not write valid fallback config" >&2; exit 1; }
+    else
+      echo "Patch failed but restored config is valid — keeping existing config unchanged."
     fi
   fi
 else
