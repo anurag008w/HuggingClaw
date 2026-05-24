@@ -228,7 +228,7 @@ function recordSuccess(p, key) {
 }
 
 function classifyRetryableFailure(status, errCode) {
-  const retryableStatus = new Set([408, 425, 429, 500, 502, 503, 504, 529, 402]);
+  const retryableStatus = new Set([402, 408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524, 529]);
   const retryableErrorCodes = new Set([
     'ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ENOTFOUND',
     'ECONNREFUSED', 'EPIPE',
@@ -364,9 +364,11 @@ function handleStatus(p, key, status) {
 function handleTransportError(p, key, err) {
   if (!p || !key) return;
   const code = err?.code ? String(err.code).toUpperCase() : '';
-  if (classifyRetryableFailure(undefined, code)) {
+  const name = String(err?.name || '');
+  const retryable = classifyRetryableFailure(undefined, code) || name === 'AbortError';
+  if (retryable) {
     recordFailure(p, key);
-    warn(`[key-rotator] ${p.name}: retryable network code=${code} on ...${key.slice(-6)}`);
+    warn(`[key-rotator] ${p.name}: retryable network ${name || 'Error'}${code ? ` code=${code}` : ''} on ...${key.slice(-6)}`);
   }
 }
 
@@ -488,10 +490,11 @@ function patchFetch() {
           try { handleTransportError(provider, usedKey, err); } catch (_) {}
           try { endInFlight(provider, usedKey); } catch (_) {}
           const code = err?.code ? String(err.code).toUpperCase() : '';
-          const shouldRetry = attempt < maxAttempts && classifyRetryableFailure(undefined, code);
+          const isAbort = String(err?.name || '') === 'AbortError';
+          const shouldRetry = attempt < maxAttempts && (classifyRetryableFailure(undefined, code) || isAbort);
           if (shouldRetry) {
             const backoffMs = Math.min(10_000, FETCH_RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1));
-            warn(`[key-rotator] ${provider.name}: fetch retry ${attempt}/${maxAttempts - 1} after network code=${code || 'unknown'}`);
+            warn(`[key-rotator] ${provider.name}: fetch retry ${attempt}/${maxAttempts - 1} after network ${isAbort ? 'AbortError' : `code=${code || 'unknown'}`}`);
             await sleep(backoffMs);
             continue;
           }
