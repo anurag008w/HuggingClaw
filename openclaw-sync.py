@@ -140,7 +140,8 @@ def copy_state_entry_with_retry(source_path: Path, backup_path: Path, attempts: 
                 continue
             raise last_exc
 
-def snapshot_state_into_workspace() -> None:
+def snapshot_state_into_workspace() -> bool:
+    had_copy_failures = False
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         # Atomic snapshot: copy to a staging dir first, then rename.
@@ -185,6 +186,7 @@ def snapshot_state_into_workspace() -> None:
         # known-good version for only those entries (staging was seeded from
         # previous backup). This preserves forward progress for the rest.
         if skipped_entries:
+            had_copy_failures = True
             for name, entry_exc in skipped_entries:
                 print(f"Warning: keeping previous state entry {name}: {entry_exc}")
             print(
@@ -200,10 +202,11 @@ def snapshot_state_into_workspace() -> None:
         if staging_dir.exists():
             shutil.rmtree(staging_dir, ignore_errors=True)
         print(f"Warning: could not snapshot OpenClaw state: {exc}")
+        had_copy_failures = True
 
     try:
         if not WHATSAPP_ENABLED:
-            return
+            return had_copy_failures
 
         STATE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -212,16 +215,16 @@ def snapshot_state_into_workspace() -> None:
                 shutil.rmtree(WHATSAPP_BACKUP_DIR, ignore_errors=True)
                 print("Removed backed-up WhatsApp credentials after reset request.")
             RESET_MARKER.unlink(missing_ok=True)
-            return
+            return had_copy_failures
 
         if not WHATSAPP_CREDS_DIR.exists():
-            return
+            return had_copy_failures
 
         file_count = count_files(WHATSAPP_CREDS_DIR)
         if file_count < 2:
             if file_count > 0:
                 print(f"WhatsApp backup skipped: credentials incomplete ({file_count} files).")
-            return
+            return had_copy_failures
 
         WHATSAPP_BACKUP_DIR.parent.mkdir(parents=True, exist_ok=True)
         if WHATSAPP_BACKUP_DIR.exists():
@@ -229,6 +232,8 @@ def snapshot_state_into_workspace() -> None:
         shutil.copytree(WHATSAPP_CREDS_DIR, WHATSAPP_BACKUP_DIR)
     except Exception as exc:
         print(f"Warning: could not snapshot WhatsApp state: {exc}")
+        had_copy_failures = True
+    return had_copy_failures
 
 
 def restore_embedded_state() -> None:
@@ -515,7 +520,7 @@ def _sync_once_unlocked(
         write_status("disabled", "HF_TOKEN is not configured.")
         return (last_fingerprint or "", last_marker or (0, 0, 0, ""))
 
-    snapshot_state_into_workspace()
+    had_snapshot_copy_failures = snapshot_state_into_workspace()
     repo_id = ensure_repo_exists()
     current_marker = metadata_marker(WORKSPACE)
     if last_marker is not None and current_marker == last_marker:
@@ -547,10 +552,13 @@ def _sync_once_unlocked(
                 commit_message=f"HuggingClaw sync {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
                 ignore_patterns=[".git/*", ".git"],
             )
-        try:
-            prune_remote_deleted_files(repo_id, snapshot_dir)
-        except Exception as prune_exc:
-            print(f"Warning: could not prune stale remote files: {prune_exc}")
+        if had_snapshot_copy_failures:
+            print("Warning: skipping remote prune this pass because local state snapshot had copy failures.")
+        else:
+            try:
+                prune_remote_deleted_files(repo_id, snapshot_dir)
+            except Exception as prune_exc:
+                print(f"Warning: could not prune stale remote files: {prune_exc}")
     finally:
         shutil.rmtree(snapshot_dir, ignore_errors=True)
 
