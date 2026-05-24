@@ -13,6 +13,8 @@
  *   KEY_BLACKLIST_COOLDOWN_MS   base backoff ms        (default 60 000)
  *   KEY_MAX_STRIKES             failures before perm   (default 3)
  *   LLM_API_KEY_FALLBACK_ENABLED true/false            (default true)
+ *   KEY_ROTATOR_LOG_LEVEL      info/debug/silent       (default info)
+ *   KEY_ROTATOR_VERBOSE_PICKS  true/false              (default false)
  */
 
 const http  = require('node:http');
@@ -219,9 +221,9 @@ function recordFailure(p, key) {
 }
 
 /**
- * Called on any 2xx/3xx response — resets the key's strike counter.
+ * Called on transient retryable failures (non-quota/rate):
+ * applies short cooldown without incrementing strikes.
  */
-
 function recordTransientFailure(p, key) {
   let ks = p.keyState.get(key);
   if (!ks) { ks = makeKeyState(); p.keyState.set(key, ks); }
@@ -233,6 +235,9 @@ function recordTransientFailure(p, key) {
   debug(`[key-rotator] ${p.name}: ...${key.slice(-6)} transient backoff ${secs}s (strikes unchanged)`);
 }
 
+/**
+ * Called on any 2xx/3xx response — resets the key's strike counter.
+ */
 function recordSuccess(p, key) {
   const ks = p.keyState.get(key);
   if (ks && ks.strikes > 0) {
