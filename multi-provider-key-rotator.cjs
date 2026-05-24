@@ -18,8 +18,11 @@
 const http  = require('node:http');
 const https = require('node:https');
 
-const log  = (...a) => console.error(...a);
-const warn = (...a) => console.warn(...a);
+const LOG_LEVEL = String(process.env.KEY_ROTATOR_LOG_LEVEL || 'info').trim().toLowerCase();
+const VERBOSE_PICKS = /^(1|true|yes|on)$/i.test(String(process.env.KEY_ROTATOR_VERBOSE_PICKS || '').trim());
+const log  = (...a) => { if (LOG_LEVEL !== 'silent') console.error(...a); };
+const warn = (...a) => { if (LOG_LEVEL !== 'silent') console.warn(...a); };
+const debug = (...a) => { if (LOG_LEVEL === 'debug') console.error(...a); };
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -175,7 +178,7 @@ function isActive(p, key) {
   if (ks.blacklistedUntil === 0) return true;    // not blacklisted
   if (Date.now() >= ks.blacklistedUntil) {
     ks.blacklistedUntil = 0;                     // expired → back in pool
-    log(`[key-rotator] ${p.name}: ...${key.slice(-6)} back in pool`);
+    debug(`[key-rotator] ${p.name}: ...${key.slice(-6)} back in pool`);
     return true;
   }
   return false;
@@ -209,7 +212,7 @@ function recordFailure(p, key) {
     const jitter = 1 + ((Math.random() * 2 - 1) * (COOLDOWN_JITTER_PCT / 100));
     cooldown = Math.max(1000, Math.round(cooldown * jitter));
     const secs = Math.round(cooldown / 1000);
-    log(`[key-rotator] ${p.name}: ...${key.slice(-6)} strike ${ks.strikes}/${MAX_STRIKES} — backoff ${secs}s`);
+    debug(`[key-rotator] ${p.name}: ...${key.slice(-6)} strike ${ks.strikes}/${MAX_STRIKES} — backoff ${secs}s`);
   }
 
   ks.blacklistedUntil = Date.now() + cooldown;
@@ -227,7 +230,7 @@ function recordTransientFailure(p, key) {
   const cooldown = Math.max(1000, Math.round(BASE_COOLDOWN_MS * jitter));
   ks.blacklistedUntil = Math.max(ks.blacklistedUntil || 0, Date.now() + cooldown);
   const secs = Math.round(cooldown / 1000);
-  log(`[key-rotator] ${p.name}: ...${key.slice(-6)} transient backoff ${secs}s (strikes unchanged)`);
+  debug(`[key-rotator] ${p.name}: ...${key.slice(-6)} transient backoff ${secs}s (strikes unchanged)`);
 }
 
 function recordSuccess(p, key) {
@@ -235,7 +238,7 @@ function recordSuccess(p, key) {
   if (ks && ks.strikes > 0) {
     ks.strikes = 0;
     ks.lastFailureAt = 0;
-    log(`[key-rotator] ${p.name}: ...${key.slice(-6)} recovered — strikes reset`);
+    debug(`[key-rotator] ${p.name}: ...${key.slice(-6)} recovered — strikes reset`);
   }
 }
 
@@ -292,7 +295,7 @@ function nextKey(p) {
       const inflight = p.inFlight.get(key) || 0;
       if (inflight < MAX_INFLIGHT_PER_KEY) {
         p.idx = (i + 1) % total;   // next call starts AFTER the key we just picked
-        log(`[key-rotator] ${p.name}: picked ...${key.slice(-6)} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
+        if (VERBOSE_PICKS) debug(`[key-rotator] ${p.name}: picked ...${key.slice(-6)} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
         return key;
       }
       if (!bestPick) bestPick = { i, key, inflight, score: Number.POSITIVE_INFINITY };
@@ -604,4 +607,4 @@ patchHttpModule(http);
 patchHttpModule(https);
 startDiagnostics();
 
-log(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:${formatHours(PERM_SUSPEND_MS)}h (cap 16h) max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'}`);
+log(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:${formatHours(PERM_SUSPEND_MS)}h (cap 16h) max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'} log-level:${LOG_LEVEL} verbose-picks:${VERBOSE_PICKS ? 'on' : 'off'}`);
