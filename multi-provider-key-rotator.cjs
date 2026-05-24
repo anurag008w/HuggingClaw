@@ -425,23 +425,18 @@ function patchFetch() {
           }
 
           const req = new Request(baseRequest);
+          let attemptRequest = req;
           if (usedKey) {
             if (provider.queryParam) {
               const url = new URL(req.url);
               url.searchParams.set('key', usedKey);
-              input = url.toString();
-              init = req;
+              attemptRequest = new Request(url.toString(), req);
             } else {
               req.headers.set('authorization', `Bearer ${usedKey}`);
-              input = req;
-              init = undefined;
             }
-          } else {
-            input = req;
-            init = undefined;
           }
 
-          const response = await orig(input, init);
+          const response = await orig(attemptRequest);
           lastResponse = response;
           try { handleStatus(provider, usedKey, response.status); } catch (_) {}
           try { endInFlight(provider, usedKey); } catch (_) {}
@@ -468,7 +463,7 @@ function patchFetch() {
 
       if (lastResponse) return lastResponse;
       if (lastErr) throw lastErr;
-      return await orig(input, init);
+      return await orig(baseRequest);
     } catch (err) {
       warn('[key-rotator] fetch patch error:', err?.message || err);
       throw err;
