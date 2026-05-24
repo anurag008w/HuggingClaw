@@ -783,6 +783,27 @@ if [ "$WHATSAPP_ENABLED_NORMALIZED" = "true" ]; then
   CONFIG_JSON=$(echo "$CONFIG_JSON" | jq '.channels.whatsapp = {"dmPolicy": "pairing"}')
 fi
 
+
+validate_json_file() {
+  local file="$1"
+  [ -f "$file" ] || return 1
+  jq -e . "$file" >/dev/null 2>&1
+}
+
+write_json_atomic() {
+  local dest="$1"
+  local payload="$2"
+  local tmp
+  tmp="${dest}.tmp.$$"
+  printf '%s\n' "$payload" > "$tmp" || return 1
+  if ! jq -e . "$tmp" >/dev/null 2>&1; then
+    echo "ERROR: refusing to write invalid JSON to $dest" >&2
+    rm -f "$tmp"
+    return 1
+  fi
+  mv "$tmp" "$dest"
+}
+
 # Write config
 EXISTING_CONFIG="/home/node/.openclaw/openclaw.json"
 WHATSAPP_CONFIG_ENABLED=false
@@ -794,8 +815,18 @@ if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
   TELEGRAM_CONFIG_ENABLED=true
 fi
 if [ -f "$EXISTING_CONFIG" ]; then
-  echo "Restored config found — patching required fields and runtime channel/plugin toggles..."
-  PATCHED=$(jq \
+  if ! validate_json_file "$EXISTING_CONFIG"; then
+    echo "Restored config is invalid JSON — backing up and regenerating from runtime config."
+    cp "$EXISTING_CONFIG" "${EXISTING_CONFIG}.invalid.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+    if write_json_atomic "$EXISTING_CONFIG" "$CONFIG_JSON"; then
+      echo "Fresh valid config written."
+    else
+      echo "ERROR: failed to recover config JSON; aborting startup." >&2
+      exit 1
+    fi
+  else
+    echo "Restored config found — patching required fields and runtime channel/plugin toggles..."
+    PATCHED=$(jq \
     --arg token "$GATEWAY_TOKEN" \
     --arg model "$LLM_MODEL" \
     --arg fileLevel "$OPENCLAW_FILE_LOG_LEVEL" \
@@ -851,17 +882,21 @@ if [ -f "$EXISTING_CONFIG" ]; then
        end' \
     "$EXISTING_CONFIG" 2>/dev/null)
 
-  if [ -n "$PATCHED" ]; then
-    echo "$PATCHED" > "$EXISTING_CONFIG.tmp" \
-      && mv "$EXISTING_CONFIG.tmp" "$EXISTING_CONFIG"
-    echo "Config patched successfully."
-  else
-    echo "Patch failed — writing fresh config."
-    echo "$CONFIG_JSON" > "$EXISTING_CONFIG"
+    if [ -n "$PATCHED" ]; then
+      if write_json_atomic "$EXISTING_CONFIG" "$PATCHED"; then
+        echo "Config patched successfully."
+      else
+        echo "Patch produced invalid JSON — writing fresh config."
+        write_json_atomic "$EXISTING_CONFIG" "$CONFIG_JSON" || { echo "ERROR: could not write valid fallback config" >&2; exit 1; }
+      fi
+    else
+      echo "Patch failed — writing fresh config."
+      write_json_atomic "$EXISTING_CONFIG" "$CONFIG_JSON" || { echo "ERROR: could not write valid fallback config" >&2; exit 1; }
+    fi
   fi
 else
   echo "No restored config — writing fresh config..."
-  echo "$CONFIG_JSON" > "$EXISTING_CONFIG"
+  write_json_atomic "$EXISTING_CONFIG" "$CONFIG_JSON" || { echo "ERROR: could not write valid config" >&2; exit 1; }
 fi
 chmod 600 "$EXISTING_CONFIG"
 
