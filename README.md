@@ -280,6 +280,7 @@ Optional tuning:
 - `KEY_PERM_SUSPEND_MS` (default `57600000`) — long suspend duration for exhausted/auth-invalid keys (**capped at 16h max**).
 - `KEY_FAILURE_DECAY_MS` (default `900000`) — recent-failure decay window used to deprioritize keys.
 - `KEY_MAX_INFLIGHT_PER_KEY` (default `3`) — soft concurrent request cap per key.
+- `KEY_FETCH_MAX_RETRIES` (default `2`) — auto-retry count for retryable failures on **GET/HEAD/OPTIONS** with a different key.
 - `KEY_ROTATOR_DIAGNOSTICS=true` — emit periodic provider/key health snapshots.
 - `KEY_ROTATOR_DIAGNOSTICS_INTERVAL_MS` (default `60000`) — diagnostics interval.
 

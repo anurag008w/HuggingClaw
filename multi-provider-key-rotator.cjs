@@ -48,6 +48,10 @@ const PERM_SUSPEND_MS = Math.min(
   MAX_PERM_SUSPEND_MS,
   Math.max(60_000, parseInt(process.env.KEY_PERM_SUSPEND_MS || '', 10) || MAX_PERM_SUSPEND_MS),
 );
+const FETCH_MAX_RETRIES = Math.max(
+  0,
+  Math.min(2, parseInt(process.env.KEY_FETCH_MAX_RETRIES || '', 10) || 2),
+);
 const DIAGNOSTICS_ENABLED = /^(1|true|yes|on)$/i.test(
   String(process.env.KEY_ROTATOR_DIAGNOSTICS || '').trim(),
 );
@@ -394,49 +398,81 @@ function patchFetch() {
   const orig = globalThis.fetch.bind(globalThis);
 
   globalThis.fetch = async function patchedFetch(input, init = {}) {
-    let usedKey = null, usedProvider = null;
-
     try {
       const urlLike = typeof input === 'string' || input instanceof URL
         ? input
         : (input && typeof input.url === 'string' ? input.url : null);
       const provider = matchProvider(resolveHostname(urlLike));
+      if (!provider) return await orig(input, init);
 
-      if (provider) {
-        const key = nextKey(provider);
-        if (key) {
-          usedKey = key; usedProvider = provider;
-          beginInFlight(usedProvider, usedKey);
-          if (provider.queryParam) {
-            const url = new URL(typeof input === 'string' ? input : input.url);
-            url.searchParams.set('key', key);
-            if (typeof input === 'string') {
+      const baseRequest = new Request(input, init);
+      const method = String(baseRequest.method || 'GET').toUpperCase();
+      const replaySafe = method === 'GET' || method === 'HEAD' || method === 'OPTIONS';
+      const maxAttempts = replaySafe ? 1 + FETCH_MAX_RETRIES : 1;
+      const triedKeys = new Set();
+      let lastErr = null;
+      let lastResponse = null;
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        let usedKey = null;
+        try {
+          const key = nextKey(provider);
+          if (key) {
+            if (triedKeys.has(key) && triedKeys.size < provider.keys.length) continue;
+            triedKeys.add(key);
+            usedKey = key;
+            beginInFlight(provider, key);
+          }
+
+          const req = new Request(baseRequest);
+          if (usedKey) {
+            if (provider.queryParam) {
+              const url = new URL(req.url);
+              url.searchParams.set('key', usedKey);
               input = url.toString();
+              init = req;
             } else {
-              init = { method:input.method, headers:input.headers, body:input.body,
-                       mode:input.mode, credentials:input.credentials, cache:input.cache,
-                       redirect:input.redirect, referrer:input.referrer,
-                       integrity:input.integrity, ...init };
-              input = url.toString();
+              req.headers.set('authorization', `Bearer ${usedKey}`);
+              input = req;
+              init = undefined;
             }
           } else {
-            init = { ...init, headers: setAuthHeader(init.headers || (input && input.headers) || undefined, key) };
+            input = req;
+            init = undefined;
           }
+
+          const response = await orig(input, init);
+          lastResponse = response;
+          try { handleStatus(provider, usedKey, response.status); } catch (_) {}
+          try { endInFlight(provider, usedKey); } catch (_) {}
+
+          const shouldRetry = attempt < maxAttempts && classifyRetryableFailure(response.status);
+          if (shouldRetry) {
+            warn(`[key-rotator] ${provider.name}: fetch retry ${attempt}/${maxAttempts - 1} after status=${response.status}`);
+            continue;
+          }
+          return response;
+        } catch (err) {
+          lastErr = err;
+          try { handleTransportError(provider, usedKey, err); } catch (_) {}
+          try { endInFlight(provider, usedKey); } catch (_) {}
+          const code = err?.code ? String(err.code).toUpperCase() : '';
+          const shouldRetry = attempt < maxAttempts && classifyRetryableFailure(undefined, code);
+          if (shouldRetry) {
+            warn(`[key-rotator] ${provider.name}: fetch retry ${attempt}/${maxAttempts - 1} after network code=${code || 'unknown'}`);
+            continue;
+          }
+          throw err;
         }
       }
-    } catch (err) { warn('[key-rotator] fetch patch error:', err?.message || err); }
 
-    let response;
-    try { response = await orig(input, init); }
-    catch (err) {
-      try { handleTransportError(usedProvider, usedKey, err); } catch (_) {}
-      try { endInFlight(usedProvider, usedKey); } catch (_) {}
+      if (lastResponse) return lastResponse;
+      if (lastErr) throw lastErr;
+      return await orig(input, init);
+    } catch (err) {
+      warn('[key-rotator] fetch patch error:', err?.message || err);
       throw err;
     }
-
-    try { handleStatus(usedProvider, usedKey, response.status); } catch (_) {}
-    try { endInFlight(usedProvider, usedKey); } catch (_) {}
-    return response;
   };
 }
 

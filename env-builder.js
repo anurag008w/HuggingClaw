@@ -527,6 +527,15 @@ const FIELDS = [
   },
 {
     "g": "Plugins",
+    "icon": "🔄",
+    "k": "KEY_FETCH_MAX_RETRIES",
+    "lbl": "Auto-retries for retryable failures (GET/HEAD/OPTIONS only)",
+    "type": "text",
+    "ph": "2",
+    "tag": "advanced"
+  },
+{
+    "g": "Plugins",
     "icon": "📊",
     "k": "KEY_ROTATOR_DIAGNOSTICS",
     "lbl": "Enable key-rotator diagnostics logs",
