@@ -529,7 +529,7 @@ const FIELDS = [
     "g": "Plugins",
     "icon": "🔄",
     "k": "KEY_FETCH_MAX_RETRIES",
-    "lbl": "Auto-retries for retryable failures (GET/HEAD/OPTIONS only)",
+    "lbl": "Auto-retries for retryable failures (GET/HEAD/OPTIONS/POST)",
     "type": "text",
     "ph": "2",
     "tag": "advanced"
@@ -541,6 +541,25 @@ const FIELDS = [
     "lbl": "Base delay between auto-retries (ms, capped to 10s)",
     "type": "text",
     "ph": "250",
+    "tag": "advanced"
+  },
+
+{
+    "g": "Plugins",
+    "icon": "🧾",
+    "k": "KEY_ROTATOR_LOG_LEVEL",
+    "lbl": "Key-rotator log level (info/debug/silent)",
+    "type": "text",
+    "ph": "info",
+    "tag": "advanced"
+  },
+{
+    "g": "Plugins",
+    "icon": "🧾",
+    "k": "KEY_ROTATOR_VERBOSE_PICKS",
+    "lbl": "Verbose per-request key pick logs (use with debug)",
+    "type": "toggle",
+    "ph": "false",
     "tag": "advanced"
   },
 {
