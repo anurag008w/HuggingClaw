@@ -218,6 +218,18 @@ function recordFailure(p, key) {
 /**
  * Called on any 2xx/3xx response — resets the key's strike counter.
  */
+
+function recordTransientFailure(p, key) {
+  let ks = p.keyState.get(key);
+  if (!ks) { ks = makeKeyState(); p.keyState.set(key, ks); }
+  ks.lastFailureAt = Date.now();
+  const jitter = 1 + ((Math.random() * 2 - 1) * (COOLDOWN_JITTER_PCT / 100));
+  const cooldown = Math.max(1000, Math.round(BASE_COOLDOWN_MS * jitter));
+  ks.blacklistedUntil = Math.max(ks.blacklistedUntil || 0, Date.now() + cooldown);
+  const secs = Math.round(cooldown / 1000);
+  log(`[key-rotator] ${p.name}: ...${key.slice(-6)} transient backoff ${secs}s (strikes unchanged)`);
+}
+
 function recordSuccess(p, key) {
   const ks = p.keyState.get(key);
   if (ks && ks.strikes > 0) {
@@ -353,10 +365,20 @@ function handleStatus(p, key, status) {
     warn(`[key-rotator] ${p.name}: ...${key.slice(-6)} auth-failed (${status}) — suspended for ${formatHours(PERM_SUSPEND_MS)} h`);
     return;
   }
-  if (classifyRetryableFailure(status)) {
+
+  if (status === 429 || status === 402) {
     recordFailure(p, key);
-    warn(`[key-rotator] ${p.name}: retryable status=${status} on ...${key.slice(-6)}`);
-  } else if (status >= 200 && status < 400) {
+    warn(`[key-rotator] ${p.name}: quota/rate status=${status} on ...${key.slice(-6)}`);
+    return;
+  }
+
+  if (classifyRetryableFailure(status)) {
+    recordTransientFailure(p, key);
+    warn(`[key-rotator] ${p.name}: transient status=${status} on ...${key.slice(-6)}`);
+    return;
+  }
+
+  if (status >= 200 && status < 400) {
     recordSuccess(p, key);
   }
 }
@@ -430,7 +452,8 @@ function patchFetch() {
       const baseRequest = new Request(input, init);
       const method = String(baseRequest.method || 'GET').toUpperCase();
       const replaySafe = method === 'GET' || method === 'HEAD' || method === 'OPTIONS';
-      const maxAttempts = replaySafe ? 1 + FETCH_MAX_RETRIES : 1;
+      const retryEligible = replaySafe || method === 'POST';
+      const maxAttempts = retryEligible ? 1 + FETCH_MAX_RETRIES : 1;
       const triedKeys = new Set();
       let lastErr = null;
       let lastResponse = null;
@@ -480,7 +503,7 @@ function patchFetch() {
               10_000,
               Math.max(retryAfterMs, FETCH_RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1)),
             );
-            warn(`[key-rotator] ${provider.name}: fetch retry ${attempt}/${maxAttempts - 1} after status=${response.status}`);
+            warn(`[key-rotator] ${provider.name}: fetch retry ${attempt}/${maxAttempts - 1} after status=${response.status} method=${method}`);
             await sleep(backoffMs);
             continue;
           }
@@ -494,7 +517,7 @@ function patchFetch() {
           const shouldRetry = attempt < maxAttempts && (classifyRetryableFailure(undefined, code) || isAbort);
           if (shouldRetry) {
             const backoffMs = Math.min(10_000, FETCH_RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1));
-            warn(`[key-rotator] ${provider.name}: fetch retry ${attempt}/${maxAttempts - 1} after network ${isAbort ? 'AbortError' : `code=${code || 'unknown'}`}`);
+            warn(`[key-rotator] ${provider.name}: fetch retry ${attempt}/${maxAttempts - 1} after network ${isAbort ? 'AbortError' : `code=${code || 'unknown'}`} method=${method}`);
             await sleep(backoffMs);
             continue;
           }
