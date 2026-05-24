@@ -258,6 +258,14 @@ function classifyRetryableFailure(status, errCode) {
   return false;
 }
 
+
+function shouldRetryMethod(method, hasReplayableBody) {
+  const m = String(method || 'GET').toUpperCase();
+  if (m === 'GET' || m === 'HEAD' || m === 'OPTIONS') return true;
+  if (m !== 'POST') return false;
+  return hasReplayableBody;
+}
+
 function beginInFlight(p, key) {
   if (!p || !key) return;
   p.inFlight.set(key, (p.inFlight.get(key) || 0) + 1);
@@ -375,7 +383,7 @@ function handleStatus(p, key, status) {
   }
 
   if (status === 429 || status === 402) {
-    recordFailure(p, key);
+    recordTransientFailure(p, key);
     warn(`[key-rotator] ${p.name}: quota/rate status=${status} on ...${key.slice(-6)}`);
     return;
   }
@@ -397,7 +405,7 @@ function handleTransportError(p, key, err) {
   const name = String(err?.name || '');
   const retryable = classifyRetryableFailure(undefined, code) || name === 'AbortError';
   if (retryable) {
-    recordFailure(p, key);
+    recordTransientFailure(p, key);
     warn(`[key-rotator] ${p.name}: retryable network ${name || 'Error'}${code ? ` code=${code}` : ''} on ...${key.slice(-6)}`);
   }
 }
@@ -509,8 +517,11 @@ function patchFetch() {
     try {
 
       const method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase();
-      const replaySafe = method === 'GET' || method === 'HEAD' || method === 'OPTIONS';
-      const retryEligible = replaySafe || method === 'POST';
+      const hasBodyFromInput = !!(input && typeof input === 'object' && 'body' in input && input.body != null);
+      const hasBodyFromInit = !!(init && typeof init === 'object' && init.body != null);
+      const hasBody = hasBodyFromInput || hasBodyFromInit;
+      const hasReplayableBody = !hasBody || (typeof input === 'string' || input instanceof URL);
+      const retryEligible = shouldRetryMethod(method, hasReplayableBody);
       const maxAttempts = retryEligible ? 1 + FETCH_MAX_RETRIES : 1;
       const triedKeys = new Set();
       let lastErr = null;
