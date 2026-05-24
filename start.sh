@@ -820,8 +820,8 @@ if [ -f "$EXISTING_CONFIG" ]; then
      | if (($injectedModelsProviders | length) > 0) then
          ($injectedModelsProviders | to_entries) as $entries
          | reduce $entries[] as $e (.;
-             .models.providers[$e.key] = ((.models.providers[$e.key] // {})
-               + {models: (($e.value.models // []) | unique_by(.id))})
+             (($desired.models.providers[$e.key] // {}) * {models: (($e.value.models // []) | unique_by(.id))}) as $desiredProvider
+             | .models.providers[$e.key] = ((.models.providers[$e.key] // {}) * $desiredProvider)
            )
        else
          .
