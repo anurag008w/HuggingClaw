@@ -443,6 +443,56 @@ function parseRetryAfterMs(value) {
   return 0;
 }
 
+function buildAttemptFetchArgs(input, init, provider, usedKey) {
+  const initObj = init && typeof init === 'object' ? { ...init } : {};
+  const inputIsRequest = typeof Request !== 'undefined' && input instanceof Request;
+
+  // Merge input headers (Request input) with init headers so key injection never drops caller headers.
+  const baseHeaders = inputIsRequest
+    ? new Headers(input.headers || undefined)
+    : new Headers();
+  if (initObj.headers) {
+    const override = new Headers(initObj.headers);
+    override.forEach((v, k) => baseHeaders.set(k, v));
+  }
+
+  // Preserve caller-provided duplex/body semantics (important for Node stream bodies).
+  if (provider?.queryParam && usedKey) {
+    const rawUrl = typeof input === 'string' || input instanceof URL
+      ? String(input)
+      : (input && typeof input.url === 'string' ? input.url : null);
+    if (rawUrl) {
+      const url = new URL(rawUrl);
+      url.searchParams.set('key', usedKey);
+
+      // With Request input and no explicit init overrides, keep request semantics by cloning shape.
+      if (inputIsRequest && (!init || Object.keys(initObj).length === 0)) {
+        const reqInit = {
+          method: input.method,
+          headers: baseHeaders,
+        };
+        if (input.signal) reqInit.signal = input.signal;
+        if (!/^(GET|HEAD)$/i.test(String(input.method || 'GET')) && input.body != null) {
+          reqInit.body = input.body;
+          if (input.duplex) reqInit.duplex = input.duplex;
+        }
+        return [url.toString(), reqInit];
+      }
+
+      return [url.toString(), { ...initObj, headers: baseHeaders }];
+    }
+
+    // If URL cannot be safely rewritten, fall back to auth header injection.
+    return [input, { ...initObj, headers: setAuthHeader(baseHeaders, usedKey) }];
+  }
+
+  if (usedKey) {
+    return [input, { ...initObj, headers: setAuthHeader(baseHeaders, usedKey) }];
+  }
+
+  return [input, initObj];
+}
+
 // ─── Patch globalThis.fetch ───────────────────────────────────────────────────
 
 function patchFetch() {
@@ -458,8 +508,7 @@ function patchFetch() {
 
     try {
 
-      const baseRequest = new Request(input, init);
-      const method = String(baseRequest.method || 'GET').toUpperCase();
+      const method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase();
       const replaySafe = method === 'GET' || method === 'HEAD' || method === 'OPTIONS';
       const retryEligible = replaySafe || method === 'POST';
       const maxAttempts = retryEligible ? 1 + FETCH_MAX_RETRIES : 1;
@@ -488,19 +537,8 @@ function patchFetch() {
             beginInFlight(provider, key);
           }
 
-          const req = new Request(baseRequest);
-          let attemptRequest = req;
-          if (usedKey) {
-            if (provider.queryParam) {
-              const url = new URL(req.url);
-              url.searchParams.set('key', usedKey);
-              attemptRequest = new Request(url.toString(), req);
-            } else {
-              req.headers.set('authorization', `Bearer ${usedKey}`);
-            }
-          }
-
-          const response = await orig(attemptRequest);
+          const attemptArgs = buildAttemptFetchArgs(input, init, provider, usedKey);
+          const response = await orig(...attemptArgs);
           lastResponse = response;
           try { handleStatus(provider, usedKey, response.status); } catch (_) {}
           try { endInFlight(provider, usedKey); } catch (_) {}
@@ -536,7 +574,7 @@ function patchFetch() {
 
       if (lastResponse) return lastResponse;
       if (lastErr) throw lastErr;
-      return await orig(baseRequest);
+      return await orig(input, init);
     } catch (err) {
       warn(`[key-rotator] ${provider.name}: fetch patch error:`, err?.message || err);
       throw err;
