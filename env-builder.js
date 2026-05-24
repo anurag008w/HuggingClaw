@@ -483,10 +483,28 @@ const FIELDS = [
 {
     "g": "Plugins",
     "icon": "🔄",
+    "k": "KEY_BLACKLIST_JITTER_PCT",
+    "lbl": "Key rotation cooldown jitter (%)",
+    "type": "text",
+    "ph": "15",
+    "tag": "advanced"
+  },
+{
+    "g": "Plugins",
+    "icon": "🔄",
     "k": "KEY_MAX_STRIKES",
     "lbl": "Key rotation max strikes — consecutive 429/quota errors before a key is suspended for 24h",
     "type": "text",
     "ph": "3",
+    "tag": "advanced"
+  },
+{
+    "g": "Plugins",
+    "icon": "🔄",
+    "k": "KEY_FAILURE_DECAY_MS",
+    "lbl": "Recent-failure decay window (ms) for key deprioritization",
+    "type": "text",
+    "ph": "900000",
     "tag": "advanced"
   },
 {

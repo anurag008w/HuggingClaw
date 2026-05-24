@@ -274,6 +274,10 @@ Failure handling behavior:
 - The rotator **does not auto-replay the same failed request**; retries for the same request should be handled by caller/application logic.
 
 Optional tuning:
+- `KEY_BLACKLIST_COOLDOWN_MS` (default `60000`) — base cooldown after a retryable failure.
+- `KEY_BLACKLIST_JITTER_PCT` (default `15`) — adds ±jitter to cooldown to prevent herd re-entry.
+- `KEY_MAX_STRIKES` (default `3`) — after this many consecutive failures, key is suspended for 24h.
+- `KEY_FAILURE_DECAY_MS` (default `900000`) — recent-failure decay window used to deprioritize keys.
 - `KEY_MAX_INFLIGHT_PER_KEY` (default `3`) — soft concurrent request cap per key.
 - `KEY_ROTATOR_DIAGNOSTICS=true` — emit periodic provider/key health snapshots.
 - `KEY_ROTATOR_DIAGNOSTICS_INTERVAL_MS` (default `60000`) — diagnostics interval.
