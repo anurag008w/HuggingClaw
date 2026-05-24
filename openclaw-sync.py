@@ -66,7 +66,6 @@ EXCLUDED_SYNC_DIRS = {
     ".turbo", ".parcel-cache", "target", ".gradle", ".mvn",
 }
 MAX_FILE_SIZE_BYTES = int(os.environ.get("SYNC_MAX_FILE_BYTES", str(50 * 1024 * 1024)))
-SESSION_SIZE_LIMIT_BYPASS = is_true(os.environ.get("SESSIONS_BYPASS_SIZE_LIMIT", "true"))
 
 STATE_DIR = WORKSPACE / "huggingclaw-state"
 OPENCLAW_STATE_BACKUP_DIR = STATE_DIR / "openclaw"
@@ -334,15 +333,6 @@ def _should_exclude(rel_posix: str, path: Path) -> bool:
         return True
     if path.is_file():
         try:
-            # Session state can legitimately grow beyond generic file-size caps.
-            # Do not exclude agent sessions by size unless explicitly disabled.
-            if (
-                SESSION_SIZE_LIMIT_BYPASS
-                and len(parts) >= 3
-                and parts[0] == "agents"
-                and parts[2] == "sessions"
-            ):
-                return False
             if path.stat().st_size > MAX_FILE_SIZE_BYTES:
                 return True
         except OSError:
