@@ -416,9 +416,19 @@ function patchFetch() {
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         let usedKey = null;
         try {
-          const key = nextKey(provider);
+          let key = nextKey(provider);
+          // Prefer a fresh key for each retry when possible, but never spin forever.
+          if (key && triedKeys.has(key) && triedKeys.size < provider.keys.length) {
+            const maxProbe = Math.min(provider.keys.length, 8);
+            for (let probe = 0; probe < maxProbe; probe++) {
+              const alt = nextKey(provider);
+              if (!alt || !triedKeys.has(alt)) {
+                key = alt;
+                break;
+              }
+            }
+          }
           if (key) {
-            if (triedKeys.has(key) && triedKeys.size < provider.keys.length) continue;
             triedKeys.add(key);
             usedKey = key;
             beginInFlight(provider, key);
