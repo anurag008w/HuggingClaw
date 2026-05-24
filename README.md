@@ -280,10 +280,12 @@ Optional tuning:
 - `KEY_PERM_SUSPEND_MS` (default `57600000`) — long suspend duration for exhausted/auth-invalid keys (**capped at 16h max**).
 - `KEY_FAILURE_DECAY_MS` (default `900000`) — recent-failure decay window used to deprioritize keys.
 - `KEY_MAX_INFLIGHT_PER_KEY` (default `3`) — soft concurrent request cap per key.
-- `KEY_FETCH_MAX_RETRIES` (default `2`) — auto-retry count for retryable failures on **GET/HEAD/OPTIONS** with a different key.
+- `KEY_FETCH_MAX_RETRIES` (default `2`) — auto-retry count for retryable failures on **GET/HEAD/OPTIONS/POST** with a different key.
 - `KEY_FETCH_RETRY_BASE_DELAY_MS` (default `250`) — base delay for retry backoff (respects `Retry-After`, capped to 10s).
 - `KEY_ROTATOR_DIAGNOSTICS=true` — emit periodic provider/key health snapshots.
 - `KEY_ROTATOR_DIAGNOSTICS_INTERVAL_MS` (default `60000`) — diagnostics interval.
+- `KEY_ROTATOR_LOG_LEVEL` (`info`/`debug`/`silent`, default `info`) — controls rotator log verbosity.
+- `KEY_ROTATOR_VERBOSE_PICKS` (`true`/`false`, default `false`) — enable per-request key-pick logs (best with `KEY_ROTATOR_LOG_LEVEL=debug`).
 
 Supported per-provider variables: `ANTHROPIC_API_KEYS`, `OPENAI_API_KEYS`, `GEMINI_API_KEYS`, `DEEPSEEK_API_KEYS`, `GROQ_API_KEYS`, `MISTRAL_API_KEYS`, `OPENROUTER_API_KEYS`, `XAI_API_KEYS`, `NVIDIA_API_KEYS`, `COHERE_API_KEYS`, `TOGETHER_API_KEYS`, `CEREBRAS_API_KEYS`, and more — see `.env.example` for the full list.
 

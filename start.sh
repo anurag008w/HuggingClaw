@@ -783,6 +783,36 @@ if [ "$WHATSAPP_ENABLED_NORMALIZED" = "true" ]; then
   CONFIG_JSON=$(echo "$CONFIG_JSON" | jq '.channels.whatsapp = {"dmPolicy": "pairing"}')
 fi
 
+
+validate_json_file() {
+  local file="$1"
+  [ -f "$file" ] || return 1
+  jq -e . "$file" >/dev/null 2>&1
+}
+
+write_json_atomic() {
+  local dest="$1"
+  local payload="$2"
+  local tmp
+  tmp="${dest}.tmp.$$"
+  printf '%s\n' "$payload" > "$tmp" || return 1
+  if ! jq -e . "$tmp" >/dev/null 2>&1; then
+    echo "ERROR: refusing to write invalid JSON to $dest" >&2
+    rm -f "$tmp"
+    return 1
+  fi
+  mv "$tmp" "$dest"
+}
+
+backup_config_copy() {
+  local src="$1"
+  [ -f "$src" ] || return 0
+  local stamp backup
+  stamp="$(date +%Y%m%d-%H%M%S)"
+  backup="${src}.backup.${stamp}"
+  cp -a "$src" "$backup" 2>/dev/null || cp "$src" "$backup" 2>/dev/null || true
+}
+
 # Write config
 EXISTING_CONFIG="/home/node/.openclaw/openclaw.json"
 WHATSAPP_CONFIG_ENABLED=false
@@ -820,8 +850,8 @@ if [ -f "$EXISTING_CONFIG" ]; then
      | if (($injectedModelsProviders | length) > 0) then
          ($injectedModelsProviders | to_entries) as $entries
          | reduce $entries[] as $e (.;
-             .models.providers[$e.key] = ((.models.providers[$e.key] // {})
-               + {models: (($e.value.models // []) | unique_by(.id))})
+             (($desired.models.providers[$e.key] // {}) * {models: (($e.value.models // []) | unique_by(.id))}) as $desiredProvider
+             | .models.providers[$e.key] = ((.models.providers[$e.key] // {}) * $desiredProvider)
            )
        else
          .
@@ -852,16 +882,29 @@ if [ -f "$EXISTING_CONFIG" ]; then
     "$EXISTING_CONFIG" 2>/dev/null)
 
   if [ -n "$PATCHED" ]; then
-    echo "$PATCHED" > "$EXISTING_CONFIG.tmp" \
-      && mv "$EXISTING_CONFIG.tmp" "$EXISTING_CONFIG"
-    echo "Config patched successfully."
+    backup_config_copy "$EXISTING_CONFIG"
+    if write_json_atomic "$EXISTING_CONFIG" "$PATCHED"; then
+      echo "Config patched successfully."
+    else
+      echo "Patch produced invalid JSON — writing fresh config."
+      write_json_atomic "$EXISTING_CONFIG" "$CONFIG_JSON" || { echo "ERROR: could not write valid fallback config" >&2; exit 1; }
+    fi
   else
-    echo "Patch failed — writing fresh config."
-    echo "$CONFIG_JSON" > "$EXISTING_CONFIG"
+    echo "Patch failed."
+    # Validate only on patch failure (as requested). If restored config is invalid,
+    # quarantine it and regenerate from runtime config; otherwise keep it untouched.
+    if ! validate_json_file "$EXISTING_CONFIG"; then
+      echo "Restored config is invalid JSON — backing up and regenerating from runtime config."
+      cp "$EXISTING_CONFIG" "${EXISTING_CONFIG}.invalid.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+      backup_config_copy "$EXISTING_CONFIG"
+      write_json_atomic "$EXISTING_CONFIG" "$CONFIG_JSON" || { echo "ERROR: could not write valid fallback config" >&2; exit 1; }
+    else
+      echo "Patch failed but restored config is valid — keeping existing config unchanged."
+    fi
   fi
 else
   echo "No restored config — writing fresh config..."
-  echo "$CONFIG_JSON" > "$EXISTING_CONFIG"
+  write_json_atomic "$EXISTING_CONFIG" "$CONFIG_JSON" || { echo "ERROR: could not write valid config" >&2; exit 1; }
 fi
 chmod 600 "$EXISTING_CONFIG"
 
