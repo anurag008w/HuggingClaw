@@ -429,9 +429,14 @@ def create_snapshot_dir(source_root: Path) -> Path:
     return staging_root
 
 
-def prune_remote_deleted_files(repo_id: str, snapshot_dir: Path) -> None:
+def prune_remote_deleted_files(
+    repo_id: str,
+    snapshot_dir: Path,
+    skip_prefixes: set[str] | None = None,
+) -> None:
     if HF_API is None:
         return
+    skip_prefixes = skip_prefixes or set()
 
     local_files = {
         path.relative_to(snapshot_dir).as_posix()
@@ -443,6 +448,7 @@ def prune_remote_deleted_files(repo_id: str, snapshot_dir: Path) -> None:
     stale_files = [
         path for path in remote_files
         if path not in local_files and path not in {".gitattributes"}
+        and not any(path == prefix or path.startswith(prefix + "/") for prefix in skip_prefixes)
     ]
     if stale_files:
         HF_API.delete_files(
@@ -552,13 +558,21 @@ def _sync_once_unlocked(
                 commit_message=f"HuggingClaw sync {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
                 ignore_patterns=[".git/*", ".git"],
             )
+        skip_prune_prefixes: set[str] = set()
         if had_snapshot_copy_failures:
-            print("Warning: skipping remote prune this pass because local state snapshot had copy failures.")
-        else:
-            try:
-                prune_remote_deleted_files(repo_id, snapshot_dir)
-            except Exception as prune_exc:
-                print(f"Warning: could not prune stale remote files: {prune_exc}")
+            # Keep pruning normal workspace deletions, but avoid pruning embedded
+            # OpenClaw state paths when that state snapshot had copy failures.
+            # This prevents accidental state deletions while still removing stale
+            # regular files from the backup dataset.
+            skip_prune_prefixes.add("huggingclaw-state/openclaw")
+            print(
+                "Warning: state snapshot had copy failures; pruning stale files "
+                "except huggingclaw-state/openclaw."
+            )
+        try:
+            prune_remote_deleted_files(repo_id, snapshot_dir, skip_prefixes=skip_prune_prefixes)
+        except Exception as prune_exc:
+            print(f"Warning: could not prune stale remote files: {prune_exc}")
     finally:
         shutil.rmtree(snapshot_dir, ignore_errors=True)
 

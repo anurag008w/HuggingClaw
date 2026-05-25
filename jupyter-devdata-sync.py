@@ -155,7 +155,8 @@ def should_skip(p: Path):
     # Skip any component whose name looks like a secret file/dir.
     return any(_name_is_secret(part) for part in parts)
 
-def snapshot(src: Path, dst: Path):
+def snapshot(src: Path, dst: Path) -> bool:
+    had_copy_failures = False
     for p in src.rglob("*"):
         rel = p.relative_to(src)
         if should_skip(rel):
@@ -176,7 +177,8 @@ def snapshot(src: Path, dst: Path):
             try:
                 shutil.copy2(p, target)
             except OSError:
-                pass
+                had_copy_failures = True
+    return had_copy_failures
 
 def is_jupyter_running(port: int = 8888) -> bool:
     """Return True if JupyterLab is already listening on *port*.
@@ -227,20 +229,31 @@ def restore_once(api, rid: str):
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-def prune_remote_deleted_files(api, rid: str, snapshot_dir: Path) -> None:
+def prune_remote_deleted_files(
+    api,
+    rid: str,
+    snapshot_dir: Path,
+    skip_prefixes: set[str] | None = None,
+) -> None:
     """BUG FIX #6: Delete from the HF dataset any files the user deleted
     locally.  Without this, deleted files re-appear on the next Space restart
     because restore_once() copies everything in the dataset back to disk.
     Mirrors the prune_remote_deleted_files() logic in openclaw-sync.py.
     """
     try:
+        skip_prefixes = skip_prefixes or set()
         local_files = {
             p.relative_to(snapshot_dir).as_posix()
             for p in snapshot_dir.rglob("*")
             if p.is_file()
         }
         remote_files = list(api.list_repo_files(repo_id=rid, repo_type="dataset"))
-        stale = [f for f in remote_files if f not in local_files and f != ".gitattributes"]
+        stale = [
+            f for f in remote_files
+            if f not in local_files
+            and f != ".gitattributes"
+            and not any(f == prefix or f.startswith(prefix + "/") for prefix in skip_prefixes)
+        ]
         if stale:
             api.delete_files(
                 delete_patterns=stale,
@@ -257,7 +270,7 @@ def sync_loop(api, rid: str):
     while True:
         tmp = Path(tempfile.mkdtemp(prefix="devdata-snap-"))
         try:
-            snapshot(JUPYTER_ROOT, tmp)
+            had_copy_failures = snapshot(JUPYTER_ROOT, tmp)
             upload_folder(
                 folder_path=str(tmp),
                 repo_id=rid,
@@ -268,7 +281,13 @@ def sync_loop(api, rid: str):
             )
             print(f"DevData synced to {rid}")
             # BUG FIX #6: Prune files deleted locally so they don't reappear on restore.
-            prune_remote_deleted_files(api, rid, tmp)
+            skip_prune_prefixes: set[str] = set()
+            if had_copy_failures:
+                # Snapshot copy races can produce a partial view; avoid pruning
+                # runtime-heavy Jupyter paths in that case.
+                skip_prune_prefixes.update({"runtime", ".local/share/jupyter/runtime"})
+                print("DevData snapshot had copy failures; pruning stale files with runtime-path safeguards.")
+            prune_remote_deleted_files(api, rid, tmp, skip_prefixes=skip_prune_prefixes)
         except Exception as exc:
             kind = classify_error(exc)
             print(f"DevData sync warning [{kind}]: {exc}")
