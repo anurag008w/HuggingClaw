@@ -251,6 +251,13 @@ const MODEL_CATALOGS = {
     "google/gemini-2.5-flash",
     "google/gemini-2.0-flash"
   ],
+  "VERTEX_MODELS": [
+    "google-vertex/gemini-2.5-pro",
+    "google-vertex/gemini-2.5-flash",
+    "google-vertex/gemini-2.0-flash",
+    "google-vertex/gemini-1.5-pro",
+    "google-vertex/gemini-1.5-flash"
+  ],
   "DEEPSEEK_MODELS": [
     "deepseek/deepseek-v4-pro",
     "deepseek/deepseek-v4-flash",
@@ -1111,6 +1118,36 @@ const FIELDS = [
 {
     "g": "Provider Keys",
     "icon": "🔑",
+    "k": "GOOGLE_CLOUD_PROJECT",
+    "lbl": "Google Vertex AI — GCP Project ID",
+    "type": "text",
+    "ph": "my-gcp-project-id",
+    "common": 0,
+    "tag": "credential"
+  },
+{
+    "g": "Provider Keys",
+    "icon": "🔑",
+    "k": "GOOGLE_CLOUD_LOCATION",
+    "lbl": "Google Vertex AI — GCP Region",
+    "type": "text",
+    "ph": "us-central1",
+    "common": 0,
+    "tag": "credential"
+  },
+{
+    "g": "Provider Keys",
+    "icon": "🔑",
+    "k": "GOOGLE_APPLICATION_CREDENTIALS_JSON",
+    "lbl": "Google Vertex AI — Service Account JSON (base64)",
+    "type": "password",
+    "ph": "base64-encoded service account JSON",
+    "common": 0,
+    "tag": "credential"
+  },
+{
+    "g": "Provider Keys",
+    "icon": "🔑",
     "k": "DEEPSEEK_API_KEY",
     "lbl": "DeepSeek",
     "type": "password",
@@ -1528,6 +1565,16 @@ const FIELDS = [
     "type": "model_list",
     "options_key": "GEMINI_MODELS",
     "ph": "Select models to build a comma list",
+    "tag": "optional"
+  },
+{
+    "g": "Model Lists",
+    "icon": "📋",
+    "k": "VERTEX_MODELS",
+    "lbl": "Visible Vertex AI models (google-vertex/...)",
+    "type": "model_list",
+    "options_key": "VERTEX_MODELS",
+    "ph": "Select Vertex models (needs GOOGLE_CLOUD_PROJECT + GOOGLE_CLOUD_LOCATION)",
     "tag": "optional"
   },
 {

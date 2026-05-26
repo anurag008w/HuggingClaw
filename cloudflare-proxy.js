@@ -204,24 +204,31 @@ if (PROXY_URL) {
 
         const proxiedUrl = new URL(url.pathname + url.search, proxy);
 
-        const logProxyError = (promise, debugInfo) => {
-          promise
-            .then(r => {
-              if (DEBUG && !r.ok) {
-                log(`[cloudflare-proxy] Proxy HTTP ${r.status} for ${hostname}: ${r.statusText}`);
-              }
-            })
-            .catch(err => {
-              const cause = err?.cause;
-              const causeStr = cause
-                ? ` | cause: ${cause?.code || cause?.message || String(cause)}`
-                : "";
-              log(`[cloudflare-proxy] Proxy FAILED ${hostname}: ${err?.message}${causeStr}`);
-              if (DEBUG && debugInfo) {
-                log(`[cloudflare-proxy] Debug: ${debugInfo}`);
-              }
-            });
-          return promise;
+        // proxyWithFallback: try via Cloudflare Worker first; if the proxy
+        // itself hard-fails (ETIMEDOUT / ECONNRESET / network error), fall
+        // back to a direct connection so callers still get a response.
+        // HTTP-level errors from the Worker (4xx/5xx) are NOT retried —
+        // only hard network failures (rejected promise) trigger the fallback.
+        const proxyWithFallback = (proxyPromise, directFallbackFn, debugInfo) => {
+          return proxyPromise.then(r => {
+            if (DEBUG && !r.ok) {
+              log(`[cloudflare-proxy] Proxy HTTP ${r.status} for ${hostname}: ${r.statusText}`);
+            }
+            return r;
+          }).catch(err => {
+            const cause = err?.cause;
+            const causeStr = cause
+              ? ` | cause: ${cause?.code || cause?.message || String(cause)}`
+              : "";
+            log(`[cloudflare-proxy] Proxy FAILED ${hostname}: ${err?.message}${causeStr} — retrying direct`);
+            if (DEBUG && debugInfo) {
+              log(`[cloudflare-proxy] Debug: ${debugInfo}`);
+            }
+            // Direct fallback: bypasses proxy for this request so infrastructure
+            // calls (update checks, plugin installs, etc.) still succeed even
+            // when the Worker cannot reach the destination.
+            return directFallbackFn();
+          });
         };
 
         if (request) {
@@ -234,8 +241,9 @@ if (PROXY_URL) {
             fetchOpts.body = request.body;
             fetchOpts.duplex = request.duplex || "half";
           }
-          return logProxyError(
+          return proxyWithFallback(
             originalFetch(String(proxiedUrl), fetchOpts),
+            () => originalFetch(input, init),
             `request-mode method=${request.method} hasBody=${!!request.body}`,
           );
         }
@@ -270,8 +278,9 @@ if (PROXY_URL) {
             ? "ReadableStream"
             : (init.body?.constructor?.name || typeof init.body);
 
-        return logProxyError(
+        return proxyWithFallback(
           originalFetch(String(proxiedUrl), newInit),
+          () => originalFetch(input, init),
           `init-mode method=${newInit.method} body=${bodyType} initKeys=${Object.keys(init || {}).join(",")}`,
         );
       };
