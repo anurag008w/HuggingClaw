@@ -468,7 +468,7 @@ _DEFAULT_XAI_MODELS="xai/grok-4.3,xai/grok-3,xai/grok-3-mini"
 _DEFAULT_COHERE_MODELS="cohere/command-r-plus,cohere/command-r"
 _DEFAULT_TOGETHER_MODELS="together/moonshotai/Kimi-K2.5,together/deepseek-ai/DeepSeek-V3.2,together/meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
 _DEFAULT_CEREBRAS_MODELS="cerebras/zai-glm-4.7,cerebras/llama-4-scout-17b-16e-instruct"
-_DEFAULT_NVIDIA_MODELS="nvidia/nvidia/nemotron-3-super-120b-a12b,nvidia/moonshotai/kimi-k2.5"
+_DEFAULT_NVIDIA_MODELS="nvidia/nemotron-3-super-120b-a12b,nvidia/moonshotai/kimi-k2.5"
 _DEFAULT_KILOCODE_MODELS="kilocode/kilo/auto"
 _DEFAULT_MOONSHOT_MODELS="moonshot/kimi-k2.6,moonshot/kimi-k2.5,moonshot/kimi-k2-thinking"
 _DEFAULT_MINIMAX_MODELS="minimax/MiniMax-M2.7,minimax/MiniMax-M2.5"
@@ -560,9 +560,10 @@ inject_provider_models_from_env "openai-codex" "OPENAI_MODELS" "OPENAI_API_KEY" 
 inject_provider_models_from_env "google" "GEMINI_MODELS" "GEMINI_API_KEY" "GEMINI_API_KEYS" "_DEFAULT_GEMINI_MODELS"
 # google-vertex: uses VERTEX_MODELS (with google-vertex/ prefix) separately from GEMINI_MODELS.
 # The "key" check uses GOOGLE_CLOUD_PROJECT so it only injects when Vertex is actually configured.
-if [ -n "${VERTEX_MODELS:-}" ]; then
-  inject_provider_models_from_env "google-vertex" "VERTEX_MODELS" "GOOGLE_CLOUD_PROJECT" "GEMINI_API_KEYS" "_DEFAULT_VERTEX_MODELS"
-fi
+# google-vertex: inject when GOOGLE_CLOUD_PROJECT is configured.
+# Pool key uses a dummy var (_VERTEX_POOL_UNUSED) so that only GOOGLE_CLOUD_PROJECT
+# gates injection — Vertex uses GCP project auth, not Gemini API key rotation.
+inject_provider_models_from_env "google-vertex" "VERTEX_MODELS" "GOOGLE_CLOUD_PROJECT" "_VERTEX_POOL_UNUSED" "_DEFAULT_VERTEX_MODELS"
 inject_provider_models_from_env "deepseek" "DEEPSEEK_MODELS" "DEEPSEEK_API_KEY" "DEEPSEEK_API_KEYS" "_DEFAULT_DEEPSEEK_MODELS"
 inject_provider_models_from_env "openrouter" "OPENROUTER_MODELS" "OPENROUTER_API_KEY" "OPENROUTER_API_KEYS" "_DEFAULT_OPENROUTER_MODELS"
 inject_provider_models_from_env "kilocode" "KILOCODE_MODELS" "KILOCODE_API_KEY" "KILOCODE_API_KEYS" "_DEFAULT_KILOCODE_MODELS"
