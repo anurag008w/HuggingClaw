@@ -941,6 +941,8 @@ if [ -f "$EXISTING_CONFIG" ]; then
      | .gateway.auth.token = $token
      | .agents.defaults.model = (if ($fallbacks | length) > 0
          then {"primary": $model, "fallbacks": $fallbacks}
+         elif ((.agents.defaults.model | type) == "object" and ((.agents.defaults.model.fallbacks // []) | length) > 0)
+         then (.agents.defaults.model | .primary = $model)
          else $model
        end)
      | .gateway.port = ($desired.gateway.port // .gateway.port)
