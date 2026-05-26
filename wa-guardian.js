@@ -22,7 +22,10 @@ const GATEWAY_URL = `ws://127.0.0.1:${GATEWAY_PORT}`;
 const GATEWAY_TOKEN = process.env.GATEWAY_TOKEN || "huggingclaw";
 const WHATSAPP_ENABLED = /^true$/i.test(process.env.WHATSAPP_ENABLED || "");
 const CHECK_INTERVAL = 30000;
-const WAIT_TIMEOUT = 120000;
+// Reduced from 120 s to 55 s: a 120 s RPC hold + 101 s event-loop delay caused
+// the embedded-run to stall for 374 s before the OpenClaw watchdog aborted it.
+// 55 s leaves room for one full event-loop recovery cycle within the watchdog window.
+const WAIT_TIMEOUT = 55000;
 const POST_515_NO_LOGOUT_MS = 90 * 1000;
 const SUCCESS_COOLDOWN_MS = 60 * 1000;
 const RESET_MARKER_PATH = path.join(
@@ -293,4 +296,8 @@ process.on("unhandledRejection", (reason) => {
 writeStatus({ configured: true, connected: false, pairing: false });
 console.log("[guardian] WhatsApp Guardian active. Monitoring pairing status...");
 setInterval(checkStatus, CHECK_INTERVAL);
-setTimeout(checkStatus, 15000);
+// Delay first check: on HF Spaces the gateway bootstrap-context stage can take
+// 300+ s, so the first poll is deferred to avoid hammering a not-yet-ready
+// gateway and generating spurious "ws closed before connect" (1006) errors.
+const INITIAL_CHECK_DELAY = Number.parseInt(process.env.WA_GUARDIAN_INITIAL_DELAY_MS || "45000", 10);
+setTimeout(checkStatus, INITIAL_CHECK_DELAY);
