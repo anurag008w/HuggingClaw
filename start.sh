@@ -203,7 +203,6 @@ if [ -n "$LLM_FALLBACK_MODELS" ]; then
     | grep -v '^$' \
     | jq -R . \
     | jq -s .)
-  echo "Fallbacks : $LLM_FALLBACK_MODELS"
 fi
 
 # Map provider prefix to the correct API key environment variable
