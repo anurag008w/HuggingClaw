@@ -904,6 +904,7 @@ if [ -f "$EXISTING_CONFIG" ]; then
     --argjson whatsappEnabled "$WHATSAPP_CONFIG_ENABLED" \
     --argjson telegramConfigured "$TELEGRAM_CONFIG_ENABLED" \
     '(.channels.whatsapp // {}) as $existingWhatsapp
+     | (.channels.telegram // {}) as $existingTelegram
      | .gateway.auth.token = $token
      | .agents.defaults.model = $model
      | .gateway.port = ($desired.gateway.port // .gateway.port)
@@ -953,8 +954,13 @@ if [ -f "$EXISTING_CONFIG" ]; then
          .
        end
      | if $telegramConfigured then
-         .channels.telegram = (($desired.channels.telegram // {}) * (.channels.telegram // {}))
-         | .channels.telegram.botToken = $desired.channels.telegram.botToken
+         # Merge: existing * desired → desired (env-driven) wins for runtime fields
+         # (apiRoot from CLOUDFLARE_PROXY_URL, commands.native, timeoutSeconds, retry).
+         # Then re-apply user-editable fields from saved $existingTelegram so UI
+         # customizations (dmPolicy, allowFrom) survive across reboots.
+         .channels.telegram = ($existingTelegram * ($desired.channels.telegram // {}))
+         | (if ($existingTelegram | has("dmPolicy"))  then .channels.telegram.dmPolicy  = $existingTelegram.dmPolicy  else . end)
+         | (if ($existingTelegram | has("allowFrom")) then .channels.telegram.allowFrom = $existingTelegram.allowFrom else . end)
        else
          del(.channels.telegram)
          | .plugins.entries.telegram.enabled = false
