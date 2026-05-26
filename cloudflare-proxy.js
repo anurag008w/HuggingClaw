@@ -65,6 +65,32 @@ if (PROXY_URL) {
     const originalFetch =
       typeof globalThis.fetch === "function" ? globalThis.fetch.bind(globalThis) : null;
 
+    // Domains that should NEVER be proxied through Cloudflare, even in
+    // wildcard (PROXY_ALL) mode. These are infrastructure/package-manager
+    // endpoints that the Worker is not designed to relay and that fail with
+    // ETIMEDOUT when accidentally routed through it.
+    const NEVER_PROXY_DOMAINS = [
+      // GitHub raw content — used by OpenClaw update checks and plugins
+      "raw.githubusercontent.com",
+      "codeload.github.com",
+      "objects.githubusercontent.com",
+      "github.com",
+      "api.github.com",
+      // npm / package registries
+      "registry.npmjs.org",
+      "npmjs.org",
+      "yarnpkg.com",
+      // Python package index
+      "pypi.org",
+      "files.pythonhosted.org",
+      // Debian/apt mirrors (used in startup scripts)
+      "deb.debian.org",
+      "security.debian.org",
+      // ClawHub plugin registry
+      "clawhub.dev",
+      "registry.clawhub.dev",
+    ];
+
     const shouldProxyHost = (hostname) => {
       const normalized = String(hostname || "").trim().toLowerCase();
       if (!normalized) return false;
@@ -79,7 +105,16 @@ if (PROXY_URL) {
         normalized.endsWith(".huggingface.co") ||
         normalized === "huggingface.co";
 
-      const should = PROXY_ALL ? !isInternal : BLOCKED_DOMAINS.some(
+      if (isInternal) return false;
+
+      // Infrastructure domains are never proxied regardless of PROXY_ALL
+      const isNeverProxy = NEVER_PROXY_DOMAINS.some(
+        (domain) =>
+          normalized === domain || normalized.endsWith(`.${domain}`),
+      );
+      if (isNeverProxy) return false;
+
+      const should = PROXY_ALL ? true : BLOCKED_DOMAINS.some(
         (domain) =>
           normalized === domain || normalized.endsWith(`.${domain}`),
       );
