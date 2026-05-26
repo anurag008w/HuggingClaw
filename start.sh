@@ -124,6 +124,15 @@ if [ -n "${SPACE_HOST:-}" ]; then
   ACP_PLUGIN_MODE="${ACP_PLUGIN_MODE:-disabled}"
   # HF Spaces does not benefit from Bonjour discovery, and the retries add noise.
   export OPENCLAW_DISABLE_BONJOUR="${OPENCLAW_DISABLE_BONJOUR:-1}"
+  # HF Spaces IPv6 routing is unreliable and causes ECONNRESET on outbound
+  # WebSocket connections (WhatsApp, Telegram, etc.) which triggers gateway
+  # channel restarts and floods logs with "ws closed before connect" (1006)
+  # errors. Force IPv4 globally for ALL channels on this Space.
+  # Previously this was only set inside the Telegram block — meaning
+  # WhatsApp-only deployments never got this fix and suffered ECONNRESET drops.
+  export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--dns-result-order=ipv4first"
+  export OPENCLAW_WHATSAPP_DISABLE_AUTO_SELECT_FAMILY="${OPENCLAW_WHATSAPP_DISABLE_AUTO_SELECT_FAMILY:-1}"
+  export OPENCLAW_WHATSAPP_DNS_RESULT_ORDER="${OPENCLAW_WHATSAPP_DNS_RESULT_ORDER:-ipv4first}"
 else
   OPENCLAW_CONSOLE_LOG_LEVEL="${OPENCLAW_CONSOLE_LOG_LEVEL:-info}"
   OPENCLAW_FILE_LOG_LEVEL="${OPENCLAW_FILE_LOG_LEVEL:-info}"
@@ -804,8 +813,8 @@ if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
   
   export OPENCLAW_TELEGRAM_DISABLE_AUTO_SELECT_FAMILY=1
   export OPENCLAW_TELEGRAM_DNS_RESULT_ORDER=ipv4first
-  # Force ipv4 for Telegram specifically as HF IPv6 often times out
-  export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--dns-result-order=ipv4first"
+  # Note: --dns-result-order=ipv4first is now set globally for all HF Space
+  # channels in the SPACE_HOST block above; no need to set NODE_OPTIONS here.
   
   CONFIG_JSON=$(echo "$CONFIG_JSON" | jq --arg token "$CLEAN_TG_TOKEN" --arg proxy_url "$TELEGRAM_API_ROOT" '
     .channels.telegram.enabled = true
