@@ -903,11 +903,27 @@ if [ -f "$EXISTING_CONFIG" ]; then
     --argjson whatsappConfigured "$WHATSAPP_ENABLED_CONFIGURED" \
     --argjson whatsappEnabled "$WHATSAPP_CONFIG_ENABLED" \
     --argjson telegramConfigured "$TELEGRAM_CONFIG_ENABLED" \
+    --argjson browserEnabled "$BROWSER_SHOULD_ENABLE" \
     '(.channels.whatsapp // {}) as $existingWhatsapp
      | (.channels.telegram // {}) as $existingTelegram
      | .gateway.auth.token = $token
      | .agents.defaults.model = $model
      | .gateway.port = ($desired.gateway.port // .gateway.port)
+     | .gateway.controlUi.dangerouslyDisableDeviceAuth = true
+     | (if ($desired.gateway.controlUi.allowedOrigins // [] | length) > 0 then
+          .gateway.controlUi.allowedOrigins = (
+            ((.gateway.controlUi.allowedOrigins // []) + ($desired.gateway.controlUi.allowedOrigins // []))
+            | unique
+          )
+        else . end)
+     | (if ($desired.gateway.auth.mode // "") != "" then
+          .gateway.auth.mode = $desired.gateway.auth.mode
+          | .gateway.auth.password = ($desired.gateway.auth.password // "")
+        else . end)
+     | .gateway.trustedProxies = (
+         ((.gateway.trustedProxies // []) + ($desired.gateway.trustedProxies // []))
+         | unique
+       )
      | if $fileLogConfigured then .logging.level = $fileLevel else . end
      | if $consoleLogConfigured then .logging.consoleLevel = $consoleLevel else . end
      | if $consoleStyleConfigured then .logging.consoleStyle = $consoleStyle else . end
@@ -941,6 +957,13 @@ if [ -f "$EXISTING_CONFIG" ]; then
      | .plugins.allow = (((.plugins.allow // []) + ($desired.plugins.allow // [])) | unique)
      | .plugins.deny = (((.plugins.deny // []) + ($desired.plugins.deny // [])) | unique)
      | .plugins.entries = ((.plugins.entries // {}) * ($desired.plugins.entries // {}))
+     | del(.plugins.entries.acpx)
+     | (if $browserEnabled then
+          .browser = ($desired.browser // .browser)
+        else
+          .browser.enabled = false
+          | .plugins.entries.browser.enabled = false
+        end)
      | if $whatsappEnabled then
          ($desired.channels.whatsapp // {"dmPolicy": "pairing"}) as $desiredWhatsapp
          | .plugins.entries.whatsapp.enabled = true
