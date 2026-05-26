@@ -445,6 +445,16 @@ const FIELDS = [
   },
 {
     "g": "Core",
+    "icon": "🔄",
+    "k": "LLM_FALLBACK_MODELS",
+    "lbl": "Fallback models (comma-separated, tried in order if primary fails)",
+    "type": "text",
+    "ph": "anthropic/claude-sonnet-4-6,openai/gpt-4o,google/gemini-2.5-flash",
+    "tag": "advanced",
+    "help": "Each fallback provider needs its own API key set (e.g. ANTHROPIC_API_KEY, OPENAI_API_KEY). OpenClaw will try these in order on rate-limit, auth failure, or provider outage."
+  },
+{
+    "g": "Core",
     "icon": "⚡",
     "k": "GATEWAY_TOKEN",
     "lbl": "Control UI gateway token",

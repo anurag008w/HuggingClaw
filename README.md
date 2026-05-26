@@ -103,6 +103,16 @@ Navigate to your new Space's **Settings**, scroll down to the **Variables and se
 > [!TIP]
 > HuggingClaw is completely flexible! You only need these three secrets to get started. You can set other secrets later.
 
+#### 🔄 Optional: Fallback Models
+
+Set `LLM_FALLBACK_MODELS` as a comma-separated list of backup model IDs. If your primary model fails (rate limit, outage, auth error), OpenClaw automatically tries each fallback in order:
+
+```
+LLM_FALLBACK_MODELS=anthropic/claude-sonnet-4-6,openai/gpt-4o,google/gemini-2.5-flash
+```
+
+Each fallback provider needs its own API key set as a separate secret (e.g. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`). See [API Key Rotation](#-api-key-rotation-optional) for provider key naming.
+
 **Terminal auto-enables when `GATEWAY_TOKEN` is set** — no extra secrets needed. `GATEWAY_TOKEN` is reused as `JUPYTER_TOKEN`, so the terminal is protected by the same credential as the Control UI. To set a different token, add `JUPYTER_TOKEN` as a Secret. To disable the terminal entirely, set `DEV_MODE=false` as a Variable.
 
 If you want to pin a specific OpenClaw release instead of `latest`, add `OPENCLAW_VERSION` under **Variables** in your Space settings. For Docker Spaces, HF passes Variables as build args during image build, so these should be Variables, not Secrets (except tokens).
@@ -309,6 +319,37 @@ HuggingClaw supports **all providers** from OpenClaw. Set `LLM_MODEL=<provider/m
 
 *And many more: Cohere, Groq, NVIDIA, Mistral, Moonshot, etc.*
 </details>
+
+### 🔄 Model Fallbacks
+
+Set `LLM_FALLBACK_MODELS` to a comma-separated list of backup models. OpenClaw tries them in order if the primary fails (rate-limit, auth error, or provider outage):
+
+```bash
+LLM_MODEL=google/gemini-2.5-flash
+LLM_FALLBACK_MODELS=anthropic/claude-sonnet-4-6,openai/gpt-4o
+
+# Each fallback provider needs its own key:
+GEMINI_API_KEY=...
+ANTHROPIC_API_KEY=...
+OPENAI_API_KEY=...
+```
+
+This maps to OpenClaw's `agents.defaults.model` object format at runtime:
+```json
+{
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "google/gemini-2.5-flash",
+        "fallbacks": ["anthropic/claude-sonnet-4-6", "openai/gpt-4o"]
+      }
+    }
+  }
+}
+```
+
+> [!TIP]
+> A great starter setup: fast model as primary (e.g. `google/gemini-2.5-flash`), strong model as first fallback (e.g. `anthropic/claude-sonnet-4-6`), and a free-tier model last (e.g. `openrouter/auto`) for maximum resilience.
 
 ### Any Other Provider
 
