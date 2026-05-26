@@ -151,15 +151,19 @@ async function handleRequest(request) {{
   headers.delete("x-target-host");
   headers.delete("x-proxy-key");
 
-  const proxiedRequest = new Request(targetUrl, {{
-    method: request.method,
-    headers,
-    body: request.body,
-    redirect: "follow",
-  }});
+  // WebSocket upgrade requests (e.g. WhatsApp via Baileys) must NOT have
+  // body or redirect set — passing them causes the Worker to drop the TCP
+  // connection before TLS completes, producing ECONNRESET on the client.
+  // Cloudflare Workers transparently tunnel WebSocket connections when fetch()
+  // receives a 101 Switching Protocols response from the upstream server.
+  const isWebSocketUpgrade = (request.headers.get("Upgrade") || "").toLowerCase() === "websocket";
+
+  const fetchInit = isWebSocketUpgrade
+    ? {{ method: request.method, headers }}
+    : {{ method: request.method, headers, body: request.body, redirect: "follow" }};
 
   try {{
-    return await fetch(proxiedRequest);
+    return await fetch(new Request(targetUrl, fetchInit));
   }} catch (error) {{
     return new Response(`Proxy Error: ${{error.message}}`, {{ status: 502 }});
   }}
