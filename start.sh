@@ -61,6 +61,7 @@ load_env_bundle
 # Normalize core env values so accidental surrounding spaces in HF Variables
 # do not block updates or cause stale comparisons/merges.
 LLM_MODEL="$(trim_var "${LLM_MODEL:-}")"
+LLM_FALLBACK_MODELS="$(trim_var "${LLM_FALLBACK_MODELS:-}")"
 GATEWAY_TOKEN="$(trim_var "${GATEWAY_TOKEN:-}")"
 OPENCLAW_PASSWORD="$(trim_var "${OPENCLAW_PASSWORD:-}")"
 LLM_API_KEY="$(trim_var "${LLM_API_KEY:-}")"
@@ -189,6 +190,20 @@ fi
 
 # Extract provider prefix from model name (e.g. "google/gemini-2.5-flash" → "google")
 LLM_PROVIDER=$(echo "$LLM_MODEL" | cut -d'/' -f1)
+
+# ── Build fallback model JSON array from LLM_FALLBACK_MODELS ──
+# LLM_FALLBACK_MODELS is a comma-separated list of model refs, e.g.:
+#   LLM_FALLBACK_MODELS="anthropic/claude-sonnet-4-6,openai/gpt-4o,google/gemini-2.5-flash"
+# Each fallback provider's API key must be set separately (e.g. ANTHROPIC_API_KEY, OPENAI_API_KEY).
+LLM_FALLBACK_MODELS_JSON="[]"
+if [ -n "$LLM_FALLBACK_MODELS" ]; then
+  LLM_FALLBACK_MODELS_JSON=$(printf '%s' "$LLM_FALLBACK_MODELS" \
+    | tr ',' '\n' \
+    | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
+    | grep -v '^$' \
+    | jq -R . \
+    | jq -s .)
+fi
 
 # Map provider prefix to the correct API key environment variable
 # Based on OpenClaw provider system: /usr/local/lib/node_modules/openclaw/docs/concepts/model-providers.md
@@ -377,15 +392,22 @@ CONFIGEOF
 # Apply gateway token, model, and logging in a single jq pass.
 # Uses --arg so values containing quotes/backslashes can't break the JSON or
 # inject jq filters (relevant for OPENCLAW_PASSWORD/GATEWAY_TOKEN below too).
+# When LLM_FALLBACK_MODELS is set, agents.defaults.model is written as an
+# object { primary, fallbacks } so OpenClaw can chain through backup models
+# automatically on rate-limit, auth failure, or provider outage.
 CONFIG_JSON=$(jq \
   --arg token "$GATEWAY_TOKEN" \
   --arg model "$LLM_MODEL" \
+  --argjson fallbacks "$LLM_FALLBACK_MODELS_JSON" \
   --arg fileLevel "$OPENCLAW_FILE_LOG_LEVEL" \
   --arg consoleLevel "$OPENCLAW_CONSOLE_LOG_LEVEL" \
   --arg consoleStyle "$OPENCLAW_CONSOLE_LOG_STYLE" \
   --arg port "$GATEWAY_PORT" \
   '.gateway.auth.token = $token
-   | .agents.defaults.model = $model
+   | .agents.defaults.model = (if ($fallbacks | length) > 0
+       then {"primary": $model, "fallbacks": $fallbacks}
+       else $model
+     end)
    | .gateway.port = ($port | tonumber)
    | .logging.level = $fileLevel
    | .logging.consoleLevel = $consoleLevel
@@ -901,6 +923,7 @@ if [ -f "$EXISTING_CONFIG" ]; then
   PATCHED=$(jq \
     --arg token "$GATEWAY_TOKEN" \
     --arg model "$LLM_MODEL" \
+    --argjson fallbacks "$LLM_FALLBACK_MODELS_JSON" \
     --arg fileLevel "$OPENCLAW_FILE_LOG_LEVEL" \
     --arg consoleLevel "$OPENCLAW_CONSOLE_LOG_LEVEL" \
     --arg consoleStyle "$OPENCLAW_CONSOLE_LOG_STYLE" \
@@ -916,23 +939,28 @@ if [ -f "$EXISTING_CONFIG" ]; then
     '(.channels.whatsapp // {}) as $existingWhatsapp
      | (.channels.telegram // {}) as $existingTelegram
      | .gateway.auth.token = $token
-     | .agents.defaults.model = $model
+     | .agents.defaults.model = (if ($fallbacks | length) > 0
+         then {"primary": $model, "fallbacks": $fallbacks}
+         elif ((.agents.defaults.model | type) == "object" and ((.agents.defaults.model.fallbacks // []) | length) > 0)
+         then (.agents.defaults.model | .primary = $model)
+         else $model
+       end)
      | .gateway.port = ($desired.gateway.port // .gateway.port)
      | .gateway.controlUi.dangerouslyDisableDeviceAuth = true
      | (if ($desired.gateway.controlUi.allowedOrigins // [] | length) > 0 then
-          .gateway.controlUi.allowedOrigins = (
-            ((.gateway.controlUi.allowedOrigins // []) + ($desired.gateway.controlUi.allowedOrigins // []))
-            | unique
-          )
-        else . end)
+            .gateway.controlUi.allowedOrigins = (
+              ((.gateway.controlUi.allowedOrigins // []) + ($desired.gateway.controlUi.allowedOrigins // []))
+              | unique
+            )
+          else . end)
      | (if ($desired.gateway.auth.mode // "") != "" then
-          .gateway.auth.mode = $desired.gateway.auth.mode
-          | .gateway.auth.password = ($desired.gateway.auth.password // "")
-        else . end)
+            .gateway.auth.mode = $desired.gateway.auth.mode
+            | .gateway.auth.password = ($desired.gateway.auth.password // "")
+          else . end)
      | .gateway.trustedProxies = (
-         ((.gateway.trustedProxies // []) + ($desired.gateway.trustedProxies // []))
-         | unique
-       )
+           ((.gateway.trustedProxies // []) + ($desired.gateway.trustedProxies // []))
+           | unique
+         )
      | if $fileLogConfigured then .logging.level = $fileLevel else . end
      | if $consoleLogConfigured then .logging.consoleLevel = $consoleLevel else . end
      | if $consoleStyleConfigured then .logging.consoleStyle = $consoleStyle else . end
@@ -1034,6 +1062,9 @@ export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--require /home/node/app/ifr
 echo ""
 echo "Version   : ${OPENCLAW_DISPLAY_VERSION}"
 echo "Model     : ${LLM_MODEL}"
+if [ -n "${LLM_FALLBACK_MODELS:-}" ]; then
+  echo "Fallbacks : ${LLM_FALLBACK_MODELS}"
+fi
 if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
   echo "Telegram  : enabled"
 else
