@@ -200,9 +200,9 @@ async function checkStatus() {
       hasShownWaitMessage = false;
       lastConnectedAt = Date.now();
       writeStatus({ configured: true, connected: true, pairing: false });
-      shouldStop = true;
-      if (_checkInterval) clearInterval(_checkInterval);
-      setTimeout(() => process.exit(0), 1000);
+      // Keep guardian alive after first successful connect so it can recover
+      // later disconnects (common on HF Spaces / unstable networks).
+      // A previous one-shot exit caused "works once then stops" behavior.
       return;
     }
 
@@ -228,10 +228,8 @@ async function checkStatus() {
       lastConnectedAt = Date.now();
       writeStatus({ configured: true, connected: true, pairing: false });
 
-      // Set shouldStop BEFORE config.apply — gateway restart during apply must not
-      // leave guardian running (it would then incorrectly wipe valid credentials).
-      shouldStop = true;
-      if (_checkInterval) clearInterval(_checkInterval);
+      // Keep running after config.apply so guardian can monitor and recover
+      // future disconnects instead of acting as one-time setup helper only.
 
       if (linkedAfter515) {
         console.log("[guardian] 515 after scan: credentials saved, reloading config to start WhatsApp...");
@@ -247,10 +245,9 @@ async function checkStatus() {
         }
       } catch (applyErr) {
         // Gateway restarted during config.apply — that is expected and fine.
-        // shouldStop is already true so we will not retry or attempt logout.
         console.log(`[guardian] Config re-apply interrupted (gateway restarting): ${applyErr.message}`);
       }
-      setTimeout(() => process.exit(0), 1000);
+      return;
     } else if (!message.includes("No active") && !message.includes("Still waiting")) {
       console.log(`[guardian] Wait result: ${message}`);
     }
