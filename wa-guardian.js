@@ -38,6 +38,7 @@ let hasShownWaitMessage = false;
 let last515At = 0;
 let lastConnectedAt = 0;
 let shouldStop = false;
+let _checkInterval = null; // stored so we can clear it on clean exit
 
 function extractErrorMessage(msg) {
   if (!msg || typeof msg !== "object") return "Unknown error";
@@ -122,7 +123,9 @@ async function createConnection() {
     });
 
     ws.on("error", (e) => { if (!resolved) reject(e); });
-    setTimeout(() => { if (!resolved) { ws.close(); reject(new Error("Timeout")); } }, 10000);
+    // FIX: set resolved=true before ws.close() so the error listener above does not
+    // fire a second reject when close() triggers a WebSocket error event (double-reject).
+    setTimeout(() => { if (!resolved) { resolved = true; ws.close(); reject(new Error("Timeout")); } }, 10000);
   });
 }
 
@@ -198,6 +201,7 @@ async function checkStatus() {
       lastConnectedAt = Date.now();
       writeStatus({ configured: true, connected: true, pairing: false });
       shouldStop = true;
+      if (_checkInterval) clearInterval(_checkInterval);
       setTimeout(() => process.exit(0), 1000);
       return;
     }
@@ -227,6 +231,7 @@ async function checkStatus() {
       // Set shouldStop BEFORE config.apply — gateway restart during apply must not
       // leave guardian running (it would then incorrectly wipe valid credentials).
       shouldStop = true;
+      if (_checkInterval) clearInterval(_checkInterval);
 
       if (linkedAfter515) {
         console.log("[guardian] 515 after scan: credentials saved, reloading config to start WhatsApp...");
@@ -292,5 +297,7 @@ process.on("unhandledRejection", (reason) => {
 
 writeStatus({ configured: true, connected: false, pairing: false });
 console.log("[guardian] WhatsApp Guardian active. Monitoring pairing status...");
-setInterval(checkStatus, CHECK_INTERVAL);
+_checkInterval = setInterval(checkStatus, CHECK_INTERVAL);
+// Allow the process to exit even if this interval is the only active handle.
+if (_checkInterval.unref) _checkInterval.unref();
 setTimeout(checkStatus, 15000);
