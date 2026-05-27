@@ -16,7 +16,7 @@ secrets:
   - name: LLM_API_KEY
     description: "Your LLM provider API key (e.g. Anthropic, OpenAI, Google, OpenRouter)."
   - name: LLM_MODEL
-    description: "Model ID to use, e.g. google/gemini-2.5-flash or openai/gpt-4o."
+    description: "Model ID to use, e.g. google/gemini-2.5-flash or openai/gpt-5.4."
   - name: GATEWAY_TOKEN
     description: "Strong token to secure your OpenClaw Control UI (generate: openssl rand -hex 32)."
   - name: JUPYTER_TOKEN
@@ -97,7 +97,7 @@ Click the button above to duplicate the template.
 Navigate to your new Space's **Settings**, scroll down to the **Variables and secrets** section, and add the following three under **Secrets**:
 
 - `LLM_API_KEY` – Your provider API key (e.g., Anthropic, OpenAI, OpenRouter).
-- `LLM_MODEL` – The model ID string you wish to use (e.g., `openai/gpt-4o` or `google/gemini-2.5-flash`).
+- `LLM_MODEL` – The model ID string you wish to use (e.g., `openai/gpt-5.4` or `google/gemini-2.5-flash`).
 - `GATEWAY_TOKEN` – A custom password or token to secure your Control UI. *(You can use any strong password, or generate one with `openssl rand -hex 32` if you prefer).*
 
 > [!TIP]
@@ -108,7 +108,7 @@ Navigate to your new Space's **Settings**, scroll down to the **Variables and se
 Set `LLM_FALLBACK_MODELS` as a comma-separated list of backup model IDs. If your primary model fails (rate limit, outage, auth error), OpenClaw automatically tries each fallback in order:
 
 ```
-LLM_FALLBACK_MODELS=anthropic/claude-sonnet-4-6,openai/gpt-4o,google/gemini-2.5-flash
+LLM_FALLBACK_MODELS=anthropic/claude-sonnet-4-6,openai/gpt-5.4,google/gemini-3.5-flash
 ```
 
 Each fallback provider needs its own API key set as a separate secret (e.g. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`). See [API Key Rotation](#-api-key-rotation-optional) for provider key naming.
@@ -309,7 +309,7 @@ HuggingClaw supports **all providers** from OpenClaw. Set `LLM_MODEL=<provider/m
 | Provider | Prefix | Example Model |
 | :--- | :--- | :--- |
 | **Anthropic** | `anthropic/` | `anthropic/claude-3-5-sonnet-latest` |
-| **OpenAI** | `openai/` | `openai/gpt-4o` |
+| **OpenAI** | `openai/` | `openai/gpt-5.4` |
 | **Google** | `google/` | `google/gemini-2.0-flash` |
 | **DeepSeek** | `deepseek/` | `deepseek/deepseek-chat` |
 | **xAI (Grok)** | `xai/` | `xai/grok-2-latest` |
@@ -326,7 +326,7 @@ Set `LLM_FALLBACK_MODELS` to a comma-separated list of backup models. OpenClaw t
 
 ```bash
 LLM_MODEL=google/gemini-2.5-flash
-LLM_FALLBACK_MODELS=anthropic/claude-sonnet-4-6,openai/gpt-4o
+LLM_FALLBACK_MODELS=anthropic/claude-sonnet-4-6,openai/gpt-5.4
 
 # Each fallback provider needs its own key:
 GEMINI_API_KEY=...
@@ -341,7 +341,7 @@ This maps to OpenClaw's `agents.defaults.model` object format at runtime:
     "defaults": {
       "model": {
         "primary": "google/gemini-2.5-flash",
-        "fallbacks": ["anthropic/claude-sonnet-4-6", "openai/gpt-4o"]
+        "fallbacks": ["anthropic/claude-sonnet-4-6", "openai/gpt-5.4"]
       }
     }
   }
