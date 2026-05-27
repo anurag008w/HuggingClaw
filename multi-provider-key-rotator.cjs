@@ -513,6 +513,60 @@ function buildAttemptFetchArgs(input, init, provider, usedKey) {
   return [input, initObj];
 }
 
+// ─── Gemini thought-signature sanitiser ──────────────────────────────────────
+//
+// BUG: When a thinking-enabled Gemini model (e.g. gemini-2.5-pro / gemini-2.5-flash)
+// is used in a multi-turn conversation, the model response contains "thought" parts
+// with a `thought_signature` field (raw bytes, base64-encoded by the SDK).
+// OpenClaw stores these in its internal conversation history.  On the next turn,
+// when history is replayed back to Gemini, the cross-provider conversion pipeline
+// incorrectly sets `thought_signature` to the Anthropic type-string
+// "reasoning_content" instead of the original bytes value.  Gemini rejects this
+// with:
+//   400 Invalid value at 'contents[N].parts[M].thought_signature' (TYPE_BYTES),
+//   Base64 decoding failed for "reasoning_content"
+//
+// FIX: Intercept every outbound Gemini request body and strip any parts that
+// carry `thought: true` or a `thought_signature` field.  These are model-internal
+// reasoning artifacts — they must never be present in the *input* `contents`
+// array sent by the caller; Gemini only emits them in responses.
+//
+function stripGeminiThoughtParts(bodyStr) {
+  if (typeof bodyStr !== 'string' || bodyStr.length === 0) return bodyStr;
+  // Quick pre-check: skip JSON parse if neither key is present.
+  if (!bodyStr.includes('thought_signature') && !bodyStr.includes('"thought":true') &&
+      !bodyStr.includes('"thought": true')) {
+    return bodyStr;
+  }
+  try {
+    const body = JSON.parse(bodyStr);
+    if (!body || !Array.isArray(body.contents)) return bodyStr;
+    let modified = false;
+    body.contents = body.contents.map(content => {
+      if (!content || !Array.isArray(content.parts)) return content;
+      const filtered = content.parts.filter(part => {
+        if (!part || typeof part !== 'object') return true;
+        if (part.thought === true) { modified = true; return false; }
+        if (Object.prototype.hasOwnProperty.call(part, 'thought_signature')) {
+          modified = true; return false;
+        }
+        return true;
+      });
+      if (filtered.length !== content.parts.length) {
+        // Preserve the content entry even if all parts were stripped (empty
+        // parts array is valid for role-only content markers).
+        return { ...content, parts: filtered };
+      }
+      return content;
+    });
+    if (modified) {
+      debug('[key-rotator] gemini: stripped thought/thought_signature parts from history');
+      return JSON.stringify(body);
+    }
+  } catch (_) { /* malformed JSON — leave untouched */ }
+  return bodyStr;
+}
+
 // ─── Patch globalThis.fetch ───────────────────────────────────────────────────
 
 function patchFetch() {
@@ -525,6 +579,20 @@ function patchFetch() {
       : (input && typeof input.url === 'string' ? input.url : null);
     const provider = matchProvider(resolveHostname(urlLike));
     if (!provider) return await orig(input, init);
+
+    // ── Gemini: strip thought parts from history before sending ──────────────
+    if (provider.name === 'gemini') {
+      try {
+        const rawBody = init?.body ?? (typeof input === 'object' && !(input instanceof URL) ? input?.body : null);
+        if (typeof rawBody === 'string') {
+          const cleaned = stripGeminiThoughtParts(rawBody);
+          if (cleaned !== rawBody) {
+            // Rebuild init with sanitised body; keep all other fields intact.
+            init = { ...init, body: cleaned };
+          }
+        }
+      } catch (_) { /* never break the request on sanitiser error */ }
+    }
 
     try {
 
