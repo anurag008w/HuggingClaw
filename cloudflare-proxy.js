@@ -210,6 +210,19 @@ if (PROXY_URL) {
         // HTTP-level errors from the Worker (4xx/5xx) are NOT retried —
         // only hard network failures (rejected promise) trigger the fallback.
         const proxyWithFallback = (proxyPromise, directFallbackFn, debugInfo) => {
+          const runDirectWithRetry = (retriesLeft = 1) => {
+            return Promise.resolve()
+              .then(() => directFallbackFn())
+              .catch((directErr) => {
+                if (retriesLeft > 0) {
+                  if (DEBUG) {
+                    log(`[cloudflare-proxy] Direct fallback failed for ${hostname}: ${directErr?.message || directErr} — retrying direct (${retriesLeft})`);
+                  }
+                  return runDirectWithRetry(retriesLeft - 1);
+                }
+                throw directErr;
+              });
+          };
           return proxyPromise.then(r => {
             if (DEBUG && !r.ok) {
               log(`[cloudflare-proxy] Proxy HTTP ${r.status} for ${hostname}: ${r.statusText}`);
@@ -227,7 +240,14 @@ if (PROXY_URL) {
             // Direct fallback: bypasses proxy for this request so infrastructure
             // calls (update checks, plugin installs, etc.) still succeed even
             // when the Worker cannot reach the destination.
-            return directFallbackFn();
+            return runDirectWithRetry(1).catch((directErr) => {
+              const dCause = directErr?.cause;
+              const dCauseStr = dCause
+                ? ` | cause: ${dCause?.code || dCause?.message || String(dCause)}`
+                : "";
+              log(`[cloudflare-proxy] Direct fallback FAILED ${hostname}: ${directErr?.message}${dCauseStr}`);
+              throw directErr;
+            });
           });
         };
 
