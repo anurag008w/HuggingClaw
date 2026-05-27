@@ -50,6 +50,13 @@ const DEVDATA_SEPARATE_DATASET = DEVDATA_DATASET_NAME !== BACKUP_DATASET_NAME;
 const DEVDATA_ENABLED = JUPYTER_ENABLED && HF_BACKUP_ENABLED && DEVDATA_SEPARATE_DATASET && !/^(off|false|0|no)$/i.test((process.env.DEVDATA || "on").trim());
 const APP_BASE = normalizeBase(process.env.APP_BASE, "/app");
 const SYNC_STATUS_FILE = "/tmp/sync-status.json";
+const PROXY_TIMEOUT_MS = Math.max(5000, Number.parseInt(process.env.HC_PROXY_TIMEOUT_MS || "45000", 10) || 45000);
+const proxyAgent = new http.Agent({
+  keepAlive: true,
+  maxSockets: 128,
+  maxFreeSockets: 32,
+  timeout: PROXY_TIMEOUT_MS,
+});
 
 // ── Private Space redirect support ──
 // HF automatically sets SPACE_ID as "username/spacename" in every Space container.
@@ -624,7 +631,7 @@ function proxyHTTP(req, res, targetHost, targetPort, options = {}) {
 
   const canReplayRequest = req.method === "GET" || req.method === "HEAD";
   const proxyOnce = (path, retryOn404) => {
-    const pr = http.request({ hostname: targetHost, port: targetPort, path, method: req.method, headers }, (pres) => {
+    const pr = http.request({ hostname: targetHost, port: targetPort, path, method: req.method, headers, agent: proxyAgent }, (pres) => {
       if (canReplayRequest && retryOn404 && pres.statusCode === 404 && options.stripPrefix) {
         pres.resume();
         return proxyOnce(proxiedPath(url, { stripPrefix: options.stripPrefix }), false);
@@ -633,6 +640,7 @@ function proxyHTTP(req, res, targetHost, targetPort, options = {}) {
       pres.pipe(res);
       pres.on("error", () => res.end());
     });
+    pr.setTimeout(PROXY_TIMEOUT_MS, () => pr.destroy(new Error("proxy upstream timeout")));
     req.on("error", () => pr.destroy());
     res.on("error", () => pr.destroy());
     pr.on("error", () => sendServiceUnavailable(res));
@@ -834,10 +842,15 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { "Content-Type": "text/html" });
       return res.end(renderPrivateRedirect(HF_SPACE_URL));
     }
+    const bridgeGatewayAuth = isAuthorized(req);
     return proxyHTTP(req, res, GATEWAY_HOST, GATEWAY_PORT, {
       publicPrefix: APP_BASE,
       stripPrefix: APP_BASE,
       retryWithoutPrefixOn404: true,
+      // Do NOT force a second auth wall for OpenClaw UI.
+      // Only bridge dashboard auth -> gateway auth when request is already
+      // authorized at HuggingClaw layer; otherwise let OpenClaw handle its own auth.
+      extraHeaders: (bridgeGatewayAuth && GATEWAY_TOKEN) ? { authorization: `Bearer ${GATEWAY_TOKEN}` } : {},
     });
   }
 
@@ -858,6 +871,8 @@ const server = http.createServer(async (req, res) => {
 
 // ── WebSocket upgrade (JupyterLab kernels + terminals need this) ──
 server.on("upgrade", (req, socket, head) => {
+  socket.setNoDelay(true);
+  socket.setKeepAlive(true, 15000);
   const { pathname, search } = parseRequestUrl(req.url);
   const isJupyter = JUPYTER_ENABLED && (pathname === JUPYTER_BASE || pathname.startsWith(JUPYTER_BASE + "/"));
   const isApp = pathname === APP_BASE || pathname.startsWith(APP_BASE + "/");
@@ -870,18 +885,24 @@ server.on("upgrade", (req, socket, head) => {
     catch { socket.destroy(); }
     return;
   }
-
   const [targetHost, targetPort] = isJupyter ? [JUPYTER_HOST, JUPYTER_PORT] : [GATEWAY_HOST, GATEWAY_PORT];
   const publicPrefix = isJupyter ? JUPYTER_BASE : isApp ? APP_BASE : "";
   const targetPath = pathname + search;
+  const bridgeGatewayAuth = isAuthorized(req);
 
   const ps = net.connect(targetPort, targetHost, () => {
+    ps.setNoDelay(true);
+    ps.setKeepAlive(true, 15000);
     ps.write(`${req.method} ${targetPath} HTTP/${req.httpVersion}\r\n`);
     ps.write(`Host: ${targetHost}:${targetPort}\r\n`);
     ps.write(`X-Forwarded-For: ${req.socket.remoteAddress || ""}\r\n`);
     ps.write(`X-Forwarded-Host: ${req.headers.host || ""}\r\n`);
     ps.write("X-Forwarded-Proto: https\r\n");
     if (publicPrefix) ps.write(`X-Forwarded-Prefix: ${publicPrefix}\r\n`);
+    if (isApp && bridgeGatewayAuth && GATEWAY_TOKEN) {
+      // Mirror HTTP proxy auth header injection for /app websocket upgrades.
+      ps.write(`Authorization: Bearer ${GATEWAY_TOKEN}\r\n`);
+    }
     for (let i = 0; i < req.rawHeaders.length; i += 2) {
       const header = req.rawHeaders[i];
       const lower = header.toLowerCase();
