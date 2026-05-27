@@ -487,28 +487,28 @@ fi
 # This helps when provider auto-discovery does not populate models reliably.
 # Default catalogs (used when *_MODELS env is not set but key IS configured).
 # These let multi-key pool users see models without having to also set *_MODELS.
-_DEFAULT_ANTHROPIC_MODELS="anthropic/claude-opus-4-7,anthropic/claude-sonnet-4-6,anthropic/claude-haiku-4-5"
-_DEFAULT_OPENAI_MODELS="openai/gpt-5.4,openai/gpt-5.4-mini,openai/gpt-4o,openai/gpt-4o-mini"
-_DEFAULT_GEMINI_MODELS="google/gemini-3.5-flash,google/gemini-3.1-pro-preview,google/gemini-3.1-flash-lite,google/gemini-2.5-pro,google/gemini-2.5-flash"
-_DEFAULT_VERTEX_MODELS="google-vertex/gemini-3.5-flash,google-vertex/gemini-3.1-pro-preview,google-vertex/gemini-2.5-pro,google-vertex/gemini-2.5-flash"
-_DEFAULT_DEEPSEEK_MODELS="deepseek/deepseek-v4-pro,deepseek/deepseek-v4-flash,deepseek/deepseek-chat,deepseek/deepseek-reasoner"
-_DEFAULT_OPENROUTER_MODELS="openrouter/auto,openrouter/anthropic/claude-opus-4-7,openrouter/openai/gpt-5.4,openrouter/google/gemini-3.5-flash"
-_DEFAULT_GROQ_MODELS="groq/compound,groq/compound-mini,groq/openai/gpt-oss-120b,groq/moonshotai/kimi-k2-instruct-0905"
-_DEFAULT_MISTRAL_MODELS="mistral/mistral-large-latest,mistral/codestral-latest,mistral/mistral-small-latest"
-_DEFAULT_XAI_MODELS="xai/grok-4.3,xai/grok-3-mini"
-_DEFAULT_COHERE_MODELS="cohere/command-a-plus-05-2026,cohere/command-a-03-2025,cohere/command-r-plus-08-2024"
-_DEFAULT_TOGETHER_MODELS="together/moonshotai/Kimi-K2.6,together/deepseek-ai/DeepSeek-V4-Pro,together/meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
+_DEFAULT_ANTHROPIC_MODELS="anthropic/claude-opus-4-7,anthropic/claude-sonnet-4-6,anthropic/claude-haiku-4-5,anthropic/claude-opus-4-0,anthropic/claude-sonnet-4-0,anthropic/claude-3-7-sonnet-latest,anthropic/claude-3-5-haiku-latest"
+_DEFAULT_OPENAI_MODELS="openai/gpt-5.5,openai/gpt-5.4,openai/gpt-5.4-mini,openai/gpt-5.4-nano,openai/gpt-4.1,openai/gpt-4.1-mini,openai/o3,openai/gpt-5.4-chat-latest,openai/gpt-5.5-chat-latest"
+_DEFAULT_GEMINI_MODELS="google/gemini-3.5-flash,google/gemini-3.1-pro-preview,google/gemini-3.1-flash-lite,google/gemini-2.5-pro,google/gemini-2.5-flash,google/gemini-2.5-flash-lite,google/gemini-flash-latest,google/gemini-pro-latest,google/gemini-3.5-flash-latest,google/gemini-2.5-pro-latest"
+_DEFAULT_VERTEX_MODELS="google-vertex/gemini-3.5-flash,google-vertex/gemini-3.1-pro-preview,google-vertex/gemini-2.5-pro,google-vertex/gemini-2.5-flash,google-vertex/gemini-2.5-flash-lite,google-vertex/gemini-flash-latest,google-vertex/gemini-pro-latest,google-vertex/gemini-2.5-pro-latest"
+_DEFAULT_DEEPSEEK_MODELS="deepseek/deepseek-v4-pro,deepseek/deepseek-v4-flash,deepseek/deepseek-r1,deepseek/deepseek-r1-0528,deepseek/deepseek-chat,deepseek/deepseek-reasoner"
+_DEFAULT_OPENROUTER_MODELS="openrouter/auto,openrouter/anthropic/claude-opus-4-7,openrouter/openai/gpt-5.4,openrouter/google/gemini-3.5-flash,openrouter/deepseek/deepseek-v4-pro,openrouter/moonshotai/kimi-k2.6"
+_DEFAULT_GROQ_MODELS="groq/compound,groq/compound-mini,groq/openai/gpt-oss-120b,groq/moonshotai/kimi-k2-instruct-0905,groq/qwen/qwen3-32b"
+_DEFAULT_MISTRAL_MODELS="mistral/mistral-large-latest,mistral/mistral-medium-3.5,mistral/codestral-latest,mistral/mistral-small-latest,mistral/devstral-2,mistral/mistral-latest"
+_DEFAULT_XAI_MODELS="xai/grok-4.20,xai/grok-4.3,xai/grok-4.1,xai/grok-latest,xai/grok-4.3-latest,xai/grok-build-0.1"
+_DEFAULT_COHERE_MODELS="cohere/command-a,cohere/command-a-03-2025,cohere/command-a-reasoning-08-2025,cohere/command-r-plus-08-2024"
+_DEFAULT_TOGETHER_MODELS="together/moonshotai/Kimi-K2.6,together/deepseek-ai/DeepSeek-V4-Pro,together/Qwen/Qwen3-235B-A22B-Instruct-2507-tput,together/meta-llama/Llama-3.3-70B-Instruct-Turbo"
 _DEFAULT_CEREBRAS_MODELS="cerebras/zai-glm-4.7,cerebras/gpt-oss-120b,cerebras/deepseek-r1,cerebras/qwen3-32b"
-_DEFAULT_NVIDIA_MODELS="nvidia/nemotron-3-super-120b-a12b,nvidia/moonshotai/kimi-k2.6"
-_DEFAULT_KILOCODE_MODELS="kilocode/kilo/auto"
+_DEFAULT_NVIDIA_MODELS="nvidia/nemotron-3-super-120b-a12b,nvidia/nemotron-4-340b-instruct,nvidia/llama-3.1-nemotron-70b-instruct"
+_DEFAULT_KILOCODE_MODELS="kilocode/kilo/auto,kilocode/anthropic/claude-opus-4.7,kilocode/openai/gpt-5.4,kilocode/google/gemini-2.5-pro"
 _DEFAULT_MOONSHOT_MODELS="moonshot/kimi-k2.6,moonshot/kimi-k2.6-thinking,moonshot/kimi-k2-thinking"
-_DEFAULT_MINIMAX_MODELS="minimax/MiniMax-M2.7,minimax/MiniMax-M2.5"
+_DEFAULT_MINIMAX_MODELS="minimax/MiniMax-M2.7,minimax/minimax-m1.5"
 _DEFAULT_ZAI_MODELS="zai/glm-5,zai/glm-5-turbo,zai/glm-4.7,zai/glm-4.7-flash"
 _DEFAULT_MODELSTUDIO_MODELS="modelstudio/qwen3-max,modelstudio/qwen3-coder,modelstudio/qwen3-32b"
-_DEFAULT_VENICE_MODELS="venice/llama-3.3-70b"
-_DEFAULT_OPENCODE_MODELS="opencode/claude-opus-4-7,opencode/claude-sonnet-4-6"
-_DEFAULT_HUGGINGFACE_MODELS="huggingface/deepseek-ai/DeepSeek-R1,huggingface/moonshotai/Kimi-K2.6"
-_DEFAULT_GITHUB_COPILOT_MODELS="github-copilot/gpt-5,github-copilot/gpt-4.1,github-copilot/gpt-4o"
+_DEFAULT_VENICE_MODELS="venice/gpt-5,venice/llama-3.3-70b,venice/deepseek-r1"
+_DEFAULT_OPENCODE_MODELS="opencode/claude-opus-4-7,opencode/gpt-5.4,opencode-go/kimi-k2.6,opencode-go/qwen3-32b"
+_DEFAULT_HUGGINGFACE_MODELS="huggingface/deepseek-ai/DeepSeek-R1,huggingface/moonshotai/Kimi-K2.6,huggingface/Qwen/Qwen3-32B,huggingface/meta-llama/Llama-3.3-70B-Instruct"
+_DEFAULT_GITHUB_COPILOT_MODELS="github-copilot/gpt-5,github-copilot/gpt-4.1,github-copilot/gpt-4.1-mini"
 
 INJECTED_MODELS_PROVIDERS='{}'
 inject_provider_models_from_env() {
@@ -996,7 +996,7 @@ if [ -f "$EXISTING_CONFIG" ]; then
          .
        end
      | .channels = ((.channels // {}) * ($desired.channels // {}))
-     | .plugins.allow = (((.plugins.allow // []) + ($desired.plugins.allow // [])) | unique)
+     | .plugins.allow = (((.plugins.allow // []) + ($desired.plugins.allow // [])) | unique | map(select(startswith("clawhub:") | not)))
      | .plugins.deny = (((.plugins.deny // []) + ($desired.plugins.deny // [])) | unique)
      | .plugins.entries = ((.plugins.entries // {}) * ($desired.plugins.entries // {}))
      | del(.plugins.entries.acpx)
