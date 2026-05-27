@@ -413,7 +413,13 @@ function handleStatus(p, key, status) {
 
 function handleTransportError(p, key, err) {
   if (!p || !key) return;
-  const code = err?.code ? String(err.code).toUpperCase() : '';
+  // Node.js 18+ undici fetch throws TypeError: "fetch failed" where the actual
+  // network error code lives in err.cause.code (e.g. ECONNRESET, ETIMEDOUT,
+  // ENOTFOUND).  Fall back to err.cause.code so retryable network errors are
+  // correctly classified and transient blacklists are applied.
+  const code = (err?.code || err?.cause?.code)
+    ? String(err.code || err.cause?.code).toUpperCase()
+    : '';
   const name = String(err?.name || '');
   const retryable = classifyRetryableFailure(undefined, code) || name === 'AbortError';
   if (retryable) {
@@ -650,7 +656,12 @@ function patchFetch() {
           lastErr = err;
           try { handleTransportError(provider, usedKey, err); } catch (_) {}
           try { endInFlight(provider, usedKey); } catch (_) {}
-          const code = err?.code ? String(err.code).toUpperCase() : '';
+          // Node.js 18+ undici fetch: network errors are TypeError("fetch failed")
+          // where the real code (ECONNRESET, ETIMEDOUT, ENOTFOUND …) is in
+          // err.cause.code.  Check that first before falling back to err.code.
+          const code = (err?.code || err?.cause?.code)
+            ? String(err.code || err.cause?.code).toUpperCase()
+            : '';
           const isAbort = String(err?.name || '') === 'AbortError';
           const shouldRetry = attempt < maxAttempts && (classifyRetryableFailure(undefined, code) || isAbort);
           if (shouldRetry) {
@@ -714,6 +725,56 @@ function patchHttpModule(mod) {
     } catch (err) { warn('[key-rotator] http patch error:', err?.message || err); }
 
     const req = orig.apply(mod, args);
+
+    // ── Gemini: strip thought/thought_signature parts from history ────────────
+    // patchFetch handles globalThis.fetch callers.  SDKs that use node:http
+    // directly (e.g. older Google AI SDK versions) bypass patchFetch, so the
+    // same sanitisation must happen here.  We intercept req.write / req.end,
+    // accumulate the body chunks, and rewrite the body before the first flush
+    // if any thought parts are present.  This avoids the 400 error:
+    //   "Invalid value at 'contents[N].parts[M].thought_signature' (TYPE_BYTES)"
+    if (usedProvider && usedProvider.name === 'gemini') {
+      try {
+        const _write = req.write.bind(req);
+        const _end   = req.end.bind(req);
+        const chunks = [];
+        let bodyIntercepted = false;
+
+        // Accumulate chunks written before end() is called.
+        req.write = function interceptWrite(chunk, encoding, callback) {
+          try {
+            if (!bodyIntercepted) {
+              chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, encoding || 'utf8'));
+              if (typeof encoding === 'function') { encoding(); }
+              else if (typeof callback === 'function') { callback(); }
+              return true;
+            }
+          } catch (_) { /* fall through to original */ }
+          return _write(chunk, encoding, callback);
+        };
+
+        req.end = function interceptEnd(chunk, encoding, callback) {
+          try {
+            if (!bodyIntercepted) {
+              bodyIntercepted = true;
+              if (chunk != null) {
+                chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, encoding || 'utf8'));
+              }
+              const fullBody = Buffer.concat(chunks).toString('utf8');
+              const cleaned = stripGeminiThoughtParts(fullBody);
+              if (cleaned !== fullBody) {
+                debug('[key-rotator] gemini (http): stripped thought/thought_signature parts from history');
+                return _end(cleaned, 'utf8', typeof encoding === 'function' ? encoding : callback);
+              }
+              // No change — replay chunks as-is.
+              for (const c of chunks) _write(c);
+              return _end(typeof chunk === 'undefined' || chunk === null ? undefined : undefined, encoding, callback);
+            }
+          } catch (_) { /* fall through to original on any error */ }
+          return _end(chunk, encoding, callback);
+        };
+      } catch (_) { /* never break the request */ }
+    }
 
     // Intercept response to track 429/success
     if (usedProvider && usedKey) {
