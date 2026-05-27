@@ -27,12 +27,11 @@ const MODEL_CATALOGS = {
       "o4-mini"
     ],
     "Gemini": [
+      "gemini-3.5-flash",
       "gemini-3.1-pro-preview",
-      "gemini-3.1-flash-preview",
-      "gemini-3-flash-preview",
+      "gemini-3.1-flash-lite",
       "gemini-2.5-pro",
       "gemini-2.5-flash",
-      "gemini-2.0-flash",
       "gemini-flash-latest",
       "gemini-pro-latest"
     ],
@@ -48,18 +47,15 @@ const MODEL_CATALOGS = {
     "xAI": [
       "grok-4.3",
       "grok-4.1",
-      "grok-4",
-      "grok-3"
+      "grok-4"
     ],
     "Groq": [
       "groq/compound",
       "groq/compound-mini",
-      "groq/llama-3.1-8b-instant",
-      "groq/llama-3.1-70b-versatile",
-      "groq/llama-3.3-70b-versatile",
-      "meta-llama/llama-4-scout-17b-16e-instruct",
-      "openai/gpt-oss-20b",
       "openai/gpt-oss-120b",
+      "openai/gpt-oss-20b",
+      "moonshotai/kimi-k2-instruct-0905",
+      "groq/llama-3.3-70b-versatile",
       "qwen/qwen3-32b",
       "groq/mixtral-8x7b-32768"
     ],
@@ -98,12 +94,13 @@ const MODEL_CATALOGS = {
       "google/gemini-2.5-pro",
       "deepseek/deepseek-v3.2",
       "deepseek/deepseek-r1",
-      "moonshotai/kimi-k2.5",
+      "moonshotai/kimi-k2.6",
       "qwen/qwen3-32b",
       "meta-llama/llama-3.3-70b-instruct"
     ],
     "Together": [
-      "moonshotai/Kimi-K2.5",
+      "moonshotai/Kimi-K2.6",
+      "deepseek-ai/DeepSeek-V4-Pro",
       "deepseek-ai/DeepSeek-R1",
       "Qwen/Qwen3-235B-A22B-Instruct-2507-tput",
       "zai-org/GLM-5.1",
@@ -112,19 +109,18 @@ const MODEL_CATALOGS = {
       "meta-llama/Llama-3.3-70B-Instruct-Turbo",
       "openai/gpt-oss-20b",
       "openai/gpt-oss-120b",
-      "mistralai/Mistral-Small-3.2-24B-Instruct-2506",
-      "moonshotai/Kimi-K2.5-Instruct"
+      "mistralai/Mistral-Small-3.2-24B-Instruct-2506"
     ],
     "OpenCode": [
-      "opencode/claude-opus-4-6",
+      "opencode/claude-opus-4-7",
       "opencode/gpt-5.4",
-      "opencode-go/kimi-k2.5",
+      "opencode-go/kimi-k2.6",
       "opencode-go/qwen3-32b"
     ],
     "Cerebras": [
       "cerebras/zai-glm-4.7",
+      "cerebras/gpt-oss-120b",
       "cerebras/deepseek-r1",
-      "cerebras/llama-4-scout-17b-16e-instruct",
       "cerebras/qwen3-32b"
     ],
     "NVIDIA": [
@@ -133,7 +129,7 @@ const MODEL_CATALOGS = {
       "nvidia/llama-3.1-nemotron-70b-instruct"
     ],
     "KiloCode": [
-      "kilocode/anthropic/claude-opus-4.6",
+      "kilocode/anthropic/claude-opus-4.7",
       "kilocode/anthropic/claude-sonnet-4.6",
       "kilocode/openai/gpt-5.4",
       "kilocode/google/gemini-2.5-pro"
@@ -144,9 +140,9 @@ const MODEL_CATALOGS = {
       "zai-org/GLM-4.5"
     ],
     "Moonshot": [
-      "moonshot/kimi-k2.5",
-      "moonshot/kimi-k2.5-thinking",
-      "moonshot/kimi-k2.5-coder"
+      "moonshot/kimi-k2.6",
+      "moonshot/kimi-k2.6-thinking",
+      "moonshot/kimi-k2-thinking"
     ],
     "MiniMax": [
       "minimax/minimax-m2.7",
@@ -184,7 +180,7 @@ const MODEL_CATALOGS = {
       "Qwen/Qwen3-32B",
       "google/gemma-4-31B-it",
       "deepseek-ai/DeepSeek-V3.2",
-      "moonshotai/Kimi-K2.5"
+      "moonshotai/Kimi-K2.6"
     ],
     "Venice": [
       "venice/gpt-5",
@@ -212,8 +208,8 @@ const MODEL_CATALOGS = {
       "zai/glm-4.7-flash"
     ],
     "Kimi": [
-      "moonshot/kimi-k2.5",
-      "moonshot/kimi-k2.5-thinking"
+      "moonshot/kimi-k2.6",
+      "moonshot/kimi-k2.6-thinking"
     ],
     "HuggingFace": [
       "huggingface/deepseek-ai/DeepSeek-R1",
@@ -244,19 +240,17 @@ const MODEL_CATALOGS = {
     "anthropic/claude-haiku-4-5"
   ],
   "GEMINI_MODELS": [
+    "google/gemini-3.5-flash",
     "google/gemini-3.1-pro-preview",
-    "google/gemini-3.1-flash-preview",
-    "google/gemini-3-flash-preview",
+    "google/gemini-3.1-flash-lite",
     "google/gemini-2.5-pro",
-    "google/gemini-2.5-flash",
-    "google/gemini-2.0-flash"
+    "google/gemini-2.5-flash"
   ],
   "VERTEX_MODELS": [
+    "google-vertex/gemini-3.5-flash",
+    "google-vertex/gemini-3.1-pro-preview",
     "google-vertex/gemini-2.5-pro",
-    "google-vertex/gemini-2.5-flash",
-    "google-vertex/gemini-2.0-flash",
-    "google-vertex/gemini-1.5-pro",
-    "google-vertex/gemini-1.5-flash"
+    "google-vertex/gemini-2.5-flash"
   ],
   "DEEPSEEK_MODELS": [
     "deepseek/deepseek-v4-pro",
@@ -281,18 +275,16 @@ const MODEL_CATALOGS = {
     "openrouter/google/gemini-2.5-pro",
     "openrouter/deepseek/deepseek-v3.2",
     "openrouter/deepseek/deepseek-r1",
-    "openrouter/moonshotai/kimi-k2.5",
+    "openrouter/moonshotai/kimi-k2.6",
     "openrouter/qwen/qwen3-32b"
   ],
   "GROQ_MODELS": [
     "groq/compound",
     "groq/compound-mini",
-    "groq/llama-3.1-8b-instant",
-    "groq/llama-3.1-70b-versatile",
-    "groq/llama-3.3-70b-versatile",
-    "openai/gpt-oss-20b",
     "openai/gpt-oss-120b",
-    "meta-llama/llama-4-scout-17b-16e-instruct",
+    "openai/gpt-oss-20b",
+    "moonshotai/kimi-k2-instruct-0905",
+    "groq/llama-3.3-70b-versatile",
     "qwen/qwen3-32b",
     "groq/mixtral-8x7b-32768"
   ],
@@ -310,8 +302,7 @@ const MODEL_CATALOGS = {
   "XAI_MODELS": [
     "grok-4.3",
     "grok-4.1",
-    "grok-4",
-    "grok-3"
+    "grok-4"
   ],
   "COHERE_MODELS": [
     "command-a",
@@ -324,7 +315,8 @@ const MODEL_CATALOGS = {
     "command-r-plus-08-2024"
   ],
   "TOGETHER_MODELS": [
-    "moonshotai/Kimi-K2.5",
+    "moonshotai/Kimi-K2.6",
+    "deepseek-ai/DeepSeek-V4-Pro",
     "deepseek-ai/DeepSeek-R1",
     "Qwen/Qwen3-235B-A22B-Instruct-2507-tput",
     "zai-org/GLM-5.1",
@@ -333,13 +325,12 @@ const MODEL_CATALOGS = {
     "meta-llama/Llama-3.3-70B-Instruct-Turbo",
     "openai/gpt-oss-20b",
     "openai/gpt-oss-120b",
-    "mistralai/Mistral-Small-3.2-24B-Instruct-2506",
-    "moonshotai/Kimi-K2.5-Instruct"
+    "mistralai/Mistral-Small-3.2-24B-Instruct-2506"
   ],
   "CEREBRAS_MODELS": [
     "cerebras/zai-glm-4.7",
+    "cerebras/gpt-oss-120b",
     "cerebras/deepseek-r1",
-    "cerebras/llama-4-scout-17b-16e-instruct",
     "cerebras/qwen3-32b"
   ],
   "NVIDIA_MODELS": [
@@ -348,15 +339,15 @@ const MODEL_CATALOGS = {
     "nvidia/llama-3.1-nemotron-70b-instruct"
   ],
   "KILOCODE_MODELS": [
-    "kilocode/anthropic/claude-opus-4.6",
+    "kilocode/anthropic/claude-opus-4.7",
     "kilocode/anthropic/claude-sonnet-4.6",
     "kilocode/openai/gpt-5.4",
     "kilocode/google/gemini-2.5-pro"
   ],
   "OPENCODE_MODELS": [
-    "opencode/claude-opus-4-6",
+    "opencode/claude-opus-4-7",
     "opencode/gpt-5.4",
-    "opencode-go/kimi-k2.5",
+    "opencode-go/kimi-k2.6",
     "opencode-go/qwen3-32b"
   ],
   "ZAI_MODELS": [
@@ -366,9 +357,9 @@ const MODEL_CATALOGS = {
     "zai/glm-4.7-flash"
   ],
   "MOONSHOT_MODELS": [
-    "moonshot/kimi-k2.5",
-    "moonshot/kimi-k2.5-thinking",
-    "moonshot/kimi-k2.5-coder"
+    "moonshot/kimi-k2.6",
+    "moonshot/kimi-k2.6-thinking",
+    "moonshot/kimi-k2-thinking"
   ],
   "MINIMAX_MODELS": [
     "minimax/minimax-m2.7",
@@ -402,9 +393,9 @@ const MODEL_CATALOGS = {
     "modelstudio/qwen3-32b"
   ],
   "KIMI_MODELS": [
-    "moonshot/kimi-k2.5",
-    "moonshot/kimi-k2.5-thinking",
-    "moonshot/kimi-k2.5-coder"
+    "moonshot/kimi-k2.6",
+    "moonshot/kimi-k2.6-thinking",
+    "moonshot/kimi-k2-thinking"
   ],
   "HUGGINGFACE_MODELS": [
     "huggingface/deepseek-ai/DeepSeek-R1",
@@ -449,7 +440,7 @@ const FIELDS = [
     "k": "LLM_FALLBACK_MODELS",
     "lbl": "Fallback models (comma-separated, tried in order if primary fails)",
     "type": "text",
-    "ph": "anthropic/claude-sonnet-4-6,openai/gpt-4o,google/gemini-2.5-flash",
+    "ph": "anthropic/claude-sonnet-4-6,openai/gpt-5.4,google/gemini-3.5-flash",
     "tag": "advanced",
     "help": "Each fallback provider needs its own API key set (e.g. ANTHROPIC_API_KEY, OPENAI_API_KEY). OpenClaw will try these in order on rate-limit, auth failure, or provider outage."
   },
@@ -480,13 +471,14 @@ const FIELDS = [
     "tag": "build"
   },
 {
-    "g": "Plugins",
+    "g": "Core",
     "icon": "⚡",
     "k": "LLM_API_KEY_FALLBACK_ENABLED",
-    "lbl": "Allow global LLM_API_KEY fallback",
+    "lbl": "Allow global LLM_API_KEY fallback for key rotation",
     "type": "toggle",
     "ph": "true",
-    "tag": "advanced"
+    "tag": "advanced",
+    "help": "When enabled, the key rotator can fall back to LLM_API_KEY for providers that don't have their own dedicated key configured."
   },
 {
     "g": "Plugins",
@@ -687,9 +679,10 @@ const FIELDS = [
     "g": "Startup",
     "icon": "⚡",
     "k": "HUGGINGCLAW_RUN",
-    "lbl": "Startup command (one-liner)",
+    "lbl": "Startup script (bash — inline, multi-line, or base64: prefix)",
     "type": "textarea",
-    "tag": "optional"
+    "tag": "optional",
+    "help": "Runs on every boot before the gateway starts. Supports a single command, a full multi-line bash script, or a base64-encoded script prefixed with 'base64:'. For complex logic prefer HUGGINGCLAW_STARTUP_SCRIPT."
   },
 {
     "g": "Startup",
@@ -721,7 +714,9 @@ const FIELDS = [
     "k": "HUGGINGCLAW_APT_PACKAGES",
     "lbl": "APT packages to install",
     "type": "textarea",
-    "tag": "optional"
+    "ph": "curl wget git",
+    "tag": "optional",
+    "help": "Packages to apt-get install on every boot. Accepts space-separated, comma-separated, or one package per line."
   },
 {
     "g": "Startup",
@@ -729,7 +724,9 @@ const FIELDS = [
     "k": "HUGGINGCLAW_PIP_PACKAGES",
     "lbl": "Pip packages to install",
     "type": "textarea",
-    "tag": "optional"
+    "ph": "requests pandas numpy",
+    "tag": "optional",
+    "help": "Python packages to pip install on every boot. Accepts space-separated, comma-separated, or one package per line."
   },
 {
     "g": "Startup",
@@ -737,7 +734,9 @@ const FIELDS = [
     "k": "HUGGINGCLAW_NPM_PACKAGES",
     "lbl": "NPM packages to install",
     "type": "textarea",
-    "tag": "optional"
+    "ph": "typescript ts-node",
+    "tag": "optional",
+    "help": "npm packages to install globally on every boot. Accepts space-separated, comma-separated, or one package per line."
   },
 {
     "g": "Startup",
@@ -745,7 +744,9 @@ const FIELDS = [
     "k": "HUGGINGCLAW_OPENCLAW_PLUGINS",
     "lbl": "OpenClaw plugins to load",
     "type": "textarea",
-    "tag": "optional"
+    "ph": "@openclaw/myplugin another-plugin",
+    "tag": "optional",
+    "help": "OpenClaw plugins to install on every boot. Accepts space-separated, comma-separated, or one plugin per line."
   },
 {
     "g": "Network",
