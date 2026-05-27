@@ -37,8 +37,7 @@ let isWaiting = false;
 let hasShownWaitMessage = false;
 let last515At = 0;
 let lastConnectedAt = 0;
-let shouldStop = false;
-let _checkInterval = null; // stored so we can clear it on clean exit
+let _checkInterval = null;
 
 function extractErrorMessage(msg) {
   if (!msg || typeof msg !== "object") return "Unknown error";
@@ -178,7 +177,6 @@ async function callRpc(ws, method, params, timeoutMs) {
 
 
 async function checkStatus() {
-  if (shouldStop) return;
   if (isWaiting) return;
   if (lastConnectedAt && Date.now() - lastConnectedAt < SUCCESS_COOLDOWN_MS) return;
 
