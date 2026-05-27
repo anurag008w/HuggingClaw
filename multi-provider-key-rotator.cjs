@@ -177,6 +177,12 @@ if (fallbackCount > 0)
 /**
  * Is this key currently sitting out?
  * Also auto-clears expired blacklists so the key re-enters the pool silently.
+ * Strike decay: each time a blacklist period expires naturally (served its
+ * full cooldown without a success), we reduce strikes by 1.  This prevents a
+ * key from being permanently suspended just because it was rate-limited 3 times
+ * over a long period (e.g. 3 × 429s spread across hours on a free-tier quota).
+ * A key that truly has quota exhausted will simply accumulate strikes again on
+ * the next requests and settle back into long suspension.
  */
 function isActive(p, key) {
   const ks = p.keyState.get(key);
@@ -184,7 +190,11 @@ function isActive(p, key) {
   if (ks.blacklistedUntil === 0) return true;    // not blacklisted
   if (Date.now() >= ks.blacklistedUntil) {
     ks.blacklistedUntil = 0;                     // expired → back in pool
-    debug(`[key-rotator] ${p.name}: ...${key.slice(-6)} back in pool`);
+    // Decay strikes by 1 on natural expiry so a key that served its full
+    // cooldown gets a partial fresh start.  It still needs a success to fully
+    // reset, but this prevents instant perm-suspension on the very next 429.
+    if (ks.strikes > 0) ks.strikes -= 1;
+    debug(`[key-rotator] ${p.name}: ...${key.slice(-6)} back in pool (strikes now ${ks.strikes})`);
     return true;
   }
   return false;
@@ -221,7 +231,11 @@ function recordFailure(p, key) {
     debug(`[key-rotator] ${p.name}: ...${key.slice(-6)} strike ${ks.strikes}/${MAX_STRIKES} — backoff ${secs}s`);
   }
 
-  ks.blacklistedUntil = Date.now() + cooldown;
+  // Use Math.max so a longer existing suspension is never shortened.
+  // This matters when a last-resort key (already perm-suspended) gets another
+  // 429 — without Math.max the timer would reset to a fresh 16 h window,
+  // potentially looping forever and keeping all keys in perpetual suspension.
+  ks.blacklistedUntil = Math.max(ks.blacklistedUntil || 0, Date.now() + cooldown);
 }
 
 /**
@@ -338,12 +352,17 @@ function nextKey(p) {
   }
 
   warn(`[key-rotator] ${p.name}: all ${total} key(s) suspended — using soonest-recovering key`);
-  let best = p.keys[0], bestExpiry = Infinity;
-  for (const k of p.keys) {
-    const exp = p.keyState.get(k)?.blacklistedUntil ?? 0;
-    if (exp < bestExpiry) { best = k; bestExpiry = exp; }
+  // FIX: scan from p.idx (same round-robin start as normal path) so ties in
+  // expiry are broken by position — every key gets equal turns even when all
+  // are suspended with the same blacklistedUntil timestamp.
+  let bestIdx = -1, bestExpiry = Infinity;
+  for (let offset = 0; offset < total; offset++) {
+    const i = (p.idx + offset) % total;
+    const exp = p.keyState.get(p.keys[i])?.blacklistedUntil ?? 0;
+    if (exp < bestExpiry) { bestIdx = i; bestExpiry = exp; }
   }
-  return best;
+  p.idx = (bestIdx + 1) % total; // advance for next call
+  return p.keys[bestIdx];
 }
 
 // ─── Auth header injection ────────────────────────────────────────────────────

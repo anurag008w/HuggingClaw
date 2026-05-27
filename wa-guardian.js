@@ -123,7 +123,9 @@ async function createConnection() {
     });
 
     ws.on("error", (e) => { if (!resolved) reject(e); });
-    setTimeout(() => { if (!resolved) { ws.close(); reject(new Error("Timeout")); } }, 10000);
+    // FIX: set resolved=true before ws.close() so the error listener above does not
+    // fire a second reject when close() triggers a WebSocket error event (double-reject).
+    setTimeout(() => { if (!resolved) { resolved = true; ws.close(); reject(new Error("Timeout")); } }, 10000);
   });
 }
 
