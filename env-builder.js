@@ -1086,24 +1086,6 @@ const FIELDS = [
     "tag": "advanced"
   },
 {
-    "g": "Core",
-    "icon": "⚡",
-    "k": "OPENCLAW_RUNTIME_VERSION",
-    "lbl": "Pin runtime version",
-    "type": "text",
-    "ph": "latest",
-    "tag": "advanced"
-  },
-{
-    "g": "Core",
-    "icon": "⚡",
-    "k": "OPENCLAW_DISPLAY_VERSION",
-    "lbl": "Display version label",
-    "type": "text",
-    "ph": "",
-    "tag": "optional"
-  },
-{
     "g": "Integrations",
     "icon": "🔌",
     "k": "CLOUDFLARE_ACCOUNT_ID",

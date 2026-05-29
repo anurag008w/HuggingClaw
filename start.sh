@@ -519,12 +519,14 @@ CONFIG_JSON=$(jq \
   --arg consoleLevel "$OPENCLAW_CONSOLE_LOG_LEVEL" \
   --arg consoleStyle "$OPENCLAW_CONSOLE_LOG_STYLE" \
   --arg port "$GATEWAY_PORT" \
+  --arg appBase "$APP_BASE" \
   '.gateway.auth.token = $token
    | .agents.defaults.model = (if ($fallbacks | length) > 0
        then {"primary": $model, "fallbacks": $fallbacks}
        else $model
      end)
    | .gateway.port = ($port | tonumber)
+   | .gateway.controlUi.basePath = $appBase
    | .logging.level = $fileLevel
    | .logging.consoleLevel = $consoleLevel
    | .logging.consoleStyle = $consoleStyle' <<<"$CONFIG_JSON")
@@ -1013,7 +1015,10 @@ if [ -n "${ALLOWED_ORIGINS:-}" ]; then
 fi
 
 resolve_telegram_api_root() {
-  local candidate="$(trim_var "${CLOUDFLARE_PROXY_URL:-}")"
+  local candidate="$(trim_var "${TELEGRAM_API_ROOT:-}")"
+  if [ -z "$candidate" ]; then
+    candidate="$(trim_var "${CLOUDFLARE_PROXY_URL:-}")"
+  fi
   if [ -n "$candidate" ]; then
     case "$candidate" in
       http://*|https://*)
@@ -1021,7 +1026,7 @@ resolve_telegram_api_root() {
         return 0
         ;;
       *)
-        echo "Warning: invalid CLOUDFLARE_PROXY_URL '$candidate' (must start with http:// or https://); falling back to direct Telegram API." >&2
+        echo "Warning: invalid Telegram API/proxy root '$candidate' (must start with http:// or https://); falling back to direct Telegram API." >&2
         ;;
     esac
   fi
@@ -1150,6 +1155,7 @@ if [ -f "$EXISTING_CONFIG" ]; then
          else $model
        end)
      | .gateway.port = ($desired.gateway.port // .gateway.port)
+     | .gateway.controlUi.basePath = ($desired.gateway.controlUi.basePath // .gateway.controlUi.basePath)
      | .gateway.controlUi.dangerouslyDisableDeviceAuth = true
      | (if ($desired.gateway.controlUi.allowedOrigins // [] | length) > 0 then
             .gateway.controlUi.allowedOrigins = (
@@ -1320,9 +1326,9 @@ export HUGGINGCLAW_JUPYTER_ENABLED="$RUNTIME_JUPYTER_ENABLED"
 
 if [ -n "${SPACE_HOST:-}" ]; then
   if [ "$RUNTIME_JUPYTER_ENABLED" = "true" ]; then
-    echo "Routes    : /app/ (Control UI), /terminal/ (JupyterLab)"
+    echo "Routes    : ${APP_BASE}/ (Control UI), ${JUPYTER_BASE}/ (JupyterLab)"
   else
-    echo "Routes    : /app/ (Control UI)"
+    echo "Routes    : ${APP_BASE}/ (Control UI)"
   fi
 fi
 echo ""
@@ -1476,10 +1482,10 @@ start_jupyter_once() {
   export PYTHONPATH=""
   python3 -m jupyterlab \
       --ip 127.0.0.1 \
-      --port 8888 \
+      --port "$JUPYTER_PORT" \
       --no-browser \
       --IdentityProvider.token="$JUPYTER_TOKEN" \
-      --ServerApp.base_url=/terminal/ \
+      --ServerApp.base_url="${JUPYTER_BASE}/" \
       --ContentsManager.allow_hidden=True \
       --ServerApp.terminals_enabled=True \
       --ServerApp.terminado_settings='{"shell_command":["/bin/bash","-i"]}' \
