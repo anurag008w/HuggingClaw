@@ -2107,14 +2107,26 @@ if [ -s "$STARTUP_FILE" ]; then
 fi
 whatsapp_plugin_runtime_ok() {
   local ext_dir="/home/node/.openclaw/extensions/whatsapp"
-  [ -f "$ext_dir/dist/setup-entry.js" ] && [ -f "$ext_dir/dist/index.js" ]
+  if [ -f "$ext_dir/dist/setup-entry.js" ] && [ -f "$ext_dir/dist/index.js" ]; then
+    return 0
+  fi
+
+  # Prefer OpenClaw's own runtime inspector over hard-coded paths; plugin
+  # layout can differ across stable/beta releases. If inspect can load the
+  # WhatsApp plugin, do not attempt any install.
+  if command -v openclaw >/dev/null 2>&1; then
+    openclaw plugins inspect whatsapp --runtime --json \
+      >/tmp/openclaw-whatsapp-plugin-inspect.log 2>&1 && return 0
+  fi
+
+  return 1
 }
 
 install_whatsapp_plugin_runtime() {
   [ "$WHATSAPP_ENABLED_NORMALIZED" = "true" ] || return 0
   whatsapp_plugin_runtime_ok && return 0
 
-  echo "WhatsApp is enabled but the external @openclaw/whatsapp runtime is missing; installing it before gateway start..."
+  echo "WhatsApp is enabled but OpenClaw reports the external @openclaw/whatsapp runtime is missing/broken; checking the official install path before gateway start..."
 
   local config="/home/node/.openclaw/openclaw.json"
   local install_config=""
@@ -2133,35 +2145,43 @@ install_whatsapp_plugin_runtime() {
     fi
   fi
 
-  local version_spec=""
-  case "${OPENCLAW_RUNTIME_VERSION:-}" in
-    ""|latest|beta|dev|unknown) version_spec="" ;;
-    *) version_spec="@${OPENCLAW_RUNTIME_VERSION}" ;;
-  esac
-
   local install_env=()
   if [ -n "$install_config" ] && [ -f "$install_config" ]; then
     install_env=(env OPENCLAW_CONFIG_PATH="$install_config")
   fi
 
-  # OpenClaw docs say stable/beta installs the WhatsApp runtime as an external
-  # plugin, preferring ClawHub and falling back to npm. Do that proactively so
-  # a generated channels.whatsapp config does not reference an absent plugin.
-  "${install_env[@]}" openclaw plugins install "clawhub:@openclaw/whatsapp${version_spec}" >> /tmp/openclaw-whatsapp-plugin-install.log 2>&1 \
-    || "${install_env[@]}" openclaw plugins install "@openclaw/whatsapp${version_spec}" >> /tmp/openclaw-whatsapp-plugin-install.log 2>&1 \
-    || {
-      rm -f "$install_config" 2>/dev/null || true
-      echo "Warning: failed to install @openclaw/whatsapp; see /tmp/openclaw-whatsapp-plugin-install.log. WhatsApp will stay configured but disabled for this boot so the saved channel settings are preserved." >&2
-      return 1
-    }
+  # Official WhatsApp docs: stable/beta uses the external @openclaw/whatsapp
+  # plugin, preferring ClawHub and using the bare npm package only as fallback.
+  # Do not pin versions here; OpenClaw's plugin installer/update logic tracks
+  # the correct release/beta tag for the active OpenClaw channel.
+  local installed_ok=false
+  if "${install_env[@]}" openclaw plugins install "clawhub:@openclaw/whatsapp" >> /tmp/openclaw-whatsapp-plugin-install.log 2>&1; then
+    installed_ok=true
+  elif "${install_env[@]}" openclaw plugins install "@openclaw/whatsapp" >> /tmp/openclaw-whatsapp-plugin-install.log 2>&1; then
+    installed_ok=true
+  else
+    # If an install record already exists but its payload is broken/missing,
+    # OpenClaw's documented path is update/repair rather than blind reinstall.
+    echo "WhatsApp plugin install did not complete; trying OpenClaw plugin update for an existing broken install..." >> /tmp/openclaw-whatsapp-plugin-install.log
+    if "${install_env[@]}" openclaw plugins update whatsapp >> /tmp/openclaw-whatsapp-plugin-install.log 2>&1; then
+      installed_ok=true
+    elif "${install_env[@]}" openclaw plugins update @openclaw/whatsapp >> /tmp/openclaw-whatsapp-plugin-install.log 2>&1; then
+      installed_ok=true
+    fi
+  fi
+
+  if [ "$installed_ok" != "true" ]; then
+    rm -f "$install_config" 2>/dev/null || true
+    echo "Warning: failed to install/update @openclaw/whatsapp; see /tmp/openclaw-whatsapp-plugin-install.log. WhatsApp will stay configured but disabled for this boot so the saved channel settings are preserved." >&2
+    return 1
+  fi
 
   if whatsapp_plugin_runtime_ok; then
     if [ -f "$config" ]; then
       if [ -n "$install_config" ] && [ -f "$install_config" ]; then
         jq --slurpfile installed "$install_config" '
           .plugins.installs = ((.plugins.installs // {}) + ($installed[0].plugins.installs // {}))
-          | .plugins.entries = ((.plugins.entries // {}) + ($installed[0].plugins.entries // {}))
-          | .plugins.entries.whatsapp.enabled = true
+          | .plugins.entries.whatsapp = (($installed[0].plugins.entries.whatsapp // {}) + (.plugins.entries.whatsapp // {}) + {"enabled": true})
           | .channels.whatsapp = (.channels.whatsapp // {"dmPolicy": "pairing"})
           | .plugins.allow = (((.plugins.allow // []) + ["whatsapp"]) | unique)
         ' "$config" > "$config.tmp" 2>/dev/null && mv "$config.tmp" "$config" || rm -f "$config.tmp"
@@ -2174,12 +2194,12 @@ install_whatsapp_plugin_runtime() {
       fi
     fi
     rm -f "$install_config" 2>/dev/null || true
-    echo "WhatsApp plugin runtime installed."
+    echo "WhatsApp plugin runtime installed/verified."
     return 0
   fi
 
   rm -f "$install_config" 2>/dev/null || true
-  echo "Warning: @openclaw/whatsapp install completed but runtime files are still missing; WhatsApp will stay configured but disabled for this boot so the saved channel settings are preserved." >&2
+  echo "Warning: @openclaw/whatsapp install/update completed but OpenClaw still reports the runtime as unavailable; WhatsApp will stay configured but disabled for this boot so the saved channel settings are preserved." >&2
   return 1
 }
 repair_broken_whatsapp_plugin_entry() {
