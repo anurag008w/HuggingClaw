@@ -525,16 +525,6 @@ const FIELDS = [
 {
     "g": "Core",
     "icon": "⚡",
-    "k": "OPENCLAW_RUNTIME_UPGRADE",
-    "lbl": "Upgrade OpenClaw at startup",
-    "type": "toggle",
-    "ph": "true",
-    "tag": "advanced",
-    "help": "Keep enabled when OPENCLAW_VERSION is latest, beta, or a pinned release from the env bundle. Disable only if you want to force the image-bundled OpenClaw version."
-  },
-{
-    "g": "Core",
-    "icon": "⚡",
     "k": "LLM_API_KEY_FALLBACK_ENABLED",
     "lbl": "Allow global LLM_API_KEY fallback for key rotation",
     "type": "toggle",
@@ -923,42 +913,10 @@ const FIELDS = [
     "options": [
       "auto",
       "enabled",
-      "remote",
       "disabled"
     ],
     "ph": "auto",
-    "tag": "feature",
-    "help": "On Hugging Face Spaces this defaults to disabled. Set to enabled for local managed Chromium, or remote to use a remote CDP browser (recommended when free-tier local Chromium is unstable)."
-  },
-{
-    "g": "Plugins",
-    "icon": "🌐",
-    "k": "OPENCLAW_BROWSER_CDP_URL",
-    "lbl": "Remote browser CDP URL",
-    "type": "password",
-    "ph": "wss://production-sfo.browserless.io?token=...",
-    "tag": "feature",
-    "help": "Optional remote Chromium CDP endpoint. Set BROWSER_PLUGIN_MODE=remote to attach OpenClaw to this browser instead of launching local Chromium; useful for Hugging Face free-tier browser issues."
-  },
-{
-    "g": "Plugins",
-    "icon": "🌐",
-    "k": "OPENCLAW_BROWSER_PROFILE",
-    "lbl": "Browser profile name",
-    "type": "text",
-    "ph": "openclaw",
-    "tag": "advanced",
-    "help": "Profile name used for local or remote browser control. Leave as openclaw unless you intentionally maintain multiple OpenClaw browser profiles."
-  },
-{
-    "g": "Plugins",
-    "icon": "🌐",
-    "k": "OPENCLAW_BROWSER_ATTACH_ONLY",
-    "lbl": "Remote CDP attach-only mode",
-    "type": "toggle",
-    "ph": "auto",
-    "tag": "advanced",
-    "help": "For remote CDP, auto enables attachOnly for localhost/127.0.0.1 CDP endpoints so OpenClaw does not try to manage that browser process."
+    "tag": "feature"
   },
 {
     "g": "Plugins",
