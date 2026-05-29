@@ -198,9 +198,14 @@ if [ "$_do_runtime_upgrade" = "true" ]; then
   _upgrade_pkg="openclaw"
   [ "$_requested_ver" != "latest" ] && _upgrade_pkg="openclaw@${_requested_ver}"
 
-  if npm install -g "$_upgrade_pkg" --prefer-online 2>/tmp/openclaw-upgrade.log; then
-    # Re-read the version from the freshly installed package
-    _new_ver=$(node -p "require('$(npm root -g)/openclaw/package.json').version" 2>/dev/null || true)
+  # npm install -g respects NPM_CONFIG_PREFIX which is set later in start.sh,
+  # so use the user-writable prefix explicitly to avoid needing sudo.
+  _npm_prefix="${NPM_CONFIG_PREFIX:-/home/node/.local}"
+  if NPM_CONFIG_PREFIX="$_npm_prefix" npm install -g "$_upgrade_pkg" --prefer-online 2>/tmp/openclaw-upgrade.log; then
+    # Re-read version from the installed package under the explicit prefix
+    _new_ver=$(node -p "require('${_npm_prefix}/lib/node_modules/openclaw/package.json').version" 2>/dev/null || true)
+    # Also update the symlink so `command openclaw` picks up the new binary
+    ln -sf "${_npm_prefix}/lib/node_modules/openclaw/openclaw.mjs" /usr/local/bin/openclaw 2>/dev/null || true
     echo "OpenClaw : upgraded to ${_new_ver:-${_requested_ver}} ✓"
     OPENCLAW_RUNTIME_VERSION="${_new_ver:-$OPENCLAW_RUNTIME_VERSION}"
   else
@@ -208,7 +213,7 @@ if [ "$_do_runtime_upgrade" = "true" ]; then
     tail -5 /tmp/openclaw-upgrade.log >&2
   fi
 fi
-unset _do_runtime_upgrade _requested_ver _upgrade_pkg _new_ver
+unset _do_runtime_upgrade _requested_ver _upgrade_pkg _new_ver _npm_prefix
 
 if [ -n "$OPENCLAW_RUNTIME_VERSION" ]; then
   OPENCLAW_DISPLAY_VERSION="$OPENCLAW_RUNTIME_VERSION"
@@ -803,12 +808,14 @@ CONFIG_JSON=$(jq \
       else . end)' <<<"$CONFIG_JSON")
 
 if [ "$BROWSER_SHOULD_ENABLE" = "true" ]; then
+  # NOTE: do NOT add executablePath, localLaunchTimeoutMs, or localCdpReadyTimeoutMs
+  # here — those are protected keys managed internally by OpenClaw and will be
+  # rejected/ignored if set from the outside config (intentionally removed in
+  # commit "Avoid protected browser config keys in generated OpenClaw config").
   CONFIG_JSON=$(jq \
-    --arg execPath "$BROWSER_EXECUTABLE_PATH" \
     '.browser = {
        "enabled": true,
        "defaultProfile": "openclaw",
-       "executablePath": $execPath,
        "headless": true,
        "noSandbox": true,
        "extraArgs": [
@@ -816,7 +823,6 @@ if [ "$BROWSER_SHOULD_ENABLE" = "true" ]; then
          "--no-sandbox",
          "--disable-setuid-sandbox",
          "--no-zygote",
-         "--single-process",
          "--disable-dev-shm-usage",
          "--disable-gpu",
          "--remote-debugging-address=127.0.0.1",
@@ -834,11 +840,7 @@ if [ "$BROWSER_SHOULD_ENABLE" = "true" ]; then
          "--disable-speech-api",
          "--disable-extensions",
          "--mute-audio",
-         "--metrics-recording-only",
-         "--use-gl=swiftshader",
-         "--force-color-profile=srgb",
-         "--window-size=1280,800",
-         "--font-render-hinting=none"
+         "--metrics-recording-only"
        ]
      }
      | .agents.defaults.sandbox.browser.allowHostControl = true' <<<"$CONFIG_JSON")
