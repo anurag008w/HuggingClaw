@@ -43,8 +43,9 @@ try:
         if str(key) in {"HUGGINGCLAW_ENV_BUNDLE", "ENV_BUNDLE"}:
             continue
         if str(key) == "OPENCLAW_VERSION":
-            print("Warning: OPENCLAW_VERSION from env bundle is ignored (build-time only; set HF Variable and rebuild).", file=sys.stderr)
-            continue
+            # Runtime upgrades are now supported via OPENCLAW_RUNTIME_UPGRADE=true.
+            # Still allow the value to be exported so start.sh can act on it.
+            pass
         if os.environ.get(str(key), ""):
             continue
         if value is None or isinstance(value, (dict, list)):
@@ -171,9 +172,47 @@ if [ -f "$OPENCLAW_APP_DIR/package.json" ]; then
   OPENCLAW_RUNTIME_VERSION=$(node -p "require('$OPENCLAW_APP_DIR/package.json').version" 2>/dev/null || true)
 fi
 
+# ── Runtime OpenClaw upgrade ──
+# If OPENCLAW_VERSION is set (via HF Variable, Secret, or env bundle) and
+# differs from what is baked in the image, upgrade openclaw at container start.
+# This means users NO LONGER need to rebuild the image to change the version —
+# just set OPENCLAW_VERSION=1.2.3 (or "latest") in their HF Space Variables/
+# Secrets or in the env-builder, and the new version is installed on next boot.
+#
+# Set OPENCLAW_RUNTIME_UPGRADE=false to opt out of this behaviour.
+_do_runtime_upgrade=false
+_requested_ver="$(trim_var "${OPENCLAW_VERSION:-latest}")"
+
+if [ "${OPENCLAW_RUNTIME_UPGRADE:-true}" = "true" ]; then
+  if [ "$_requested_ver" = "latest" ]; then
+    # Always attempt an upgrade to latest so containers stay current.
+    _do_runtime_upgrade=true
+  elif [ -n "$OPENCLAW_RUNTIME_VERSION" ] && [ "$_requested_ver" != "$OPENCLAW_RUNTIME_VERSION" ]; then
+    # A specific version was requested and it differs from what's installed.
+    _do_runtime_upgrade=true
+  fi
+fi
+
+if [ "$_do_runtime_upgrade" = "true" ]; then
+  echo "OpenClaw : upgrading to openclaw@${_requested_ver} (bundled: ${OPENCLAW_RUNTIME_VERSION:-unknown})..."
+  _upgrade_pkg="openclaw"
+  [ "$_requested_ver" != "latest" ] && _upgrade_pkg="openclaw@${_requested_ver}"
+
+  if npm install -g "$_upgrade_pkg" --prefer-online 2>/tmp/openclaw-upgrade.log; then
+    # Re-read the version from the freshly installed package
+    _new_ver=$(node -p "require('$(npm root -g)/openclaw/package.json').version" 2>/dev/null || true)
+    echo "OpenClaw : upgraded to ${_new_ver:-${_requested_ver}} ✓"
+    OPENCLAW_RUNTIME_VERSION="${_new_ver:-$OPENCLAW_RUNTIME_VERSION}"
+  else
+    echo "Warning: openclaw runtime upgrade to '${_requested_ver}' failed (bundled version will be used):" >&2
+    tail -5 /tmp/openclaw-upgrade.log >&2
+  fi
+fi
+unset _do_runtime_upgrade _requested_ver _upgrade_pkg _new_ver
+
 if [ -n "$OPENCLAW_RUNTIME_VERSION" ]; then
   OPENCLAW_DISPLAY_VERSION="$OPENCLAW_RUNTIME_VERSION"
-  if [ "$OPENCLAW_VERSION" != "$OPENCLAW_RUNTIME_VERSION" ]; then
+  if [ "$OPENCLAW_VERSION" != "latest" ] && [ "$OPENCLAW_VERSION" != "$OPENCLAW_RUNTIME_VERSION" ]; then
     OPENCLAW_DISPLAY_VERSION="$OPENCLAW_RUNTIME_VERSION (tag: $OPENCLAW_VERSION)"
   fi
 else
