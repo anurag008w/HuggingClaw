@@ -187,7 +187,7 @@ if [ "${OPENCLAW_RUNTIME_UPGRADE:-true}" = "true" ]; then
   if [ "$_requested_ver" = "latest" ]; then
     # Always attempt an upgrade to latest so containers stay current.
     _do_runtime_upgrade=true
-  elif [ -n "$OPENCLAW_RUNTIME_VERSION" ] && [ "$_requested_ver" != "$OPENCLAW_RUNTIME_VERSION" ]; then
+  elif [ "$_requested_ver" != "$OPENCLAW_RUNTIME_VERSION" ]; then
     # A specific version was requested and it differs from what's installed.
     _do_runtime_upgrade=true
   fi
