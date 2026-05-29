@@ -2106,17 +2106,42 @@ if [ -s "$STARTUP_FILE" ]; then
   echo "Workspace startup script complete."
 fi
 whatsapp_plugin_runtime_ok() {
+  # Check both the bare and scoped install paths that OpenClaw uses across
+  # stable/beta releases.  The scoped path (@openclaw/whatsapp) is used when
+  # the plugin is installed via `openclaw plugins install @openclaw/whatsapp`.
   local ext_dir="/home/node/.openclaw/extensions/whatsapp"
-  if [ -f "$ext_dir/dist/setup-entry.js" ] && [ -f "$ext_dir/dist/index.js" ]; then
-    return 0
-  fi
+  local ext_dir_scoped="/home/node/.openclaw/extensions/@openclaw/whatsapp"
 
-  # Prefer OpenClaw's own runtime inspector over hard-coded paths; plugin
-  # layout can differ across stable/beta releases. If inspect can load the
-  # WhatsApp plugin, do not attempt any install.
-  if command -v openclaw >/dev/null 2>&1; then
-    openclaw plugins inspect whatsapp --runtime --json \
-      >/tmp/openclaw-whatsapp-plugin-inspect.log 2>&1 && return 0
+  for dir in "$ext_dir" "$ext_dir_scoped"; do
+    if [ -f "$dir/dist/setup-entry.js" ] && [ -f "$dir/dist/index.js" ]; then
+      return 0
+    fi
+  done
+
+  # Use openclaw's own inspector to discover a non-standard install directory,
+  # but ALWAYS verify the actual dist files exist afterwards.
+  #
+  # IMPORTANT: `openclaw plugins inspect whatsapp --runtime --json` exits with
+  # code 0 based purely on the plugin registry record — even when the dist
+  # files (dist/setup-entry.js, dist/index.js) are absent.  That is exactly
+  # the condition the gateway.startup_failed error reports.  Trusting the exit
+  # code alone (the previous behaviour) caused `install_whatsapp_plugin_runtime`
+  # and `repair_broken_whatsapp_plugin_entry` to both return early thinking the
+  # runtime was healthy, letting the gateway start with `enabled=true` and
+  # missing dist files → crash loop.
+  if command -v openclaw >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    local inspect_json
+    inspect_json=$(openclaw plugins inspect whatsapp --runtime --json 2>/dev/null) || true
+    if [ -n "$inspect_json" ]; then
+      local root_dir
+      root_dir=$(printf '%s' "$inspect_json" \
+        | jq -r '(.rootDir // .root // .dir // .path // empty)' 2>/dev/null || true)
+      if [ -n "$root_dir" ] && \
+         [ -f "$root_dir/dist/setup-entry.js" ] && \
+         [ -f "$root_dir/dist/index.js" ]; then
+        return 0
+      fi
+    fi
   fi
 
   return 1
