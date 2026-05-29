@@ -204,8 +204,9 @@ if [ "$_do_runtime_upgrade" = "true" ]; then
   if NPM_CONFIG_PREFIX="$_npm_prefix" npm install -g "$_upgrade_pkg" --prefer-online 2>/tmp/openclaw-upgrade.log; then
     # Re-read version from the installed package under the explicit prefix
     _new_ver=$(node -p "require('${_npm_prefix}/lib/node_modules/openclaw/package.json').version" 2>/dev/null || true)
-    # Also update the symlink so `command openclaw` picks up the new binary
-    ln -sf "${_npm_prefix}/lib/node_modules/openclaw/openclaw.mjs" /usr/local/bin/openclaw 2>/dev/null || true
+    # PATH already has /home/node/.local/bin before /usr/local/bin (set in
+    # Dockerfile ENV), so the newly installed binary is picked up automatically
+    # by 'command openclaw' without needing to update /usr/local/bin/openclaw.
     echo "OpenClaw : upgraded to ${_new_ver:-${_requested_ver}} ✓"
     OPENCLAW_RUNTIME_VERSION="${_new_ver:-$OPENCLAW_RUNTIME_VERSION}"
   else
@@ -829,7 +830,6 @@ if [ "$BROWSER_SHOULD_ENABLE" = "true" ]; then
          "--remote-allow-origins=*",
          "--disable-features=UseDBus,MediaRouter,VizDisplayCompositor,BlinkGenPropertyTrees",
          "--disable-dbus",
-         "--no-dbus",
          "--disable-background-media-suspend",
          "--password-store=basic",
          "--no-first-run",
