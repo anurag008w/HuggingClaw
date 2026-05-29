@@ -29,6 +29,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     dbus \
     dbus-x11 \
+    dbus-daemon \
+    libglib2.0-0 \
+    procps \
     python3 \
     python3-pip \
     p7zip-full \
