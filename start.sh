@@ -2092,8 +2092,38 @@ if [ -s "$STARTUP_FILE" ]; then
   hc_run_startup_script "workspace/startup.sh" "$(cat "$STARTUP_FILE")" || true
   echo "Workspace startup script complete."
 fi
+whatsapp_plugin_runtime_ok() {
+  local ext_dir="/home/node/.openclaw/extensions/whatsapp"
+  [ -f "$ext_dir/dist/setup-entry.js" ] && [ -f "$ext_dir/dist/index.js" ]
+}
+
+repair_broken_whatsapp_plugin_entry() {
+  local config="/home/node/.openclaw/openclaw.json"
+  [ -f "$config" ] || return 0
+  if ! jq -e '(.plugins.entries.whatsapp.enabled // false) == true' "$config" >/dev/null 2>&1; then
+    return 0
+  fi
+  if whatsapp_plugin_runtime_ok; then
+    return 0
+  fi
+
+  echo "Warning: WhatsApp plugin is enabled but its runtime files are missing/incompatible; disabling WhatsApp plugin for this boot so gateway can start." >&2
+  echo "         Fix by using stable OpenClaw for WhatsApp or reinstalling the official whatsapp plugin, then re-enable WHATSAPP_ENABLED." >&2
+
+  local patched
+  patched=$(jq '
+    .plugins.entries.whatsapp.enabled = false
+    | del(.channels.whatsapp)
+  ' "$config" 2>/dev/null) || {
+    echo "Warning: could not patch broken WhatsApp plugin entry; gateway may still reject config." >&2
+    return 0
+  }
+  echo "$patched" > "$config.tmp" && mv "$config.tmp" "$config"
+}
+
 hc_finish_startup_commands
 sync_installed_plugins_into_allow
+repair_broken_whatsapp_plugin_entry
 
 # ── Launch gateway ──
 GATEWAY_RESTART_DELAY="${GATEWAY_RESTART_DELAY:-2}"
