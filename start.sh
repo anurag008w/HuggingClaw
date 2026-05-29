@@ -645,7 +645,13 @@ fi
 ensure_chromium_for_browser_plugin() {
   # Enforce Chromium availability when browser plugin is explicitly enabled.
   [ "$BROWSER_PLUGIN_MODE" = "enabled" ] || return 0
-  for candidate in /usr/lib/chromium/chromium /usr/bin/chromium /usr/bin/chromium-browser; do
+  for candidate in \
+      /usr/lib/chromium/chromium \
+      /usr/bin/chromium \
+      /usr/bin/chromium-browser \
+      /usr/bin/google-chrome \
+      /usr/bin/google-chrome-stable \
+      /snap/bin/chromium; do
     [ -x "$candidate" ] && return 0
   done
   if [ "$HAS_FILE_CMD" != "true" ]; then
@@ -680,6 +686,8 @@ for candidate in \
     /usr/lib/chromium-browser/chromium-browser \
     /usr/bin/chromium \
     /usr/bin/chromium-browser \
+    /usr/bin/google-chrome \
+    /usr/bin/google-chrome-stable \
     /snap/bin/chromium; do
   if [ -x "$candidate" ]; then
     if [ "$HAS_FILE_CMD" = "true" ]; then
@@ -757,9 +765,11 @@ CONFIG_JSON=$(jq \
 
 if [ "$BROWSER_SHOULD_ENABLE" = "true" ]; then
   CONFIG_JSON=$(jq \
+    --arg execPath "$BROWSER_EXECUTABLE_PATH" \
     '.browser = {
        "enabled": true,
        "defaultProfile": "openclaw",
+       "executablePath": $execPath,
        "headless": true,
        "noSandbox": true,
        "extraArgs": [
@@ -767,17 +777,29 @@ if [ "$BROWSER_SHOULD_ENABLE" = "true" ]; then
          "--no-sandbox",
          "--disable-setuid-sandbox",
          "--no-zygote",
+         "--single-process",
          "--disable-dev-shm-usage",
          "--disable-gpu",
          "--remote-debugging-address=127.0.0.1",
-         "--disable-features=UseDBus,MediaRouter",
+         "--remote-allow-origins=*",
+         "--disable-features=UseDBus,MediaRouter,VizDisplayCompositor,BlinkGenPropertyTrees",
+         "--disable-dbus",
+         "--no-dbus",
+         "--disable-background-media-suspend",
          "--password-store=basic",
          "--no-first-run",
          "--disable-background-networking",
          "--disable-sync",
          "--disable-translate",
          "--disable-notifications",
-         "--disable-speech-api"
+         "--disable-speech-api",
+         "--disable-extensions",
+         "--mute-audio",
+         "--metrics-recording-only",
+         "--use-gl=swiftshader",
+         "--force-color-profile=srgb",
+         "--window-size=1280,800",
+         "--font-render-hinting=none"
        ]
      }
      | .agents.defaults.sandbox.browser.allowHostControl = true' <<<"$CONFIG_JSON")
@@ -1171,16 +1193,25 @@ warmup_browser() {
   BROWSER_WARMED_UP=true
 
   (
-    sleep 8
+    # Give the gateway more time to finish its own startup before we poke it.
+    sleep 12
 
     local attempt
-    for attempt in 1 2 3 4 5 6; do
+    for attempt in 1 2 3 4 5 6 7 8; do
+      # FIX: probe the gateway HTTP port first — if the gateway isn't fully up
+      # yet, openclaw-browser returns "GatewayClientRequestError: http_unreachable
+      # / invalid onRequestStart" because the CDP proxy isn't ready.
+      if ! (echo > /dev/tcp/127.0.0.1/${GATEWAY_PORT}) 2>/dev/null; then
+        sleep 5
+        continue
+      fi
+
       if openclaw browser --browser-profile openclaw start >/dev/null 2>&1; then
         openclaw browser --browser-profile openclaw open about:blank >/dev/null 2>&1 || true
         echo "Managed browser ready."
         return 0
       fi
-      sleep 5
+      sleep 8
     done
 
     echo "Warning: managed browser warm-up did not complete; first browser action may need a retry."
@@ -1973,14 +2004,39 @@ if [ -d "$PLUGIN_SKILLS_DIR" ]; then
 fi
 
 # ── Start D-Bus session (once, before gateway loop) ──
+# Chromium logs "Failed to connect to socket /run/dbus/system_bus_socket" when
+# the system D-Bus is absent (HF Spaces containers).  We suppress the noise by:
+#   1. Starting a private session bus (dbus-launch) so Chrome has something to
+#      connect to for session-scoped calls.
+#   2. Pointing DBUS_SYSTEM_BUS_ADDRESS at the same session bus so Chrome's
+#      system-bus probes also succeed without a real systemd-dbus daemon.
+#   3. Falling back to "disabled:" on minimal images without dbus-launch; the
+#      Chrome --disable-dbus / --disable-features=UseDBus flags then silence the
+#      remaining warnings that come from Chromium itself.
 if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
-  if command -v dbus-launch >/dev/null 2>&1; then
+  if command -v dbus-daemon >/dev/null 2>&1; then
+    _DBUS_SOCKET="/tmp/dbus-hc-$$.sock"
+    _DBUS_PID_FILE="/tmp/dbus-hc-$$.pid"
+    dbus-daemon --session \
+        --address="unix:path=${_DBUS_SOCKET}" \
+        --print-address=1 \
+        --fork \
+        --print-pid=3 \
+        3>"${_DBUS_PID_FILE}" \
+        >"${_DBUS_SOCKET}.addr" 2>/dev/null || true
+    if [ -s "${_DBUS_SOCKET}.addr" ]; then
+      export DBUS_SESSION_BUS_ADDRESS="$(cat "${_DBUS_SOCKET}.addr")"
+    fi
+    unset _DBUS_SOCKET _DBUS_PID_FILE
+  elif command -v dbus-launch >/dev/null 2>&1; then
     eval "$(dbus-launch --sh-syntax 2>/dev/null)" || true
     export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-disabled:}"
   else
     export DBUS_SESSION_BUS_ADDRESS="disabled:"
   fi
 fi
+# Route system-bus probes to session bus so Chrome stops printing socket errors.
+export DBUS_SYSTEM_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-disabled:}"
 
 while true; do
   # Check health-server process - restart if died unexpectedly
