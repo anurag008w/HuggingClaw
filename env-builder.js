@@ -516,10 +516,21 @@ const FIELDS = [
     "g": "Core",
     "icon": "⚡",
     "k": "OPENCLAW_VERSION",
-    "lbl": "Pin OpenClaw version (build-time; rebuild required)",
+    "lbl": "OpenClaw version (latest, beta, or pinned release)",
     "type": "text",
     "ph": "latest",
-    "tag": "build"
+    "tag": "advanced",
+    "help": "Set latest, beta, or a pinned version such as 2026.5.27. HuggingClaw applies this at startup via runtime upgrade, so env-builder bundles can change the version without relying only on Docker build args."
+  },
+{
+    "g": "Core",
+    "icon": "⚡",
+    "k": "OPENCLAW_RUNTIME_UPGRADE",
+    "lbl": "Upgrade OpenClaw at startup",
+    "type": "toggle",
+    "ph": "true",
+    "tag": "advanced",
+    "help": "Keep enabled when OPENCLAW_VERSION is latest, beta, or a pinned release from the env bundle. Disable only if you want to force the image-bundled OpenClaw version."
   },
 {
     "g": "Core",
@@ -915,7 +926,8 @@ const FIELDS = [
       "disabled"
     ],
     "ph": "auto",
-    "tag": "feature"
+    "tag": "feature",
+    "help": "On Hugging Face Spaces this defaults to disabled. Set to enabled to allow the managed browser plugin; keep disabled if you do not need browser tools."
   },
 {
     "g": "Plugins",

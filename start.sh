@@ -42,11 +42,15 @@ try:
             continue
         if str(key) in {"HUGGINGCLAW_ENV_BUNDLE", "ENV_BUNDLE"}:
             continue
+        existing = os.environ.get(str(key), "")
         if str(key) == "OPENCLAW_VERSION":
-            # Runtime upgrades are now supported via OPENCLAW_RUNTIME_UPGRADE=true.
-            # Still allow the value to be exported so start.sh can act on it.
-            pass
-        if os.environ.get(str(key), ""):
+            # Docker bakes OPENCLAW_VERSION=latest as a default ENV, which used to
+            # make env-builder/bundled OPENCLAW_VERSION=beta or a pinned version
+            # get ignored. Treat only a non-latest existing value as a true
+            # individual override for this key.
+            if existing and existing.strip() != "latest":
+                continue
+        elif existing:
             continue
         if value is None or isinstance(value, (dict, list)):
             continue
@@ -68,7 +72,8 @@ OPENCLAW_PASSWORD="$(trim_var "${OPENCLAW_PASSWORD:-}")"
 LLM_API_KEY="$(trim_var "${LLM_API_KEY:-}")"
 CLOUDFLARE_PROXY_URL="$(trim_var "${CLOUDFLARE_PROXY_URL:-}")"
 
-OPENCLAW_VERSION="${OPENCLAW_VERSION:-latest}"
+OPENCLAW_VERSION="$(trim_var "${OPENCLAW_VERSION:-latest}")"
+OPENCLAW_RUNTIME_UPGRADE="$(trim_var "${OPENCLAW_RUNTIME_UPGRADE:-true}")"
 APP_BASE="$(trim_var "${APP_BASE:-/app}")"
 JUPYTER_BASE="$(trim_var "${JUPYTER_BASE:-/terminal}")"
 PORT="$(trim_var "${PORT:-7861}")"
@@ -118,6 +123,14 @@ fi
 # On HF Spaces, browser is disabled by default (no display server).
 # To enable: set BROWSER_PLUGIN_MODE=enabled as an HF Space secret.
 # WARNING: requires at least CPU Upgrade tier (2 vCPU / 16GB RAM).
+if [ -n "${BROWSER_ENABLED:-}" ] && [ -z "${BROWSER_PLUGIN_MODE:-}" ]; then
+  if hc_is_true "$(trim_var "${BROWSER_ENABLED}")"; then
+    BROWSER_PLUGIN_MODE="enabled"
+  else
+    BROWSER_PLUGIN_MODE="disabled"
+  fi
+fi
+
 if [ -n "${SPACE_HOST:-}" ]; then
   OPENCLAW_CONSOLE_LOG_LEVEL="${OPENCLAW_CONSOLE_LOG_LEVEL:-warn}"
   OPENCLAW_FILE_LOG_LEVEL="${OPENCLAW_FILE_LOG_LEVEL:-info}"
@@ -142,6 +155,23 @@ else
   BROWSER_PLUGIN_MODE="${BROWSER_PLUGIN_MODE:-auto}"
   ACP_PLUGIN_MODE="${ACP_PLUGIN_MODE:-auto}"
 fi
+BROWSER_PLUGIN_MODE="$(trim_var "$BROWSER_PLUGIN_MODE" | tr '[:upper:]' '[:lower:]')"
+case "$BROWSER_PLUGIN_MODE" in
+  true|1|yes|on) BROWSER_PLUGIN_MODE="enabled" ;;
+  false|0|no|off) BROWSER_PLUGIN_MODE="disabled" ;;
+  enabled|disabled|auto) ;;
+  *)
+    echo "Warning: invalid BROWSER_PLUGIN_MODE='$BROWSER_PLUGIN_MODE'; using disabled on HF Spaces and auto elsewhere." >&2
+    if [ -n "${SPACE_HOST:-}" ]; then BROWSER_PLUGIN_MODE="disabled"; else BROWSER_PLUGIN_MODE="auto"; fi
+    ;;
+esac
+ACP_PLUGIN_MODE="$(trim_var "$ACP_PLUGIN_MODE" | tr '[:upper:]' '[:lower:]')"
+case "$ACP_PLUGIN_MODE" in
+  true|1|yes|on) ACP_PLUGIN_MODE="enabled" ;;
+  false|0|no|off) ACP_PLUGIN_MODE="disabled" ;;
+  enabled|disabled|auto) ;;
+  *) ACP_PLUGIN_MODE="auto" ;;
+esac
 echo ""
 echo "  ╔══════════════════════════════════════════╗"
 echo "  ║     🦞 HuggingClaw + 💻 JupyterLab      ║"
@@ -183,7 +213,7 @@ fi
 _do_runtime_upgrade=false
 _requested_ver="$(trim_var "${OPENCLAW_VERSION:-latest}")"
 
-if [ "${OPENCLAW_RUNTIME_UPGRADE:-true}" = "true" ]; then
+if hc_is_true "$OPENCLAW_RUNTIME_UPGRADE"; then
   if [ "$_requested_ver" = "latest" ]; then
     # Always attempt an upgrade to latest so containers stay current.
     _do_runtime_upgrade=true
@@ -404,6 +434,14 @@ if [ -n "${CLOUDFLARE_WORKERS_TOKEN:-}" ] || [ -n "${CLOUDFLARE_PROXY_URL:-}" ];
     . "$CF_PROXY_ENV_FILE"
   fi
 fi
+
+# Never send local Gateway/CDP traffic through HTTP(S)/ALL proxy settings. OpenClaw
+# probes Chrome on 127.0.0.1; proxying that loopback request causes false
+# http_unreachable browser-launch failures in Docker/HF environments.
+_NO_PROXY_LOCAL="localhost,127.0.0.1,::1,0.0.0.0"
+export NO_PROXY="${NO_PROXY:+$NO_PROXY,}${_NO_PROXY_LOCAL}"
+export no_proxy="${no_proxy:+$no_proxy,}${_NO_PROXY_LOCAL}"
+unset _NO_PROXY_LOCAL
 
 # ── Build config ──
 CONFIG_JSON=$(cat <<'CONFIGEOF'
@@ -1174,6 +1212,7 @@ if [ "$WHATSAPP_ENABLED_NORMALIZED" = "true" ]; then
 else
   echo "WhatsApp  : disabled"
 fi
+echo "Browser   : ${BROWSER_PLUGIN_MODE} (${BROWSER_SHOULD_ENABLE})"
 if [ -n "${HF_TOKEN:-}" ]; then
   echo "Backup    : ${BACKUP_DATASET:-huggingclaw-backup} (every ${SYNC_INTERVAL:-180}s)"
 else
