@@ -384,9 +384,69 @@ if (PROXY_URL) {
 
       if (exports.fetch && !exports.fetch._patched) {
         const origFetch = exports.fetch;
-        exports.fetch = async function (input, init) {
-          // If we are calling undici.fetch, it should use our globalThis.fetch which is patched
-          return globalThis.fetch(input, init);
+        exports.fetch = async function patchedUndiciFetch(input, init) {
+          let url;
+          try {
+            const urlStr = input && typeof input === "object" && "url" in input
+              ? input.url
+              : String(input);
+            url = new URL(urlStr);
+          } catch (_) {
+            return origFetch(input, init);
+          }
+
+          const hostname = url.hostname;
+          if (!shouldProxyHost(hostname)) {
+            // Important: keep OpenClaw's bundled undici fetch on its own undici
+            // runtime. Forwarding undici.fetch to globalThis.fetch mixes Node's
+            // built-in undici with OpenClaw's bundled dispatchers and can break
+            // local CDP probes with "invalid onRequestStart method".
+            return origFetch(input, init);
+          }
+
+          const requestLike = input && typeof input === "object" ? input : null;
+          const headers = new Headers(init?.headers || requestLike?.headers || undefined);
+          if (headers.has("x-target-host") || headers.has("X-Target-Host")) {
+            return origFetch(input, init);
+          }
+
+          if (DEBUG) {
+            log(
+              `[cloudflare-proxy] Redirecting undici.fetch://${hostname}${url.pathname}${url.search} -> ${proxy.hostname}`,
+            );
+          }
+
+          headers.set("x-target-host", hostname);
+          if (PROXY_SHARED_SECRET) {
+            headers.set("x-proxy-key", PROXY_SHARED_SECRET);
+          }
+
+          const proxiedUrl = new URL(url.pathname + url.search, proxy);
+          const newInit = {
+            method: init?.method || requestLike?.method || "GET",
+            headers,
+          };
+
+          // Preserve the normal fetch surface for proxied undici.fetch calls. In
+          // particular, callers may pass a Request object with its body on the
+          // input instead of init; dropping that body would silently break POST
+          // uploads to proxied domains. Avoid spreading init because dispatcher/
+          // client objects are bound to the original origin.
+          const body = init?.body ?? (!requestLike?.bodyUsed ? requestLike?.body : undefined);
+          if (body != null) {
+            newInit.body = body;
+            if (body instanceof ReadableStream) {
+              newInit.duplex = init?.duplex || requestLike?.duplex || "half";
+            }
+          }
+          const signal = init?.signal || requestLike?.signal;
+          if (signal) newInit.signal = signal;
+          const redirect = init?.redirect || requestLike?.redirect;
+          if (redirect) newInit.redirect = redirect;
+          const integrity = init?.integrity || requestLike?.integrity;
+          if (integrity) newInit.integrity = integrity;
+
+          return origFetch(String(proxiedUrl), newInit);
         };
         exports.fetch._patched = true;
       }
