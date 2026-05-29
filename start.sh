@@ -562,6 +562,8 @@ inject_provider_models_from_env() {
   local key_env_single="$3"
   local key_env_pool="$4"
   local default_models_env="${5:-}"          # Optional 5th arg: fallback default models var name
+  local default_base_url="${6:-}"            # Optional 6th arg: hardcoded default base URL
+  local api_type="${7:-}"                    # Optional 7th arg: API type (e.g. openai-completions)
   local models_csv="${!models_env:-}"
   local single_key="${!key_env_single:-}"
   local pool_keys="${!key_env_pool:-}"
@@ -579,6 +581,23 @@ inject_provider_models_from_env() {
   # Still nothing to inject
   if [ -z "$models_csv" ]; then
     return 0
+  fi
+
+  # Resolve base URL: runtime env var (<KEY_ENV>_BASE_URL) overrides hardcoded default.
+  # e.g. NVIDIA_API_KEY → NVIDIA_BASE_URL; HUGGINGFACE_HUB_TOKEN → HUGGINGFACE_HUB_TOKEN_BASE_URL
+  # Use a cleaner derived name: strip _API_KEY/_API_KEYS suffix → add _BASE_URL.
+  local base_url_env_name
+  base_url_env_name=$(printf '%s' "$key_env_single" \
+    | sed 's/_API_KEY$//' \
+    | sed 's/_HUB_TOKEN$//' \
+    | sed 's/_GITHUB_TOKEN$//')_BASE_URL
+  local resolved_base_url="${!base_url_env_name:-$default_base_url}"
+
+  # Only inject apiKey when NOT using a pool (pool rotation is handled by OpenClaw
+  # reading the pool env var directly; injecting a static key would bypass rotation).
+  local inject_api_key=""
+  if [ -z "$pool_keys" ] && [ -n "$single_key" ]; then
+    inject_api_key="$single_key"
   fi
 
   local models_json
@@ -608,11 +627,23 @@ inject_provider_models_from_env() {
         | map({id: ., name: .})
         | unique_by(.id)')
 
+  # Build provider patch: always inject models; conditionally inject apiKey, baseUrl, api.
+  # Existing saved config wins on merge (see config-patch jq below), so this only fills
+  # in missing fields — it never overwrites what the user already configured manually.
   CONFIG_JSON=$(jq \
     --arg provider "$provider" \
     --argjson models "$models_json" \
+    --arg apiKey "$inject_api_key" \
+    --arg baseUrl "$resolved_base_url" \
+    --arg apiType "$api_type" \
     '.models.mode = "merge"
-     | .models.providers[$provider] = ((.models.providers[$provider] // {}) + {models: $models})' <<<"$CONFIG_JSON")
+     | .models.providers[$provider] = (
+         (.models.providers[$provider] // {})
+         + (if $apiKey  != "" then {apiKey:  $apiKey}  else {} end)
+         + (if $baseUrl != "" then {baseUrl: $baseUrl} else {} end)
+         + (if $apiType != "" then {api:     $apiType} else {} end)
+         + {models: $models}
+       )' <<<"$CONFIG_JSON")
 
   INJECTED_MODELS_PROVIDERS=$(jq \
     --arg provider "$provider" \
@@ -654,29 +685,29 @@ inject_provider_models_from_env "zai" "ZAI_MODELS" "ZAI_API_KEY" "ZAI_API_KEYS" 
 inject_provider_models_from_env "z-ai" "ZAI_MODELS" "ZAI_API_KEY" "ZAI_API_KEYS" "_DEFAULT_ZAI_MODELS"
 inject_provider_models_from_env "z.ai" "ZAI_MODELS" "ZAI_API_KEY" "ZAI_API_KEYS" "_DEFAULT_ZAI_MODELS"
 inject_provider_models_from_env "zhipu" "ZAI_MODELS" "ZAI_API_KEY" "ZAI_API_KEYS" "_DEFAULT_ZAI_MODELS"
-inject_provider_models_from_env "moonshot" "MOONSHOT_MODELS" "MOONSHOT_API_KEY" "MOONSHOT_API_KEYS" "_DEFAULT_MOONSHOT_MODELS"
+inject_provider_models_from_env "moonshot" "MOONSHOT_MODELS" "MOONSHOT_API_KEY" "MOONSHOT_API_KEYS" "_DEFAULT_MOONSHOT_MODELS" "https://api.moonshot.cn/v1" "openai-completions"
 inject_provider_models_from_env "kimi-coding" "KIMI_MODELS" "KIMI_API_KEY" "KIMI_API_KEYS"
 inject_provider_models_from_env "minimax" "MINIMAX_MODELS" "MINIMAX_API_KEY" "MINIMAX_API_KEYS" "_DEFAULT_MINIMAX_MODELS"
 inject_provider_models_from_env "modelstudio" "MODELSTUDIO_MODELS" "MODELSTUDIO_API_KEY" "MODELSTUDIO_API_KEYS" "_DEFAULT_MODELSTUDIO_MODELS"
 inject_provider_models_from_env "qwen" "MODELSTUDIO_MODELS" "MODELSTUDIO_API_KEY" "MODELSTUDIO_API_KEYS" "_DEFAULT_MODELSTUDIO_MODELS"
-inject_provider_models_from_env "xiaomi" "XIAOMI_MODELS" "XIAOMI_API_KEY" "XIAOMI_API_KEYS"
-inject_provider_models_from_env "volcengine" "VOLCANO_ENGINE_MODELS" "VOLCANO_ENGINE_API_KEY" "VOLCANO_ENGINE_API_KEYS"
-inject_provider_models_from_env "volcengine-plan" "VOLCANO_ENGINE_MODELS" "VOLCANO_ENGINE_API_KEY" "VOLCANO_ENGINE_API_KEYS"
-inject_provider_models_from_env "byteplus" "BYTEPLUS_MODELS" "BYTEPLUS_API_KEY" "BYTEPLUS_API_KEYS"
-inject_provider_models_from_env "byteplus-plan" "BYTEPLUS_MODELS" "BYTEPLUS_API_KEY" "BYTEPLUS_API_KEYS"
-inject_provider_models_from_env "qianfan" "QIANFAN_MODELS" "QIANFAN_API_KEY" "QIANFAN_API_KEYS"
+inject_provider_models_from_env "xiaomi" "XIAOMI_MODELS" "XIAOMI_API_KEY" "XIAOMI_API_KEYS" "" "https://api.mimoai.xiaomi.com/v1" "openai-completions"
+inject_provider_models_from_env "volcengine" "VOLCANO_ENGINE_MODELS" "VOLCANO_ENGINE_API_KEY" "VOLCANO_ENGINE_API_KEYS" "" "https://ark.cn-beijing.volces.com/api/v3" "openai-completions"
+inject_provider_models_from_env "volcengine-plan" "VOLCANO_ENGINE_MODELS" "VOLCANO_ENGINE_API_KEY" "VOLCANO_ENGINE_API_KEYS" "" "https://ark.cn-beijing.volces.com/api/v3" "openai-completions"
+inject_provider_models_from_env "byteplus" "BYTEPLUS_MODELS" "BYTEPLUS_API_KEY" "BYTEPLUS_API_KEYS" "" "https://ark.ap-southeast.bytepluses.com/api/v3" "openai-completions"
+inject_provider_models_from_env "byteplus-plan" "BYTEPLUS_MODELS" "BYTEPLUS_API_KEY" "BYTEPLUS_API_KEYS" "" "https://ark.ap-southeast.bytepluses.com/api/v3" "openai-completions"
+inject_provider_models_from_env "qianfan" "QIANFAN_MODELS" "QIANFAN_API_KEY" "QIANFAN_API_KEYS" "" "https://qianfan.baidubce.com/v2" "openai-completions"
 inject_provider_models_from_env "groq" "GROQ_MODELS" "GROQ_API_KEY" "GROQ_API_KEYS" "_DEFAULT_GROQ_MODELS"
 inject_provider_models_from_env "mistral" "MISTRAL_MODELS" "MISTRAL_API_KEY" "MISTRAL_API_KEYS" "_DEFAULT_MISTRAL_MODELS"
 inject_provider_models_from_env "mistralai" "MISTRAL_MODELS" "MISTRAL_API_KEY" "MISTRAL_API_KEYS" "_DEFAULT_MISTRAL_MODELS"
 inject_provider_models_from_env "xai" "XAI_MODELS" "XAI_API_KEY" "XAI_API_KEYS" "_DEFAULT_XAI_MODELS"
 inject_provider_models_from_env "x-ai" "XAI_MODELS" "XAI_API_KEY" "XAI_API_KEYS" "_DEFAULT_XAI_MODELS"
-inject_provider_models_from_env "nvidia" "NVIDIA_MODELS" "NVIDIA_API_KEY" "NVIDIA_API_KEYS" "_DEFAULT_NVIDIA_MODELS"
-inject_provider_models_from_env "cohere" "COHERE_MODELS" "COHERE_API_KEY" "COHERE_API_KEYS" "_DEFAULT_COHERE_MODELS"
-inject_provider_models_from_env "together" "TOGETHER_MODELS" "TOGETHER_API_KEY" "TOGETHER_API_KEYS" "_DEFAULT_TOGETHER_MODELS"
+inject_provider_models_from_env "nvidia" "NVIDIA_MODELS" "NVIDIA_API_KEY" "NVIDIA_API_KEYS" "_DEFAULT_NVIDIA_MODELS" "https://integrate.api.nvidia.com/v1" "openai-completions"
+inject_provider_models_from_env "cohere" "COHERE_MODELS" "COHERE_API_KEY" "COHERE_API_KEYS" "_DEFAULT_COHERE_MODELS" "https://api.cohere.ai/compatibility/v1" "openai-completions"
+inject_provider_models_from_env "together" "TOGETHER_MODELS" "TOGETHER_API_KEY" "TOGETHER_API_KEYS" "_DEFAULT_TOGETHER_MODELS" "https://api.together.xyz/v1" "openai-completions"
 inject_provider_models_from_env "cerebras" "CEREBRAS_MODELS" "CEREBRAS_API_KEY" "CEREBRAS_API_KEYS" "_DEFAULT_CEREBRAS_MODELS"
-inject_provider_models_from_env "huggingface" "HUGGINGFACE_MODELS" "HUGGINGFACE_HUB_TOKEN" "HUGGINGFACE_HUB_TOKENS" "_DEFAULT_HUGGINGFACE_MODELS"
-inject_provider_models_from_env "venice" "VENICE_MODELS" "VENICE_API_KEY" "VENICE_API_KEYS" "_DEFAULT_VENICE_MODELS"
-inject_provider_models_from_env "synthetic" "SYNTHETIC_MODELS" "SYNTHETIC_API_KEY" "SYNTHETIC_API_KEYS"
+inject_provider_models_from_env "huggingface" "HUGGINGFACE_MODELS" "HUGGINGFACE_HUB_TOKEN" "HUGGINGFACE_HUB_TOKENS" "_DEFAULT_HUGGINGFACE_MODELS" "https://api-inference.huggingface.co/v1" "openai-completions"
+inject_provider_models_from_env "venice" "VENICE_MODELS" "VENICE_API_KEY" "VENICE_API_KEYS" "_DEFAULT_VENICE_MODELS" "https://api.venice.ai/api/v1" "openai-completions"
+inject_provider_models_from_env "synthetic" "SYNTHETIC_MODELS" "SYNTHETIC_API_KEY" "SYNTHETIC_API_KEYS" "" "https://api.synthetic.ai/v1" "openai-completions"
 inject_provider_models_from_env "github-copilot" "GITHUB_COPILOT_MODELS" "COPILOT_GITHUB_TOKEN" "COPILOT_GITHUB_TOKENS" "_DEFAULT_GITHUB_COPILOT_MODELS"
 
 # Browser configuration (managed local Chromium in HF/Docker)
