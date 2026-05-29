@@ -293,6 +293,13 @@ process.on("unhandledRejection", (reason) => {
 writeStatus({ configured: true, connected: false, pairing: false });
 console.log("[guardian] WhatsApp Guardian active. Monitoring pairing status...");
 _checkInterval = setInterval(checkStatus, CHECK_INTERVAL);
-// Allow the process to exit even if this interval is the only active handle.
-if (_checkInterval.unref) _checkInterval.unref();
+// NOTE: Do NOT call _checkInterval.unref() here.
+// With unref(), Node.js exits between interval ticks the moment the
+// short-lived WebSocket from checkStatus() closes in its finally block
+// (typically ~25 s after the first run). The interval never fires again,
+// so the guardian stops monitoring entirely after a single check.
+// start_guardian_once() in start.sh has no monitoring loop that would
+// revive it — it is only called at gateway startup. The comment above
+// ("A previous one-shot exit caused 'works once then stops' behavior")
+// documents exactly this failure; removing unref() is the correct fix.
 setTimeout(checkStatus, 15000);
