@@ -237,13 +237,21 @@ fi
 # Set OPENCLAW_RUNTIME_UPGRADE=false to opt out of this behaviour.
 _do_runtime_upgrade=false
 _requested_ver="$(trim_var "${OPENCLAW_VERSION:-latest}")"
+_resolved_requested_ver=""
 
 if hc_is_true "$OPENCLAW_RUNTIME_UPGRADE"; then
   if [ "$_requested_ver" = "latest" ]; then
-    # Always attempt an upgrade to latest so containers stay current.
-    _do_runtime_upgrade=true
+    # Avoid reinstalling OpenClaw on every boot when the bundled/runtime version
+    # already matches npm's latest tag. This keeps startup logs quiet and avoids
+    # the repeated "added packages" delay while still upgrading when latest moves.
+    _resolved_requested_ver=$(npm view openclaw@latest version --silent 2>/dev/null || true)
+    if [ -n "$_resolved_requested_ver" ] && [ "$_resolved_requested_ver" != "$OPENCLAW_RUNTIME_VERSION" ]; then
+      _do_runtime_upgrade=true
+    elif [ -z "$_resolved_requested_ver" ] && [ -z "$OPENCLAW_RUNTIME_VERSION" ]; then
+      _do_runtime_upgrade=true
+    fi
   elif [ "$_requested_ver" != "$OPENCLAW_RUNTIME_VERSION" ]; then
-    # A specific version was requested and it differs from what's installed.
+    # A specific version/tag was requested and it differs from what's installed.
     _do_runtime_upgrade=true
   fi
 fi
@@ -269,7 +277,7 @@ if [ "$_do_runtime_upgrade" = "true" ]; then
     tail -5 /tmp/openclaw-upgrade.log >&2
   fi
 fi
-unset _do_runtime_upgrade _requested_ver _upgrade_pkg _new_ver _npm_prefix
+unset _do_runtime_upgrade _requested_ver _resolved_requested_ver _upgrade_pkg _new_ver _npm_prefix
 
 if [ -n "$OPENCLAW_RUNTIME_VERSION" ]; then
   OPENCLAW_DISPLAY_VERSION="$OPENCLAW_RUNTIME_VERSION"
