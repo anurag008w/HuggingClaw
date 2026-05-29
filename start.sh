@@ -74,6 +74,9 @@ CLOUDFLARE_PROXY_URL="$(trim_var "${CLOUDFLARE_PROXY_URL:-}")"
 
 OPENCLAW_VERSION="$(trim_var "${OPENCLAW_VERSION:-latest}")"
 OPENCLAW_RUNTIME_UPGRADE="$(trim_var "${OPENCLAW_RUNTIME_UPGRADE:-true}")"
+OPENCLAW_BROWSER_PROFILE="$(trim_var "${OPENCLAW_BROWSER_PROFILE:-openclaw}")"
+OPENCLAW_BROWSER_CDP_URL="$(trim_var "${OPENCLAW_BROWSER_CDP_URL:-${BROWSER_CDP_URL:-}}")"
+OPENCLAW_BROWSER_ATTACH_ONLY="$(trim_var "${OPENCLAW_BROWSER_ATTACH_ONLY:-auto}")"
 APP_BASE="$(trim_var "${APP_BASE:-/app}")"
 JUPYTER_BASE="$(trim_var "${JUPYTER_BASE:-/terminal}")"
 PORT="$(trim_var "${PORT:-7861}")"
@@ -121,8 +124,10 @@ if ! hc_is_true "$DEVDATA_NORMALIZED"; then
   DEVDATA_ENABLED=false
 fi
 # On HF Spaces, browser is disabled by default (no display server).
-# To enable: set BROWSER_PLUGIN_MODE=enabled as an HF Space secret.
-# WARNING: requires at least CPU Upgrade tier (2 vCPU / 16GB RAM).
+# To enable local managed browser: set BROWSER_PLUGIN_MODE=enabled.
+# To avoid local Chromium on constrained Spaces: set BROWSER_PLUGIN_MODE=remote
+# and OPENCLAW_BROWSER_CDP_URL to a remote Chromium CDP endpoint.
+# WARNING: local managed browser requires at least CPU Upgrade tier (2 vCPU / 16GB RAM).
 if [ -n "${BROWSER_ENABLED:-}" ] && [ -z "${BROWSER_PLUGIN_MODE:-}" ]; then
   if hc_is_true "$(trim_var "${BROWSER_ENABLED}")"; then
     BROWSER_PLUGIN_MODE="enabled"
@@ -159,7 +164,7 @@ BROWSER_PLUGIN_MODE="$(trim_var "$BROWSER_PLUGIN_MODE" | tr '[:upper:]' '[:lower
 case "$BROWSER_PLUGIN_MODE" in
   true|1|yes|on) BROWSER_PLUGIN_MODE="enabled" ;;
   false|0|no|off) BROWSER_PLUGIN_MODE="disabled" ;;
-  enabled|disabled|auto) ;;
+  enabled|disabled|auto|remote) ;;
   *)
     echo "Warning: invalid BROWSER_PLUGIN_MODE='$BROWSER_PLUGIN_MODE'; using disabled on HF Spaces and auto elsewhere." >&2
     if [ -n "${SPACE_HOST:-}" ]; then BROWSER_PLUGIN_MODE="disabled"; else BROWSER_PLUGIN_MODE="auto"; fi
@@ -172,6 +177,26 @@ case "$ACP_PLUGIN_MODE" in
   enabled|disabled|auto) ;;
   *) ACP_PLUGIN_MODE="auto" ;;
 esac
+
+case "$OPENCLAW_BROWSER_PROFILE" in
+  ""|*[!a-z0-9-]*)
+    echo "Warning: invalid OPENCLAW_BROWSER_PROFILE='$OPENCLAW_BROWSER_PROFILE' (use lowercase letters, numbers, hyphens); using openclaw." >&2
+    OPENCLAW_BROWSER_PROFILE="openclaw"
+    ;;
+esac
+if [ "$BROWSER_PLUGIN_MODE" = "remote" ]; then
+  case "$OPENCLAW_BROWSER_CDP_URL" in
+    ws://*|wss://*|http://*|https://*) ;;
+    "")
+      echo "Warning: BROWSER_PLUGIN_MODE=remote requires OPENCLAW_BROWSER_CDP_URL; disabling browser plugin for this boot." >&2
+      BROWSER_PLUGIN_MODE="disabled"
+      ;;
+    *)
+      echo "Warning: invalid OPENCLAW_BROWSER_CDP_URL (must start with ws://, wss://, http://, or https://); disabling browser plugin for this boot." >&2
+      BROWSER_PLUGIN_MODE="disabled"
+      ;;
+  esac
+fi
 echo ""
 echo "  ╔══════════════════════════════════════════╗"
 echo "  ║     🦞 HuggingClaw + 💻 JupyterLab      ║"
@@ -757,7 +782,7 @@ if command -v file >/dev/null 2>&1; then
 fi
 
 ensure_chromium_for_browser_plugin() {
-  # Enforce Chromium availability when browser plugin is explicitly enabled.
+  # Enforce Chromium availability only for local managed browser mode.
   [ "$BROWSER_PLUGIN_MODE" = "enabled" ] || return 0
   for candidate in \
       /usr/lib/chromium/chromium \
@@ -825,12 +850,14 @@ if [ -z "$BROWSER_EXECUTABLE_PATH" ] && [ -n "$BROWSER_WRAPPER_PATH" ]; then
 elif [ -n "$BROWSER_EXECUTABLE_PATH" ] && [ "$HAS_FILE_CMD" != "true" ]; then
   echo "Detected Chromium executable at $BROWSER_EXECUTABLE_PATH (ELF probe skipped: 'file' command not installed)"
 fi
-if [ -z "$BROWSER_EXECUTABLE_PATH" ]; then
+if [ -z "$BROWSER_EXECUTABLE_PATH" ] && [ "$BROWSER_PLUGIN_MODE" != "remote" ]; then
   echo "Warning: Chromium executable not found. Browser plugin will be disabled."
 fi
 
 BROWSER_SHOULD_ENABLE=false
-if [ "$BROWSER_PLUGIN_MODE" = "enabled" ] && [ -n "$BROWSER_EXECUTABLE_PATH" ] && [ -x "$BROWSER_EXECUTABLE_PATH" ]; then
+if [ "$BROWSER_PLUGIN_MODE" = "remote" ] && [ -n "$OPENCLAW_BROWSER_CDP_URL" ]; then
+  BROWSER_SHOULD_ENABLE=true
+elif [ "$BROWSER_PLUGIN_MODE" = "enabled" ] && [ -n "$BROWSER_EXECUTABLE_PATH" ] && [ -x "$BROWSER_EXECUTABLE_PATH" ]; then
   BROWSER_SHOULD_ENABLE=true
 elif [ "$BROWSER_PLUGIN_MODE" = "auto" ] && [ -n "$BROWSER_EXECUTABLE_PATH" ] && [ -x "$BROWSER_EXECUTABLE_PATH" ]; then
   BROWSER_SHOULD_ENABLE=true
@@ -878,43 +905,75 @@ CONFIG_JSON=$(jq \
       else . end)' <<<"$CONFIG_JSON")
 
 if [ "$BROWSER_SHOULD_ENABLE" = "true" ]; then
-  # NOTE: do NOT add executablePath, localLaunchTimeoutMs, or localCdpReadyTimeoutMs
-  # here — those are protected keys managed internally by OpenClaw and will be
-  # rejected/ignored if set from the outside config (intentionally removed in
-  # commit "Avoid protected browser config keys in generated OpenClaw config").
-  CONFIG_JSON=$(jq \
-    '.browser = {
-       "enabled": true,
-       "defaultProfile": "openclaw",
-       "headless": true,
-       "noSandbox": true,
-       "extraArgs": [
-         "--headless=new",
-         "--no-sandbox",
-         "--disable-setuid-sandbox",
-         "--no-zygote",
-         "--disable-dev-shm-usage",
-         "--disable-gpu",
-         "--remote-debugging-address=127.0.0.1",
-         "--remote-allow-origins=*",
-         "--disable-features=UseDBus,MediaRouter,VizDisplayCompositor,BlinkGenPropertyTrees",
-         "--disable-dbus",
-         "--disable-background-media-suspend",
-         "--password-store=basic",
-         "--no-first-run",
-         "--disable-background-networking",
-         "--disable-sync",
-         "--disable-translate",
-         "--disable-notifications",
-         "--disable-speech-api",
-         "--disable-extensions",
-         "--mute-audio",
-         "--metrics-recording-only"
-       ]
-     }
-     | .agents.defaults.sandbox.browser.allowHostControl = true' <<<"$CONFIG_JSON")
+  if [ "$BROWSER_PLUGIN_MODE" = "remote" ]; then
+    # Remote CDP mode avoids launching local Chromium in HF Spaces. This is useful
+    # on free-tier Spaces where managed Chromium is unstable/heavy. OpenClaw still
+    # controls a Chromium-family browser, but that browser runs outside this Space.
+    _BROWSER_ATTACH_ONLY=false
+    if hc_is_true "$OPENCLAW_BROWSER_ATTACH_ONLY"; then
+      _BROWSER_ATTACH_ONLY=true
+    elif [ "$OPENCLAW_BROWSER_ATTACH_ONLY" = "auto" ]; then
+      case "$OPENCLAW_BROWSER_CDP_URL" in
+        ws://127.0.0.1:*|ws://localhost:*|http://127.0.0.1:*|http://localhost:*)
+          _BROWSER_ATTACH_ONLY=true
+          ;;
+      esac
+    fi
+    CONFIG_JSON=$(jq \
+      --arg profile "$OPENCLAW_BROWSER_PROFILE" \
+      --arg cdpUrl "$OPENCLAW_BROWSER_CDP_URL" \
+      --argjson attachOnly "$_BROWSER_ATTACH_ONLY" \
+      '.browser = {
+         "enabled": true,
+         "defaultProfile": $profile,
+         "profiles": {
+           ($profile): {
+             "cdpUrl": $cdpUrl,
+             "attachOnly": $attachOnly
+           }
+         }
+       }
+       | .agents.defaults.sandbox.browser.allowHostControl = true' <<<"$CONFIG_JSON")
+    unset _BROWSER_ATTACH_ONLY
+  else
+    # NOTE: do NOT add executablePath, localLaunchTimeoutMs, or localCdpReadyTimeoutMs
+    # here — those are protected keys managed internally by OpenClaw and will be
+    # rejected/ignored if set from the outside config (intentionally removed in
+    # commit "Avoid protected browser config keys in generated OpenClaw config").
+    CONFIG_JSON=$(jq \
+      --arg profile "$OPENCLAW_BROWSER_PROFILE" \
+      '.browser = {
+         "enabled": true,
+         "defaultProfile": $profile,
+         "headless": true,
+         "noSandbox": true,
+         "extraArgs": [
+           "--headless=new",
+           "--no-sandbox",
+           "--disable-setuid-sandbox",
+           "--no-zygote",
+           "--disable-dev-shm-usage",
+           "--disable-gpu",
+           "--remote-debugging-address=127.0.0.1",
+           "--remote-allow-origins=*",
+           "--disable-features=UseDBus,MediaRouter,VizDisplayCompositor,BlinkGenPropertyTrees",
+           "--disable-dbus",
+           "--disable-background-media-suspend",
+           "--password-store=basic",
+           "--no-first-run",
+           "--disable-background-networking",
+           "--disable-sync",
+           "--disable-translate",
+           "--disable-notifications",
+           "--disable-speech-api",
+           "--disable-extensions",
+           "--mute-audio",
+           "--metrics-recording-only"
+         ]
+       }
+       | .agents.defaults.sandbox.browser.allowHostControl = true' <<<"$CONFIG_JSON")
+  fi
 fi
-
 # Control UI origin (allow HF Space URL for web UI access).
 # Disable device auth (pairing) for headless Docker — token-only auth.
 # Combined into one jq pass; --arg keeps password/host injection-safe.
@@ -1213,6 +1272,9 @@ else
   echo "WhatsApp  : disabled"
 fi
 echo "Browser   : ${BROWSER_PLUGIN_MODE} (${BROWSER_SHOULD_ENABLE})"
+if [ "$BROWSER_PLUGIN_MODE" = "remote" ]; then
+  echo "BrowserCDP: configured (${OPENCLAW_BROWSER_PROFILE})"
+fi
 if [ -n "${HF_TOKEN:-}" ]; then
   echo "Backup    : ${BACKUP_DATASET:-huggingclaw-backup} (every ${SYNC_INTERVAL:-180}s)"
 else
@@ -1299,6 +1361,7 @@ trap graceful_shutdown SIGTERM SIGINT
 BROWSER_WARMED_UP=false
 warmup_browser() {
   [ "$BROWSER_SHOULD_ENABLE" = "true" ] || return 0
+  [ "$BROWSER_PLUGIN_MODE" != "remote" ] || return 0
   # Only warm up once — gateway restarts should not re-spawn new warmup jobs.
   [ "$BROWSER_WARMED_UP" = "false" ] || return 0
   BROWSER_WARMED_UP=true
@@ -1317,8 +1380,8 @@ warmup_browser() {
         continue
       fi
 
-      if openclaw browser --browser-profile openclaw start >/dev/null 2>&1; then
-        openclaw browser --browser-profile openclaw open about:blank >/dev/null 2>&1 || true
+      if openclaw browser --browser-profile "$OPENCLAW_BROWSER_PROFILE" start >/dev/null 2>&1; then
+        openclaw browser --browser-profile "$OPENCLAW_BROWSER_PROFILE" open about:blank >/dev/null 2>&1 || true
         echo "Managed browser ready."
         return 0
       fi
