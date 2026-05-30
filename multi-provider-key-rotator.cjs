@@ -72,6 +72,22 @@ const DIAGNOSTICS_INTERVAL_MS = Math.max(
 const USE_SUSPENDED_KEY_AS_LAST_RESORT = !/^(0|false|no|off)$/i.test(
   String(process.env.KEY_USE_SUSPENDED_AS_LAST_RESORT || 'true').trim(),
 );
+
+// Maximum ms to respect from a Retry-After header.
+// Old cap was 10s — too low for Gemini/Google which often returns 60s+.
+const MAX_RETRY_AFTER_MS = Math.max(
+  1_000,
+  parseInt(process.env.KEY_MAX_RETRY_AFTER_MS || '', 10) || 5 * 60_000,
+);
+
+// Real-cycle: when all keys are suspended, sleep until the soonest key
+// recovers rather than firing into a guaranteed 429.
+// Set to 0 to disable (reverts to old fire-and-miss behaviour).
+const MAX_KEY_WAIT_MS = Math.max(
+  0,
+  parseInt(process.env.KEY_MAX_WAIT_MS || '', 10) || 2 * 60_000,
+);
+
 // Long suspend window for exhausted/invalid keys.
 // Capped to 16h to avoid oversuppressing pools for too long.
 const formatHours = (ms) => (ms / (60 * 60 * 1000)).toFixed(ms % (60 * 60 * 1000) === 0 ? 0 : 2);
@@ -82,7 +98,10 @@ const PROVIDERS = [
   { name:'anthropic',    hostname:/(?:^|\.)api\.anthropic\.com$/i,            envPlural:'ANTHROPIC_API_KEYS',        envSingular:'ANTHROPIC_API_KEY' },
   { name:'openai',       hostname:/(?:^|\.)api\.openai\.com$/i,               envPlural:'OPENAI_API_KEYS',           envSingular:'OPENAI_API_KEY' },
   { name:'gemini',       hostname:/(?:^|\.)(?:generativelanguage\.googleapis\.com|aiplatform\.googleapis\.com)$/i,
-                                                                               envPlural:'GEMINI_API_KEYS',           envSingular:'GEMINI_API_KEY',  queryParam:true },
+                                                                               envPlural:'GEMINI_API_KEYS',           envSingular:'GEMINI_API_KEY',  queryParam:true,
+    // Google enforces rate limits per-model per-key (RPM / TPD per model).
+    // A 429 on gemini-2.5-pro must NOT blacklist the key for gemini-1.5-flash.
+    perModelLimits: true },
   { name:'deepseek',     hostname:/(?:^|\.)api\.deepseek\.com$/i,             envPlural:'DEEPSEEK_API_KEYS',         envSingular:'DEEPSEEK_API_KEY' },
   { name:'openrouter',   hostname:/(?:^|\.)openrouter\.ai$/i,                 envPlural:'OPENROUTER_API_KEYS',       envSingular:'OPENROUTER_API_KEY' },
   { name:'kilocode',     hostname:/(?:^|\.)kilocode\.ai$/i,                   envPlural:'KILOCODE_API_KEYS',         envSingular:'KILOCODE_API_KEY' },
@@ -131,6 +150,38 @@ function normalizeKeys(...inputs) {
 // blacklistedUntil – epoch ms; 0 = active
 function makeKeyState() { return { strikes: 0, blacklistedUntil: 0, lastFailureAt: 0 }; }
 
+/**
+ * Extracts the model name from a request URL.
+ * Gemini:   /v1beta/models/gemini-2.5-pro:generateContent  → "gemini-2.5-pro"
+ * OpenAI-compat: cannot be extracted from URL (body only) → null
+ */
+function extractModelFromUrl(urlLike) {
+  try {
+    const str =
+      typeof urlLike === 'string'   ? urlLike
+      : urlLike instanceof URL      ? urlLike.href
+      : (urlLike && typeof urlLike.url === 'string') ? urlLike.url
+      : null;
+    if (!str) return null;
+    const m = new URL(str).pathname.match(/\/models\/([^/:?]+)/);
+    return m ? m[1].toLowerCase() : null;
+  } catch { return null; }
+}
+
+/**
+ * Returns the earliest epoch-ms at which this key will be usable again,
+ * considering both the global key state and (for perModelLimits providers)
+ * the model-specific state.  Returns 0 if the key is currently active.
+ */
+function getKeyExpiry(p, key, model) {
+  let expiry = p.keyState.get(key)?.blacklistedUntil ?? 0;
+  if (p.modelKeyState && model) {
+    const mks = p.modelKeyState.get(`${key}:${model}`);
+    if (mks && mks.blacklistedUntil > expiry) expiry = mks.blacklistedUntil;
+  }
+  return expiry;
+}
+
 const providerState = PROVIDERS.map(p => {
   const llmFallbackEnabled = !/^(0|false|no|off)$/.test(
     String(process.env.LLM_API_KEY_FALLBACK_ENABLED || '').trim().toLowerCase(),
@@ -158,15 +209,26 @@ const providerState = PROVIDERS.map(p => {
   // keyState: Map<keyString, {strikes, blacklistedUntil}>
   const keyState = new Map(keys.map(k => [k, makeKeyState()]));
 
+  // modelKeyState: Map<"key:model", {strikes, blacklistedUntil, lastFailureAt}>
+  // Only populated for providers with perModelLimits (e.g. gemini).
+  // Tracks 429 cooldowns scoped to (key, model) pairs so a rate-limited key
+  // for model-A remains fully available for model-B.
+  const modelKeyState = p.perModelLimits ? new Map() : null;
+
   // FIX: idx tracks position in the ACTIVE (non-permanently-removed) pool.
   // We never remove keys from the array — we just skip blacklisted ones.
   // idx advances only when a key is ACTUALLY picked (no drift for skipped keys).
-  return { ...p, keys, keyState, inFlight: new Map(), idx: 0 };
+  return { ...p, keys, keyState, modelKeyState, inFlight: new Map(), idx: 0 };
 });
 
 // LLM_API_KEY fallback summary
 const fallbackCount = providerState.filter(p => {
-  const ded = normalizeKeys(process.env[p.envPlural] || '', process.env[p.envSingular] || '');
+  const ded = normalizeKeys(
+    process.env[p.envPlural]          || '',
+    process.env[p.envSingular]        || '',
+    process.env[p._extraPlural  || ''] || '',
+    process.env[p._extraSingular || ''] || '',
+  );
   return ded.length === 0 && p.keys.length > 0;
 }).length;
 if (fallbackCount > 0)
@@ -175,43 +237,89 @@ if (fallbackCount > 0)
 // ─── Per-key state helpers ────────────────────────────────────────────────────
 
 /**
- * Is this key currently sitting out?
- * Also auto-clears expired blacklists so the key re-enters the pool silently.
- * Strike decay: each time a blacklist period expires naturally (served its
- * full cooldown without a success), we reduce strikes by 1.  This prevents a
- * key from being permanently suspended just because it was rate-limited 3 times
- * over a long period (e.g. 3 × 429s spread across hours on a free-tier quota).
- * A key that truly has quota exhausted will simply accumulate strikes again on
- * the next requests and settle back into long suspension.
+ * Is this key currently active (not sitting out)?
+ *
+ * For plain providers: checks the global keyState only.
+ * For perModelLimits providers (e.g. gemini): additionally checks the
+ * model-scoped state.  A key blocked for "gemini-2.5-pro" is still active
+ * for "gemini-1.5-flash".
+ *
+ * Also auto-clears expired blacklists so keys re-enter the pool silently.
+ * Strike decay: each natural expiry reduces strikes by 1 to avoid permanent
+ * suspension from rate-limit bursts spread over hours.
  */
-function isActive(p, key) {
+function isActive(p, key, model) {
+  // ── Global key check ───────────────────────────────────────────────────────
   const ks = p.keyState.get(key);
-  if (!ks) return true;                          // unknown key → treat as active
-  if (ks.blacklistedUntil === 0) return true;    // not blacklisted
-  if (Date.now() >= ks.blacklistedUntil) {
-    ks.blacklistedUntil = 0;                     // expired → back in pool
-    // Decay strikes by 1 on natural expiry so a key that served its full
-    // cooldown gets a partial fresh start.  It still needs a success to fully
-    // reset, but this prevents instant perm-suspension on the very next 429.
+  if (ks && ks.blacklistedUntil !== 0) {
+    if (Date.now() < ks.blacklistedUntil) return false;   // still cooling down
+    // Natural expiry: give partial fresh start
+    ks.blacklistedUntil = 0;
     if (ks.strikes > 0) ks.strikes -= 1;
     debug(`[key-rotator] ${p.name}: ...${key.slice(-6)} back in pool (strikes now ${ks.strikes})`);
-    return true;
   }
-  return false;
+
+  // ── Per-model check (gemini etc.) ──────────────────────────────────────────
+  if (p.modelKeyState && model) {
+    const mKey = `${key}:${model}`;
+    const mks  = p.modelKeyState.get(mKey);
+    if (mks && mks.blacklistedUntil !== 0) {
+      if (Date.now() < mks.blacklistedUntil) return false;   // blocked for this model
+      mks.blacklistedUntil = 0;
+      if (mks.strikes > 0) mks.strikes -= 1;
+      debug(`[key-rotator] ${p.name}: ...${key.slice(-6)} back in pool for model=${model} (strikes now ${mks.strikes})`);
+    }
+  }
+
+  return true;
 }
 
 /**
  * Called when a key gets a 429/402 response.
  *
- * Strike logic:
- *   strike 1 → BASE_COOLDOWN_MS  (e.g. 60 s  — probably rate-limit)
- *   strike 2 → BASE_COOLDOWN_MS × 4            (240 s)
- *   strike 3 → PERM_SUSPEND_MS (max 16 h — treat as quota exhausted, skip long)
+ * For perModelLimits providers (gemini): the blacklist is scoped to the
+ * (key, model) pair so the key remains available for other models.
+ * For all other providers: the global key state is penalised as before.
  *
- * A successful response resets strikes so a key that was temporarily
- * rate-limited and recovered is treated as fresh again.
+ * Strike logic (same for both scopes):
+ *   strike 1 → BASE_COOLDOWN_MS        (e.g. 60 s)
+ *   strike 2 → BASE_COOLDOWN_MS × 4   (240 s)
+ *   strike 3 → PERM_SUSPEND_MS (max 16 h)
+ *
+ * A successful response resets strikes so a temporarily rate-limited key
+ * is treated as fresh again after recovery.
  */
-function recordFailure(p, key) {
+function recordFailure(p, key, model, retryAfterMs) {
+  if (!p || !key) return;
+  // retryAfterMs: value from the server's Retry-After response header (already in ms).
+  // When the server explicitly says "wait N seconds", use that if it's longer than
+  // our exponential cooldown.  This prevents hammering a key before its quota resets.
+  const serverHintMs = (typeof retryAfterMs === 'number' && retryAfterMs > 0) ? retryAfterMs : 0;
+
+  if (p.modelKeyState && model) {
+    const mKey = `${key}:${model}`;
+    let mks = p.modelKeyState.get(mKey);
+    if (!mks) { mks = makeKeyState(); p.modelKeyState.set(mKey, mks); }
+
+    mks.strikes     = Math.min(mks.strikes + 1, MAX_STRIKES);
+    mks.lastFailureAt = Date.now();
+
+    let cooldown;
+    if (mks.strikes >= MAX_STRIKES) {
+      cooldown = PERM_SUSPEND_MS;
+      warn(`[key-rotator] ${p.name}: ...${key.slice(-6)} model=${model} hit ${MAX_STRIKES} strikes — suspended for ${formatHours(PERM_SUSPEND_MS)}h (quota likely exhausted for this model)`);
+    } else {
+      cooldown = BASE_COOLDOWN_MS * Math.pow(4, mks.strikes - 1);
+      const jitter = 1 + ((Math.random() * 2 - 1) * (COOLDOWN_JITTER_PCT / 100));
+      cooldown = Math.max(1_000, Math.round(cooldown * jitter));
+      if (serverHintMs > cooldown) cooldown = serverHintMs;
+      debug(`[key-rotator] ${p.name}: ...${key.slice(-6)} model=${model} strike ${mks.strikes}/${MAX_STRIKES} — backoff ${Math.round(cooldown / 1000)}s${serverHintMs > 0 ? ` (server-hint ${Math.round(serverHintMs/1000)}s)` : ''}`);
+    }
+    mks.blacklistedUntil = Math.max(mks.blacklistedUntil || 0, Date.now() + cooldown);
+    return;
+  }
+
+  // ── Global path (all other providers) ─────────────────────────────────────
   let ks = p.keyState.get(key);
   if (!ks) { ks = makeKeyState(); p.keyState.set(key, ks); }
 
@@ -227,14 +335,11 @@ function recordFailure(p, key) {
     cooldown = BASE_COOLDOWN_MS * Math.pow(4, ks.strikes - 1);
     const jitter = 1 + ((Math.random() * 2 - 1) * (COOLDOWN_JITTER_PCT / 100));
     cooldown = Math.max(1000, Math.round(cooldown * jitter));
-    const secs = Math.round(cooldown / 1000);
-    debug(`[key-rotator] ${p.name}: ...${key.slice(-6)} strike ${ks.strikes}/${MAX_STRIKES} — backoff ${secs}s`);
+    if (serverHintMs > cooldown) cooldown = serverHintMs;
+    debug(`[key-rotator] ${p.name}: ...${key.slice(-6)} strike ${ks.strikes}/${MAX_STRIKES} — backoff ${Math.round(cooldown / 1000)}s${serverHintMs > 0 ? ` (server-hint ${Math.round(serverHintMs/1000)}s)` : ''}`);
   }
 
   // Use Math.max so a longer existing suspension is never shortened.
-  // This matters when a last-resort key (already perm-suspended) gets another
-  // 429 — without Math.max the timer would reset to a fresh 16 h window,
-  // potentially looping forever and keeping all keys in perpetual suspension.
   ks.blacklistedUntil = Math.max(ks.blacklistedUntil || 0, Date.now() + cooldown);
 }
 
@@ -255,13 +360,28 @@ function recordTransientFailure(p, key) {
 
 /**
  * Called on any 2xx/3xx response — resets the key's strike counter.
+ * For perModelLimits providers, also clears the model-specific cooldown so
+ * a key that recovered for a given model is immediately reusable.
  */
-function recordSuccess(p, key) {
+function recordSuccess(p, key, model) {
+  // Reset global strikes
   const ks = p.keyState.get(key);
   if (ks && ks.strikes > 0) {
     ks.strikes = 0;
     ks.lastFailureAt = 0;
-    debug(`[key-rotator] ${p.name}: ...${key.slice(-6)} recovered — strikes reset`);
+    debug(`[key-rotator] ${p.name}: ...${key.slice(-6)} recovered (global) — strikes reset`);
+  }
+
+  // Also clear model-specific state on success
+  if (p.modelKeyState && model) {
+    const mKey = `${key}:${model}`;
+    const mks  = p.modelKeyState.get(mKey);
+    if (mks && (mks.strikes > 0 || mks.blacklistedUntil > 0)) {
+      mks.strikes = 0;
+      mks.lastFailureAt = 0;
+      mks.blacklistedUntil = 0;
+      debug(`[key-rotator] ${p.name}: ...${key.slice(-6)} model=${model} recovered — strikes reset`);
+    }
   }
 }
 
@@ -301,6 +421,15 @@ function endInFlight(p, key) {
 /**
  * Pick the next active key using round-robin.
  *
+ * `model` (optional) — for perModelLimits providers (gemini) a key that is
+ * rate-limited for modelA can still be active for modelB.  Pass the model so
+ * `isActive` checks the scoped state in addition to the global one.
+ *
+ * Returns: { key, waitMs }
+ *   key    – the chosen key string (may be null if pool empty)
+ *   waitMs – > 0 means ALL keys are suspended; caller should sleep this long
+ *            before using the key (real-cycle instead of fire-and-miss).
+ *
  * FIX (idx drift): idx advances by 1 per CALL, not per skip.
  * We scan up to `total` positions from the current idx to find an active key.
  * The found key's position becomes the new baseline for the next call.
@@ -313,8 +442,8 @@ function endInFlight(p, key) {
  *   call 5: start=9 → picks k9, next start=0
  * Every active key gets equal share; blacklisted keys are cleanly skipped.
  */
-function nextKey(p) {
-  if (!p || !p.keys.length) return null;
+function nextKey(p, model) {
+  if (!p || !p.keys.length) return { key: null, waitMs: 0 };
 
   const total = p.keys.length;
 
@@ -322,17 +451,22 @@ function nextKey(p) {
   for (let offset = 0; offset < total; offset++) {
     const i   = (p.idx + offset) % total;
     const key = p.keys[i];
-    if (isActive(p, key)) {
+    if (isActive(p, key, model)) {
       const inflight = p.inFlight.get(key) || 0;
       if (inflight < MAX_INFLIGHT_PER_KEY) {
         p.idx = (i + 1) % total;   // next call starts AFTER the key we just picked
-        if (VERBOSE_PICKS) debug(`[key-rotator] ${p.name}: picked ...${key.slice(-6)} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
-        return key;
+        if (VERBOSE_PICKS) debug(`[key-rotator] ${p.name}: picked ...${key.slice(-6)}${model ? ` model=${model}` : ''} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
+        return { key, waitMs: 0 };
       }
       if (!bestPick) bestPick = { i, key, inflight, score: Number.POSITIVE_INFINITY };
-      const ks = p.keyState.get(key) || makeKeyState();
-      const recentFailPenalty = ks.lastFailureAt > 0 && (Date.now() - ks.lastFailureAt) < FAILURE_DECAY_MS ? 100 : 0;
-      const strikePenalty = (ks.strikes || 0) * 10;
+      // Score: prefer keys with fewer recent failures and lower in-flight count.
+      // For perModelLimits, also factor in model-specific strike count.
+      const ks  = p.keyState.get(key) || makeKeyState();
+      const mks = (p.modelKeyState && model) ? (p.modelKeyState.get(`${key}:${model}`) || makeKeyState()) : makeKeyState();
+      const recentFailPenalty =
+        (ks.lastFailureAt  > 0 && (Date.now() - ks.lastFailureAt)  < FAILURE_DECAY_MS ? 100 : 0) +
+        (mks.lastFailureAt > 0 && (Date.now() - mks.lastFailureAt) < FAILURE_DECAY_MS ? 100 : 0);
+      const strikePenalty = ((ks.strikes || 0) + (mks.strikes || 0)) * 10;
       const score = recentFailPenalty + strikePenalty + inflight;
       if (score < bestPick.score) bestPick = { i, key, inflight, score };
     }
@@ -340,29 +474,39 @@ function nextKey(p) {
 
   if (bestPick) {
     p.idx = (bestPick.i + 1) % total;
-    warn(`[key-rotator] ${p.name}: all active keys saturated, reusing ...${bestPick.key.slice(-6)} inflight=${bestPick.inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
-    return bestPick.key;
+    warn(`[key-rotator] ${p.name}: all active keys saturated, reusing ...${bestPick.key.slice(-6)}${model ? ` model=${model}` : ''} inflight=${bestPick.inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
+    return { key: bestPick.key, waitMs: 0 };
   }
 
   // All keys are sitting out — default to best-effort progress by reusing
   // the soonest-recovering key, unless explicitly disabled.
   if (!USE_SUSPENDED_KEY_AS_LAST_RESORT) {
     warn(`[key-rotator] ${p.name}: all ${total} key(s) suspended — withholding key until cooldown expires (last-resort disabled)`);
-    return null;
+    return { key: null, waitMs: 0 };
   }
 
-  warn(`[key-rotator] ${p.name}: all ${total} key(s) suspended — using soonest-recovering key`);
   // FIX: scan from p.idx (same round-robin start as normal path) so ties in
   // expiry are broken by position — every key gets equal turns even when all
   // are suspended with the same blacklistedUntil timestamp.
+  // For perModelLimits providers, use the effective (max of global + model) expiry.
   let bestIdx = -1, bestExpiry = Infinity;
   for (let offset = 0; offset < total; offset++) {
-    const i = (p.idx + offset) % total;
-    const exp = p.keyState.get(p.keys[i])?.blacklistedUntil ?? 0;
+    const i   = (p.idx + offset) % total;
+    const exp = getKeyExpiry(p, p.keys[i], model);
     if (exp < bestExpiry) { bestIdx = i; bestExpiry = exp; }
   }
+  const chosenKey = p.keys[bestIdx];
   p.idx = (bestIdx + 1) % total; // advance for next call
-  return p.keys[bestIdx];
+
+  // Real-cycle: tell the caller how long to wait before using this key.
+  // This avoids firing into a guaranteed 429 and wasting a request slot.
+  const waitMs = Math.max(0, bestExpiry - Date.now());
+  if (waitMs > 0)
+    warn(`[key-rotator] ${p.name}: all ${total} key(s) suspended — soonest key ...${chosenKey.slice(-6)} recovers in ${Math.round(waitMs / 1000)}s${model ? ` (model=${model})` : ''}`);
+  else
+    warn(`[key-rotator] ${p.name}: all ${total} key(s) suspended — using soonest-recovering key ...${chosenKey.slice(-6)}`);
+
+  return { key: chosenKey, waitMs };
 }
 
 // ─── Auth header injection ────────────────────────────────────────────────────
@@ -398,10 +542,10 @@ function setAuthHeader(headers, key) {
   return { authorization: val };
 }
 
-function handleStatus(p, key, status) {
+function handleStatus(p, key, status, model, retryAfterMs) {
   if (!p || !key) return;
   if (status === 401 || status === 403) {
-    // Usually invalid/expired key. Suspend long to avoid repeatedly poisoning requests.
+    // Invalid/expired key — always a global (not model-scoped) blacklist.
     let ks = p.keyState.get(key);
     if (!ks) { ks = makeKeyState(); p.keyState.set(key, ks); }
     ks.strikes = MAX_STRIKES;
@@ -412,21 +556,23 @@ function handleStatus(p, key, status) {
   }
 
   if (status === 429 || status === 402) {
-    // Treat quota/rate-limit as strike-bearing failures so repeatedly
-    // exhausted keys quickly move into long suspend (up to 16h).
-    recordFailure(p, key);
-    warn(`[key-rotator] ${p.name}: quota/rate status=${status} on ...${key.slice(-6)}`);
+    // For perModelLimits providers (gemini): quota is per (key, model).
+    // recordFailure will scope the blacklist to the model when model is provided.
+    // Pass retryAfterMs so the key blacklist respects the server's stated wait time.
+    recordFailure(p, key, model, retryAfterMs);
+    warn(`[key-rotator] ${p.name}: quota/rate status=${status} on ...${key.slice(-6)}${model ? ` model=${model}` : ''}${retryAfterMs ? ` retry-after=${Math.round(retryAfterMs/1000)}s` : ''}`);
     return;
   }
 
   if (classifyRetryableFailure(status)) {
+    // Transient server errors are not model-specific — penalise key globally.
     recordTransientFailure(p, key);
     warn(`[key-rotator] ${p.name}: transient status=${status} on ...${key.slice(-6)}`);
     return;
   }
 
   if (status >= 200 && status < 400) {
-    recordSuccess(p, key);
+    recordSuccess(p, key, model);
   }
 }
 
@@ -454,19 +600,35 @@ function startDiagnostics() {
     const snapshot = providerState.map(p => {
       const keyStats = p.keys.map(k => {
         const ks = p.keyState.get(k) || makeKeyState();
+        const globalActive = ks.blacklistedUntil === 0 || now >= ks.blacklistedUntil;
         return {
           keySuffix: k.slice(-6),
-          active: ks.blacklistedUntil === 0 || now >= ks.blacklistedUntil,
+          active: globalActive,
           strikes: ks.strikes,
           inFlight: p.inFlight.get(k) || 0,
         };
       });
-      const active = keyStats.filter(s => s.active).length;
+      const active    = keyStats.filter(s => s.active).length;
       const suspended = keyStats.length - active;
       const avgStrikes = keyStats.length
         ? Number((keyStats.reduce((sum, s) => sum + s.strikes, 0) / keyStats.length).toFixed(2))
         : 0;
-      return { provider: p.name, total: keyStats.length, active, suspended, avgStrikes, keys: keyStats };
+
+      // Per-model summary for providers with perModelLimits (gemini etc.)
+      let modelSummary;
+      if (p.modelKeyState && p.modelKeyState.size > 0) {
+        const modelBlocked = {};
+        for (const [mKey, mks] of p.modelKeyState) {
+          if (mks.blacklistedUntil > now) {
+            const model = mKey.split(':').slice(1).join(':');
+            modelBlocked[model] = (modelBlocked[model] || 0) + 1;
+          }
+        }
+        if (Object.keys(modelBlocked).length > 0) modelSummary = modelBlocked;
+      }
+
+      return { provider: p.name, total: keyStats.length, active, suspended, avgStrikes, keys: keyStats,
+               ...(modelSummary ? { modelBlocked: modelSummary } : {}) };
     });
     log('[key-rotator] diagnostics', JSON.stringify({ ts: new Date().toISOString(), providers: snapshot }));
   }, DIAGNOSTICS_INTERVAL_MS).unref?.();
@@ -481,10 +643,12 @@ function parseRetryAfterMs(value) {
   if (!value) return 0;
   const raw = String(value).trim();
   if (!raw) return 0;
+  // Numeric seconds (most common — Gemini, OpenAI, Anthropic all use this form)
   const sec = Number(raw);
-  if (Number.isFinite(sec) && sec >= 0) return Math.min(10_000, Math.round(sec * 1000));
+  if (Number.isFinite(sec) && sec >= 0) return Math.min(MAX_RETRY_AFTER_MS, Math.round(sec * 1000));
+  // HTTP-date form
   const ts = Date.parse(raw);
-  if (Number.isFinite(ts)) return Math.min(10_000, Math.max(0, ts - Date.now()));
+  if (Number.isFinite(ts)) return Math.min(MAX_RETRY_AFTER_MS, Math.max(0, ts - Date.now()));
   return 0;
 }
 
@@ -605,6 +769,9 @@ function patchFetch() {
     const provider = matchProvider(resolveHostname(urlLike));
     if (!provider) return await orig(input, init);
 
+    // Extract model for per-model-limit providers (gemini etc.)
+    const model = provider.perModelLimits ? extractModelFromUrl(urlLike) : null;
+
     // ── Gemini: strip thought parts from history before sending ──────────────
     if (provider.name === 'gemini') {
       try {
@@ -635,18 +802,37 @@ function patchFetch() {
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         let usedKey = null;
         try {
-          let key = nextKey(provider);
-          // Prefer a fresh key for each retry when possible, but never spin forever.
+          let { key, waitMs } = nextKey(provider, model);
+
+          // FIX: Prefer a fresh key for each retry without calling nextKey repeatedly
+          // (which would advance p.idx for keys we never actually use, causing drift).
+          // Instead, scan the pool directly for an untried active key.
           if (key && triedKeys.has(key) && triedKeys.size < provider.keys.length) {
-            const maxProbe = Math.min(provider.keys.length, 8);
-            for (let probe = 0; probe < maxProbe; probe++) {
-              const alt = nextKey(provider);
-              if (!alt || !triedKeys.has(alt)) {
-                key = alt;
-                break;
+            const total = provider.keys.length;
+            for (let offset = 0; offset < total; offset++) {
+              const i = (provider.idx + offset) % total;
+              const candidate = provider.keys[i];
+              if (!triedKeys.has(candidate) && isActive(provider, candidate, model)) {
+                const inflight = provider.inFlight.get(candidate) || 0;
+                if (inflight < MAX_INFLIGHT_PER_KEY) {
+                  provider.idx = (i + 1) % total;
+                  key = candidate; waitMs = 0;
+                  break;
+                }
               }
             }
           }
+
+          // ── Real-cycle: actually wait for the soonest suspended key ──────────
+          // Old behaviour fired immediately into a guaranteed 429 (fake cycle).
+          // Now we sleep until the key's cooldown expires so the request has a
+          // real chance of succeeding.  Capped by MAX_KEY_WAIT_MS (env-tunable,
+          // default 2 min) so we never stall indefinitely.
+          if (key && waitMs > 0 && MAX_KEY_WAIT_MS > 0) {
+            const actualWait = Math.min(waitMs, MAX_KEY_WAIT_MS);
+            await sleep(actualWait);
+          }
+
           if (key) {
             triedKeys.add(key);
             usedKey = key;
@@ -656,17 +842,22 @@ function patchFetch() {
           const attemptArgs = buildAttemptFetchArgs(input, init, provider, usedKey);
           const response = await orig(...attemptArgs);
           lastResponse = response;
-          try { handleStatus(provider, usedKey, response.status); } catch (_) {}
+
+          // Parse Retry-After BEFORE calling handleStatus so the key blacklist
+          // is set to the correct duration the server asked for.
+          const retryAfterMs = parseRetryAfterMs(response.headers?.get?.('retry-after'));
+          try { handleStatus(provider, usedKey, response.status, model, retryAfterMs); } catch (_) {}
           try { endInFlight(provider, usedKey); } catch (_) {}
 
           const shouldRetry = attempt < maxAttempts && classifyRetryableFailure(response.status);
           if (shouldRetry) {
-            const retryAfterMs = parseRetryAfterMs(response.headers?.get?.('retry-after'));
-            const backoffMs = Math.min(
-              10_000,
-              Math.max(retryAfterMs, FETCH_RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1)),
-            );
-            warn(`[key-rotator] ${provider.name}: fetch retry ${attempt}/${maxAttempts - 1} after status=${response.status} method=${method}`);
+            // FIX: Inter-attempt backoff should be SMALL (just a jitter) when we
+            // have a fresh key to try.  The retry-after duration has already been
+            // applied to the KEY blacklist via handleStatus — sleeping for the full
+            // retry-after here would block the next attempt with a fresh key for
+            // no reason (e.g. 60s wait when key2 is immediately available).
+            const backoffMs = Math.min(2_000, FETCH_RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1));
+            warn(`[key-rotator] ${provider.name}: fetch retry ${attempt}/${maxAttempts - 1} after status=${response.status} method=${method}${retryAfterMs ? ` (retry-after ${Math.round(retryAfterMs/1000)}s applied to key blacklist)` : ''}`);
             await sleep(backoffMs);
             continue;
           }
@@ -709,16 +900,30 @@ function patchHttpModule(mod) {
   const orig = mod.request;
 
   mod.request = function patchedRequest(...args) {
-    let usedKey = null, usedProvider = null;
+    let usedKey = null, usedProvider = null, usedModel = null;
 
     try {
       const options  = args[0];
       const provider = matchProvider(resolveHostname(options));
 
       if (provider) {
-        const key = nextKey(provider);
+        // Extract model for per-model-limit providers from the request path.
+        const pathStr = typeof options === 'object' && options.path
+          ? options.path
+          : (typeof options === 'string' || options instanceof URL) ? String(options) : '';
+        const model = provider.perModelLimits
+          ? (pathStr.match(/\/models\/([^/:?]+)/)?.[1]?.toLowerCase() || null)
+          : null;
+
+        const { key, waitMs } = nextKey(provider, model);
+        // Note: patchHttpModule is synchronous — we cannot await a sleep here.
+        // Real-cycle sleep is only available through patchFetch (async path).
+        // Log a warning if we would have benefited from it.
+        if (key && waitMs > 0)
+          warn(`[key-rotator] ${provider.name}: http: all keys suspended (waitMs=${Math.round(waitMs/1000)}s) — firing best-effort on ...${key.slice(-6)}${model ? ` model=${model}` : ''} (sync path; use fetch for real-cycle)`);
+
         if (key) {
-          usedKey = key; usedProvider = provider;
+          usedKey = key; usedProvider = provider; usedModel = model;
           beginInFlight(usedProvider, usedKey);
           if (provider.queryParam) {
             const u = new URL(String(
@@ -763,7 +968,7 @@ function patchHttpModule(mod) {
         req.write = function interceptWrite(chunk, encoding, callback) {
           try {
             if (!bodyIntercepted) {
-              chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, encoding || 'utf8'));
+              chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, typeof encoding === 'string' ? encoding : 'utf8'));
               if (typeof encoding === 'function') { encoding(); }
               else if (typeof callback === 'function') { callback(); }
               return true;
@@ -777,7 +982,7 @@ function patchHttpModule(mod) {
             if (!bodyIntercepted) {
               bodyIntercepted = true;
               if (chunk != null) {
-                chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, encoding || 'utf8'));
+                chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, typeof encoding === 'string' ? encoding : 'utf8'));
               }
               const fullBody = Buffer.concat(chunks).toString('utf8');
               const cleaned = stripGeminiThoughtParts(fullBody);
@@ -787,7 +992,7 @@ function patchHttpModule(mod) {
               }
               // No change — replay chunks as-is.
               for (const c of chunks) _write(c);
-              return _end(typeof chunk === 'undefined' || chunk === null ? undefined : undefined, encoding, callback);
+              return _end(undefined, typeof encoding === 'function' ? encoding : callback);
             }
           } catch (_) { /* fall through to original on any error */ }
           return _end(chunk, encoding, callback);
@@ -795,13 +1000,13 @@ function patchHttpModule(mod) {
       } catch (_) { /* never break the request */ }
     }
 
-    // Intercept response to track 429/success
+    // Intercept response to track 429/success — pass model for per-model accounting
     if (usedProvider && usedKey) {
       const _emit = req.emit.bind(req);
       req.emit = function (event, ...rest) {
         if (event === 'response') {
           const res = rest[0];
-          try { handleStatus(usedProvider, usedKey, res?.statusCode); } catch (_) {}
+          try { handleStatus(usedProvider, usedKey, res?.statusCode, usedModel); } catch (_) {}
           try { endInFlight(usedProvider, usedKey); } catch (_) {}
         }
         return _emit(event, ...rest);
@@ -822,4 +1027,4 @@ patchHttpModule(http);
 patchHttpModule(https);
 startDiagnostics();
 
-log(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:${formatHours(PERM_SUSPEND_MS)}h (cap 16h) max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'} log-level:${LOG_LEVEL} verbose-picks:${VERBOSE_PICKS ? 'on' : 'off'} suspended-last-resort:${USE_SUSPENDED_KEY_AS_LAST_RESORT ? 'on' : 'off'}`);
+log(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:${formatHours(PERM_SUSPEND_MS)}h (cap 16h) max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} max-retry-after:${MAX_RETRY_AFTER_MS/1000}s max-key-wait:${MAX_KEY_WAIT_MS/1000}s diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'} log-level:${LOG_LEVEL} verbose-picks:${VERBOSE_PICKS ? 'on' : 'off'} suspended-last-resort:${USE_SUSPENDED_KEY_AS_LAST_RESORT ? 'on' : 'off'} per-model-providers:${providerState.filter(p => p.perModelLimits).map(p => p.name).join(',') || 'none'}`);
