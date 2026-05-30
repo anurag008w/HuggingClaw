@@ -1099,7 +1099,7 @@ write_json_atomic() {
   local payload="$2"
   local tmp
   tmp="${dest}.tmp.$$"
-  printf '%s\n' "$payload" > "$tmp" || return 1
+  printf '%s\n' "$payload" > "$tmp" || { rm -f "$tmp"; return 1; }
   if ! jq -e . "$tmp" >/dev/null 2>&1; then
     echo "ERROR: refusing to write invalid JSON to $dest" >&2
     rm -f "$tmp"
@@ -1359,12 +1359,19 @@ graceful_shutdown() {
     if [ -n "${SYNC_LOOP_PID:-}" ]; then
       kill "$SYNC_LOOP_PID" 2>/dev/null || true
       # Give Python a moment to flush and release the lock file.
-      sleep 0.5
+      # Reduced from 0.5 s → 0.3 s to reclaim time for the upload.
+      sleep 0.3
     fi
-    timeout 8s python3 /home/node/app/openclaw-sync.py sync-once-settled || \
+    # Pass 1: wait for config to settle then upload — avoids pushing a
+    # half-written JSON config to the dataset.  Timeout raised from 8 s
+    # to 15 s so the 3-second settle window + actual upload both fit
+    # within the budget (old 8 s left only 5 s for the upload itself).
+    timeout 15s python3 /home/node/app/openclaw-sync.py sync-once-settled || \
       echo "Warning: could not complete settled shutdown sync"
-    sleep 1
-    python3 /home/node/app/openclaw-sync.py sync-once || \
+    # Pass 2: catch any writes that arrived after the settled sync completed.
+    # BUG FIX: added timeout (previously unbounded) so HF container kill
+    # can't interrupt a hung upload and lose all data silently.
+    timeout 8s python3 /home/node/app/openclaw-sync.py sync-once || \
       echo "Warning: could not complete final shutdown sync"
   elif [ -f "/home/node/app/openclaw-sync.py" ]; then
     echo "HF_TOKEN not set; skipping shutdown backup sync."
@@ -1611,6 +1618,19 @@ _hc_has_install_targets() {
 $(_hc_args_without_flags "$@")
 EOF
   return 1
+}
+write_json_atomic() {
+  local dest="$1"
+  local payload="$2"
+  local tmp
+  tmp="${dest}.tmp.$$"
+  printf '%s\n' "$payload" > "$tmp" || { rm -f "$tmp"; return 1; }
+  if ! jq -e . "$tmp" >/dev/null 2>&1; then
+    echo "ERROR: refusing to write invalid JSON to $dest" >&2
+    rm -f "$tmp"
+    return 1
+  fi
+  mv "$tmp" "$dest"
 }
 _hc_allow_openclaw_plugins() {
   local config="/home/node/.openclaw/openclaw.json"
@@ -2270,8 +2290,29 @@ sync_before_gateway_restart() {
   [ -f "/home/node/app/openclaw-sync.py" ] || return 0
 
   echo "Gateway stopped; saving latest OpenClaw state before restart..."
-  python3 /home/node/app/openclaw-sync.py sync-once-settled || \
+  # Kill the background sync loop before syncing — same reason as in
+  # graceful_shutdown: the loop holds the fcntl.flock while uploading;
+  # if it is mid-upload when sync-once-settled runs, the lock contention
+  # will eat into (or exhaust) the 15s timeout budget, silently skipping
+  # the upload.  Killing the loop releases the lock immediately (fcntl.flock
+  # is released on process exit) so sync-once-settled can acquire it cleanly.
+  if [ -n "${SYNC_LOOP_PID:-}" ]; then
+    kill "$SYNC_LOOP_PID" 2>/dev/null || true
+    sleep 0.3
+    SYNC_LOOP_PID=""
+  fi
+  # Pass 1: wait for config to settle then upload — avoids pushing a
+  # half-written JSON config to the dataset.  Timeout added (was unbounded)
+  # so a slow HF upload cannot stall gateway restarts indefinitely.
+  timeout 15s python3 /home/node/app/openclaw-sync.py sync-once-settled || \
     echo "Warning: could not sync settled state before gateway restart"
+  # Pass 2: catch any writes that arrived after the settled sync completed
+  # (e.g. session state flushed by OpenClaw just before exit).
+  # BUG FIX: this second pass was missing from the restart path (it existed
+  # only in graceful_shutdown), so last-second writes were lost on watchdog
+  # restarts — causing sessions to disappear after OpenClaw auto-restarts.
+  timeout 8s python3 /home/node/app/openclaw-sync.py sync-once || \
+    echo "Warning: could not complete final sync before gateway restart"
 }
 
 start_background_devdata_sync() {

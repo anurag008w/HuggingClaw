@@ -912,6 +912,32 @@ server.on("upgrade", (req, socket, head) => {
     ps.write("\r\n");
     if (head && head.length) ps.write(head);
     ps.pipe(socket).pipe(ps);
+
+    // ── WebSocket keep-alive ping injection ──────────────────────────────
+    // HF Spaces nginx closes idle WebSocket tunnels after ~60 s, producing
+    // "webchat disconnected code=1006 reason=n/a" in the OpenClaw log.
+    // code=1006 means "abnormal closure" — no close frame arrived; the
+    // proxy silently dropped the TCP connection.
+    //
+    // Fix: every 30 s we write a bare server→client WebSocket ping frame
+    // directly to the browser socket.  The browser replies with a pong
+    // (masked, 6 bytes) which flows through our tunnel to OpenClaw.
+    // That round-trip activity resets the nginx idle timer on BOTH legs.
+    //
+    // Frame layout (RFC 6455 §5.5.2):
+    //   0x89 = FIN(1) + RSV(000) + opcode 9 (ping)
+    //   0x00 = MASK(0, server→client must NOT mask) + payload len 0
+    const WS_PING = Buffer.from([0x89, 0x00]);
+    const pingTimer = setInterval(() => {
+      try { if (!socket.destroyed) socket.write(WS_PING); }
+      catch { /* socket error handler below will clean up */ }
+    }, 30_000);
+    const stopPing = () => clearInterval(pingTimer);
+    socket.once("close", stopPing);
+    socket.once("error", stopPing);
+    ps.once("close",     stopPing);
+    ps.once("error",     stopPing);
+    // ─────────────────────────────────────────────────────────────────────
   });
   ps.on("error",     () => socket.destroy());
   ps.on("close",     () => socket.destroy());
