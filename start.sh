@@ -1099,7 +1099,7 @@ write_json_atomic() {
   local payload="$2"
   local tmp
   tmp="${dest}.tmp.$$"
-  printf '%s\n' "$payload" > "$tmp" || return 1
+  printf '%s\n' "$payload" > "$tmp" || { rm -f "$tmp"; return 1; }
   if ! jq -e . "$tmp" >/dev/null 2>&1; then
     echo "ERROR: refusing to write invalid JSON to $dest" >&2
     rm -f "$tmp"
@@ -1624,7 +1624,7 @@ write_json_atomic() {
   local payload="$2"
   local tmp
   tmp="${dest}.tmp.$$"
-  printf '%s\n' "$payload" > "$tmp" || return 1
+  printf '%s\n' "$payload" > "$tmp" || { rm -f "$tmp"; return 1; }
   if ! jq -e . "$tmp" >/dev/null 2>&1; then
     echo "ERROR: refusing to write invalid JSON to $dest" >&2
     rm -f "$tmp"

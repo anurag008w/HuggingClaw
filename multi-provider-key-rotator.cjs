@@ -778,7 +778,7 @@ function patchFetch() {
     // Extract model for per-model-limit providers (gemini etc.)
     const model = provider.perModelLimits ? extractModelFromUrl(urlLike) : null;
 
-    // ── Gemini: strip thought parts from history before sending ──────────────
+    // ── Gemini: normalise thought parts / thought_signature before sending ───
     if (provider.name === 'gemini') {
       try {
         const rawBody = init?.body ?? (typeof input === 'object' && !(input instanceof URL) ? input?.body : null);
@@ -956,12 +956,12 @@ function patchHttpModule(mod) {
 
     const req = orig.apply(mod, args);
 
-    // ── Gemini: strip thought/thought_signature parts from history ────────────
+    // ── Gemini: normalise thought parts / thought_signature before sending ───
     // patchFetch handles globalThis.fetch callers.  SDKs that use node:http
     // directly (e.g. older Google AI SDK versions) bypass patchFetch, so the
     // same sanitisation must happen here.  We intercept req.write / req.end,
     // accumulate the body chunks, and rewrite the body before the first flush
-    // if any thought parts are present.  This avoids the 400 error:
+    // if any thought parts need normalising.  This avoids the 400 error:
     //   "Invalid value at 'contents[N].parts[M].thought_signature' (TYPE_BYTES)"
     if (usedProvider && usedProvider.name === 'gemini') {
       try {
