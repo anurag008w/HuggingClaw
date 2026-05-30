@@ -82,10 +82,14 @@ const MAX_RETRY_AFTER_MS = Math.max(
 
 // Real-cycle: when all keys are suspended, sleep until the soonest key
 // recovers rather than firing into a guaranteed 429.
+// Default: 20 s — intentionally below HC_PROXY_TIMEOUT_MS (45 s) so the
+// sleep never causes a proxy timeout.  With large key pools (50+) this
+// path rarely triggers anyway; with 2-3 keys it prevents the rotator from
+// sleeping longer than the upstream proxy allows.
 // Set to 0 to disable (reverts to old fire-and-miss behaviour).
 const MAX_KEY_WAIT_MS = Math.max(
   0,
-  parseInt(process.env.KEY_MAX_WAIT_MS || '', 10) || 2 * 60_000,
+  parseInt(process.env.KEY_MAX_WAIT_MS || '', 10) || 20_000,
 );
 
 // Long suspend window for exhausted/invalid keys.
