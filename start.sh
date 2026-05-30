@@ -2290,6 +2290,17 @@ sync_before_gateway_restart() {
   [ -f "/home/node/app/openclaw-sync.py" ] || return 0
 
   echo "Gateway stopped; saving latest OpenClaw state before restart..."
+  # Kill the background sync loop before syncing — same reason as in
+  # graceful_shutdown: the loop holds the fcntl.flock while uploading;
+  # if it is mid-upload when sync-once-settled runs, the lock contention
+  # will eat into (or exhaust) the 15s timeout budget, silently skipping
+  # the upload.  Killing the loop releases the lock immediately (fcntl.flock
+  # is released on process exit) so sync-once-settled can acquire it cleanly.
+  if [ -n "${SYNC_LOOP_PID:-}" ]; then
+    kill "$SYNC_LOOP_PID" 2>/dev/null || true
+    sleep 0.3
+    SYNC_LOOP_PID=""
+  fi
   # Pass 1: wait for config to settle then upload — avoids pushing a
   # half-written JSON config to the dataset.  Timeout added (was unbounded)
   # so a slow HF upload cannot stall gateway restarts indefinitely.

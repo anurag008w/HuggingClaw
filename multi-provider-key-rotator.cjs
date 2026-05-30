@@ -712,17 +712,15 @@ function buildAttemptFetchArgs(input, init, provider, usedKey) {
 // is used in a multi-turn conversation, the model response contains "thought" parts
 // with a `thought_signature` field (raw bytes, base64-encoded by the SDK).
 // OpenClaw stores these in its internal conversation history.  On the next turn,
-// when history is replayed back to Gemini, the cross-provider conversion pipeline
-// incorrectly sets `thought_signature` to the Anthropic type-string
-// "reasoning_content" instead of the original bytes value.  Gemini rejects this
-// with:
+// a provider-conversion hop can accidentally turn an opaque signature into the
+// Anthropic placeholder string "reasoning_content".  Gemini rejects that malformed
+// payload with:
 //   400 Invalid value at 'contents[N].parts[M].thought_signature' (TYPE_BYTES),
 //   Base64 decoding failed for "reasoning_content"
 //
-// FIX: Intercept every outbound Gemini request body and strip any parts that
-// carry `thought: true` or a `thought_signature` field.  These are model-internal
-// reasoning artifacts — they must never be present in the *input* `contents`
-// array sent by the caller; Gemini only emits them in responses.
+// FIX: Keep valid `thought_signature` bytes intact, remove only standalone
+// `thought: true` reasoning-only parts, and drop the known malformed
+// string placeholder when it appears in `thought_signature`.
 //
 function stripGeminiThoughtParts(bodyStr) {
   if (typeof bodyStr !== 'string' || bodyStr.length === 0) return bodyStr;
@@ -737,15 +735,19 @@ function stripGeminiThoughtParts(bodyStr) {
     let modified = false;
     body.contents = body.contents.map(content => {
       if (!content || !Array.isArray(content.parts)) return content;
-      const filtered = content.parts.filter(part => {
-        if (!part || typeof part !== 'object') return true;
-        if (part.thought === true) { modified = true; return false; }
-        if (Object.prototype.hasOwnProperty.call(part, 'thought_signature')) {
-          modified = true; return false;
+      let partsModified = false;
+      const filtered = content.parts.map(part => {
+        if (!part || typeof part !== 'object') return part;
+        if (part.thought === true) { modified = true; partsModified = true; return null; }
+        if (Object.prototype.hasOwnProperty.call(part, 'thought_signature') &&
+            part.thought_signature === 'reasoning_content') {
+          const { thought_signature, ...rest } = part;
+          modified = true; partsModified = true;
+          return rest;
         }
-        return true;
-      });
-      if (filtered.length !== content.parts.length) {
+        return part;
+      }).filter(Boolean);
+      if (partsModified) {
         // Preserve the content entry even if all parts were stripped (empty
         // parts array is valid for role-only content markers).
         return { ...content, parts: filtered };
@@ -753,7 +755,7 @@ function stripGeminiThoughtParts(bodyStr) {
       return content;
     });
     if (modified) {
-      debug('[key-rotator] gemini: stripped thought/thought_signature parts from history');
+      debug('[key-rotator] gemini: normalized malformed thought_signature history');
       return JSON.stringify(body);
     }
   } catch (_) { /* malformed JSON — leave untouched */ }
@@ -991,7 +993,7 @@ function patchHttpModule(mod) {
               const fullBody = Buffer.concat(chunks).toString('utf8');
               const cleaned = stripGeminiThoughtParts(fullBody);
               if (cleaned !== fullBody) {
-                debug('[key-rotator] gemini (http): stripped thought/thought_signature parts from history');
+                debug('[key-rotator] gemini (http): normalized malformed thought_signature history');
                 return _end(cleaned, 'utf8', typeof encoding === 'function' ? encoding : callback);
               }
               // No change — replay chunks as-is.
