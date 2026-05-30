@@ -1619,6 +1619,19 @@ $(_hc_args_without_flags "$@")
 EOF
   return 1
 }
+write_json_atomic() {
+  local dest="$1"
+  local payload="$2"
+  local tmp
+  tmp="${dest}.tmp.$$"
+  printf '%s\n' "$payload" > "$tmp" || return 1
+  if ! jq -e . "$tmp" >/dev/null 2>&1; then
+    echo "ERROR: refusing to write invalid JSON to $dest" >&2
+    rm -f "$tmp"
+    return 1
+  fi
+  mv "$tmp" "$dest"
+}
 _hc_allow_openclaw_plugins() {
   local config="/home/node/.openclaw/openclaw.json"
   [ -f "$config" ] || return 0
@@ -2277,10 +2290,18 @@ sync_before_gateway_restart() {
   [ -f "/home/node/app/openclaw-sync.py" ] || return 0
 
   echo "Gateway stopped; saving latest OpenClaw state before restart..."
-  # BUG FIX: added timeout — previously unbounded, so a slow HF upload
-  # could stall every gateway restart indefinitely.
+  # Pass 1: wait for config to settle then upload — avoids pushing a
+  # half-written JSON config to the dataset.  Timeout added (was unbounded)
+  # so a slow HF upload cannot stall gateway restarts indefinitely.
   timeout 15s python3 /home/node/app/openclaw-sync.py sync-once-settled || \
     echo "Warning: could not sync settled state before gateway restart"
+  # Pass 2: catch any writes that arrived after the settled sync completed
+  # (e.g. session state flushed by OpenClaw just before exit).
+  # BUG FIX: this second pass was missing from the restart path (it existed
+  # only in graceful_shutdown), so last-second writes were lost on watchdog
+  # restarts — causing sessions to disappear after OpenClaw auto-restarts.
+  timeout 8s python3 /home/node/app/openclaw-sync.py sync-once || \
+    echo "Warning: could not complete final sync before gateway restart"
 }
 
 start_background_devdata_sync() {
