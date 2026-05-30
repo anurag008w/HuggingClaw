@@ -629,6 +629,11 @@ _DEFAULT_HUGGINGFACE_MODELS="huggingface/deepseek-ai/DeepSeek-R1,huggingface/moo
 _DEFAULT_GITHUB_COPILOT_MODELS="github-copilot/gpt-5,github-copilot/gpt-4.1,github-copilot/gpt-4.1-mini"
 
 INJECTED_MODELS_PROVIDERS='{}'
+# Tracks providers configured with a key pool (GEMINI_API_KEYS etc.).
+# These providers must NOT have a static apiKey in the OpenClaw config —
+# the multi-provider-key-rotator injects the correct rotated key per-request.
+# On restore, any stale apiKey saved from a previous single-key run is cleared.
+POOL_API_KEY_PROVIDERS='[]'
 inject_provider_models_from_env() {
   local provider="$1"
   local models_env="$2"
@@ -722,6 +727,13 @@ inject_provider_models_from_env() {
     --arg provider "$provider" \
     --argjson models "$models_json" \
     '.[$provider] = ((.[$provider] // {}) + {models: $models})' <<<"$INJECTED_MODELS_PROVIDERS")
+
+  # Track providers using key-pool so restored config's stale apiKey can be cleared.
+  if [ -n "$pool_keys" ]; then
+    POOL_API_KEY_PROVIDERS=$(jq \
+      --arg provider "$provider" \
+      '. + [$provider] | unique' <<<"$POOL_API_KEY_PROVIDERS")
+  fi
 }
 
 # ── Google Vertex AI credentials setup ──
@@ -1138,6 +1150,7 @@ if [ -f "$EXISTING_CONFIG" ]; then
     --arg consoleStyle "$OPENCLAW_CONSOLE_LOG_STYLE" \
     --argjson desired "$CONFIG_JSON" \
     --argjson injectedModelsProviders "$INJECTED_MODELS_PROVIDERS" \
+    --argjson poolApiKeyProviders "$POOL_API_KEY_PROVIDERS" \
     --argjson fileLogConfigured "$OPENCLAW_FILE_LOG_LEVEL_CONFIGURED" \
     --argjson consoleLogConfigured "$OPENCLAW_CONSOLE_LOG_LEVEL_CONFIGURED" \
     --argjson consoleStyleConfigured "$OPENCLAW_CONSOLE_LOG_STYLE_CONFIGURED" \
@@ -1196,6 +1209,19 @@ if [ -f "$EXISTING_CONFIG" ]; then
                | with_entries(select(.value != null and .value != ""))
              ) * (.models.providers[$pe.key] // {})
            end
+         )
+       else
+         .
+       end
+     | if (($poolApiKeyProviders | length) > 0) then
+         # BUG FIX: Pool providers must NOT have a static apiKey in the OpenClaw config.
+         # The multi-provider-key-rotator injects the correct rotated key per-request.
+         # If a previous single-key run saved an apiKey for this provider, clear it now
+         # so OpenClaw does not keep using that one key and ignoring the rotation pool.
+         reduce $poolApiKeyProviders[] as $prov (.;
+           if .models.providers[$prov] != null then
+             del(.models.providers[$prov].apiKey)
+           else . end
          )
        else
          .
@@ -2187,348 +2213,4 @@ install_whatsapp_plugin_runtime() {
       jq '
         .plugins.entries.whatsapp.enabled = false
         | del(.channels.whatsapp)
-        | .plugins.allow = ((.plugins.allow // []) | map(select(. != "whatsapp" and . != "@openclaw/whatsapp" and . != "clawhub:@openclaw/whatsapp")))
-      ' "$install_config" > "$install_config.tmp" 2>/dev/null && mv "$install_config.tmp" "$install_config" || rm -f "$install_config.tmp"
-    fi
-  fi
-
-  local install_env=()
-  if [ -n "$install_config" ] && [ -f "$install_config" ]; then
-    install_env=(env OPENCLAW_CONFIG_PATH="$install_config")
-  fi
-
-  # Official WhatsApp docs: stable/beta uses the external @openclaw/whatsapp
-  # plugin, preferring ClawHub and using the bare npm package only as fallback.
-  # Do not pin versions here; OpenClaw's plugin installer/update logic tracks
-  # the correct release/beta tag for the active OpenClaw channel.
-  local installed_ok=false
-  if "${install_env[@]}" openclaw plugins install "clawhub:@openclaw/whatsapp" >> /tmp/openclaw-whatsapp-plugin-install.log 2>&1; then
-    installed_ok=true
-  elif "${install_env[@]}" openclaw plugins install "@openclaw/whatsapp" >> /tmp/openclaw-whatsapp-plugin-install.log 2>&1; then
-    installed_ok=true
-  else
-    # If an install record already exists but its payload is broken/missing,
-    # OpenClaw's documented path is update/repair rather than blind reinstall.
-    echo "WhatsApp plugin install did not complete; trying OpenClaw plugin update for an existing broken install..." >> /tmp/openclaw-whatsapp-plugin-install.log
-    if "${install_env[@]}" openclaw plugins update whatsapp >> /tmp/openclaw-whatsapp-plugin-install.log 2>&1; then
-      installed_ok=true
-    elif "${install_env[@]}" openclaw plugins update @openclaw/whatsapp >> /tmp/openclaw-whatsapp-plugin-install.log 2>&1; then
-      installed_ok=true
-    fi
-  fi
-
-  if [ "$installed_ok" != "true" ]; then
-    rm -f "$install_config" 2>/dev/null || true
-    echo "Warning: failed to install/update @openclaw/whatsapp; see /tmp/openclaw-whatsapp-plugin-install.log. WhatsApp will stay configured but disabled for this boot so the saved channel settings are preserved." >&2
-    return 1
-  fi
-
-  if whatsapp_plugin_runtime_ok; then
-    if [ -f "$config" ]; then
-      if [ -n "$install_config" ] && [ -f "$install_config" ]; then
-        jq --slurpfile installed "$install_config" '
-          .plugins.installs = ((.plugins.installs // {}) + ($installed[0].plugins.installs // {}))
-          | .plugins.entries.whatsapp = (($installed[0].plugins.entries.whatsapp // {}) + (.plugins.entries.whatsapp // {}) + {"enabled": true})
-          | .channels.whatsapp = (.channels.whatsapp // {"dmPolicy": "pairing"})
-          | .plugins.allow = (((.plugins.allow // []) + ["whatsapp"]) | unique)
-        ' "$config" > "$config.tmp" 2>/dev/null && mv "$config.tmp" "$config" || rm -f "$config.tmp"
-      else
-        jq '
-          .plugins.entries.whatsapp.enabled = true
-          | .channels.whatsapp = (.channels.whatsapp // {"dmPolicy": "pairing"})
-          | .plugins.allow = (((.plugins.allow // []) + ["whatsapp"]) | unique)
-        ' "$config" > "$config.tmp" 2>/dev/null && mv "$config.tmp" "$config" || rm -f "$config.tmp"
-      fi
-    fi
-    rm -f "$install_config" 2>/dev/null || true
-    echo "WhatsApp plugin runtime installed/verified."
-    return 0
-  fi
-
-  rm -f "$install_config" 2>/dev/null || true
-  echo "Warning: @openclaw/whatsapp install/update completed but OpenClaw still reports the runtime as unavailable; WhatsApp will stay configured but disabled for this boot so the saved channel settings are preserved." >&2
-  return 1
-}
-repair_broken_whatsapp_plugin_entry() {
-  local config="/home/node/.openclaw/openclaw.json"
-  [ -f "$config" ] || return 0
-  if ! jq -e '(.plugins.entries.whatsapp.enabled // false) == true' "$config" >/dev/null 2>&1; then
-    return 0
-  fi
-  if whatsapp_plugin_runtime_ok; then
-    return 0
-  fi
-
-  echo "Warning: WhatsApp plugin is enabled but its runtime files are missing/incompatible; disabling WhatsApp plugin for this boot so gateway can start." >&2
-  echo "         Fix by using stable OpenClaw for WhatsApp or reinstalling the official whatsapp plugin, then re-enable WHATSAPP_ENABLED." >&2
-
-  local patched
-  patched=$(jq '
-    .plugins.entries.whatsapp.enabled = false
-    | .plugins.allow = ((.plugins.allow // []) | map(select(. != "whatsapp" and . != "@openclaw/whatsapp" and . != "clawhub:@openclaw/whatsapp")))
-  ' "$config" 2>/dev/null) || {
-    echo "Warning: could not patch broken WhatsApp plugin entry; gateway may still reject config." >&2
-    return 0
-  }
-  write_json_atomic "$config" "$patched" || echo "Warning: could not write patched WhatsApp plugin config; gateway may still reject config." >&2
-}
-
-hc_finish_startup_commands
-install_whatsapp_plugin_runtime || true
-sync_installed_plugins_into_allow
-repair_broken_whatsapp_plugin_entry
-
-# ── Launch gateway ──
-GATEWAY_RESTART_DELAY="${GATEWAY_RESTART_DELAY:-2}"
-GATEWAY_MAX_RESTARTS="${GATEWAY_MAX_RESTARTS:-0}"
-GATEWAY_RESTART_COUNT=0
-SYNC_LOOP_PID=""
-GUARDIAN_PID=""
-
-sync_before_gateway_restart() {
-  [ -n "${HF_TOKEN:-}" ] || return 0
-  [ -f "/home/node/app/openclaw-sync.py" ] || return 0
-
-  echo "Gateway stopped; saving latest OpenClaw state before restart..."
-  # Kill the background sync loop before syncing — same reason as in
-  # graceful_shutdown: the loop holds the fcntl.flock while uploading;
-  # if it is mid-upload when sync-once-settled runs, the lock contention
-  # will eat into (or exhaust) the 15s timeout budget, silently skipping
-  # the upload.  Killing the loop releases the lock immediately (fcntl.flock
-  # is released on process exit) so sync-once-settled can acquire it cleanly.
-  if [ -n "${SYNC_LOOP_PID:-}" ]; then
-    kill "$SYNC_LOOP_PID" 2>/dev/null || true
-    sleep 0.3
-    SYNC_LOOP_PID=""
-  fi
-  # Pass 1: wait for config to settle then upload — avoids pushing a
-  # half-written JSON config to the dataset.  Timeout added (was unbounded)
-  # so a slow HF upload cannot stall gateway restarts indefinitely.
-  timeout 15s python3 /home/node/app/openclaw-sync.py sync-once-settled || \
-    echo "Warning: could not sync settled state before gateway restart"
-  # Pass 2: catch any writes that arrived after the settled sync completed
-  # (e.g. session state flushed by OpenClaw just before exit).
-  # BUG FIX: this second pass was missing from the restart path (it existed
-  # only in graceful_shutdown), so last-second writes were lost on watchdog
-  # restarts — causing sessions to disappear after OpenClaw auto-restarts.
-  timeout 8s python3 /home/node/app/openclaw-sync.py sync-once || \
-    echo "Warning: could not complete final sync before gateway restart"
-}
-
-start_background_devdata_sync() {
-  if [ "$DEV_MODE_ENABLED" != "true" ]; then
-    return 0
-  fi
-  if [ "$DEVDATA_ENABLED" != "true" ]; then
-    echo "DevData  : disabled by DEVDATA=${DEVDATA_RAW}"
-    return 0
-  fi
-  if [ -z "${HF_TOKEN:-}" ]; then
-    echo "DevData  : disabled (HF_TOKEN missing)"
-    return 0
-  fi
-  if [ "${DEVDATA_DATASET_NAME:-huggingclaw-devdata}" = "${BACKUP_DATASET_NAME:-huggingclaw-backup}" ]; then
-    echo "DevData  : disabled (DEVDATA_DATASET_NAME must be separate from BACKUP_DATASET_NAME)"
-    return 0
-  fi
-  if [ ! -f "/home/node/app/jupyter-devdata-sync.py" ]; then
-    echo "DevData  : script missing; skipped"
-    return 0
-  fi
-  # BUG FIX #1: Guard against spawning a second devdata-sync process on every
-  # gateway restart. Without this check, each restart launched a fresh
-  # jupyter-devdata-sync.py which called restore_once() while JupyterLab was
-  # already running, corrupting its runtime state and killing it.
-  if [ -n "${DEVDATA_SYNC_PID:-}" ] && kill -0 "$DEVDATA_SYNC_PID" 2>/dev/null; then
-    return 0
-  fi
-  echo "DevData  : enabled (dataset=${DEVDATA_DATASET_NAME:-huggingclaw-devdata})"
-  python3 -u /home/node/app/jupyter-devdata-sync.py >> /tmp/devdata-sync.log 2>&1 &
-  DEVDATA_SYNC_PID=$!
-}
-
-start_background_sync_once() {
-  [ -n "${HF_TOKEN:-}" ] || return 0
-
-  if [ -n "$SYNC_LOOP_PID" ] && kill -0 "$SYNC_LOOP_PID" 2>/dev/null; then
-    return 0
-  fi
-
-  python3 -u /home/node/app/openclaw-sync.py loop >> /tmp/workspace-sync.log 2>&1 &
-  SYNC_LOOP_PID=$!
-}
-
-start_guardian_once() {
-  [ "$WHATSAPP_ENABLED_NORMALIZED" = "true" ] || return 0
-
-  if [ -n "$GUARDIAN_PID" ] && kill -0 "$GUARDIAN_PID" 2>/dev/null; then
-    return 0
-  fi
-
-  node /home/node/app/wa-guardian.js &
-  GUARDIAN_PID=$!
-  echo "WhatsApp Guardian started (PID: $GUARDIAN_PID)"
-}
-
-# ── Clean up stale plugin-skills entries that are not generated symlinks ──
-# OpenClaw generates plugin-skills entries as symlinks. If a real directory
-# exists (e.g. from a previous failed install or manual placement), OpenClaw
-# logs "plugin skill entry is not a generated symlink" on every poll cycle.
-# Remove any non-symlink entries so they are regenerated cleanly on startup.
-PLUGIN_SKILLS_DIR="/home/node/.openclaw/plugin-skills"
-if [ -d "$PLUGIN_SKILLS_DIR" ]; then
-  for _ps_entry in "$PLUGIN_SKILLS_DIR"/*/; do
-    _ps_entry="${_ps_entry%/}"
-    [ -e "$_ps_entry" ] || continue
-    if [ ! -L "$_ps_entry" ]; then
-      _ps_name="$(basename "$_ps_entry")"
-      echo "Removing stale plugin-skills entry '$_ps_name' (not a generated symlink; will be regenerated by OpenClaw)..."
-      rm -rf "$_ps_entry"
-    fi
-  done
-  unset _ps_entry _ps_name
-fi
-
-# ── Start D-Bus session (once, before gateway loop) ──
-# Chromium logs "Failed to connect to socket /run/dbus/system_bus_socket" when
-# the system D-Bus is absent (HF Spaces containers).  We suppress the noise by:
-#   1. Starting a private session bus (dbus-launch) so Chrome has something to
-#      connect to for session-scoped calls.
-#   2. Pointing DBUS_SYSTEM_BUS_ADDRESS at the same session bus so Chrome's
-#      system-bus probes also succeed without a real systemd-dbus daemon.
-#   3. Falling back to "disabled:" on minimal images without dbus-launch; the
-#      Chrome --disable-dbus / --disable-features=UseDBus flags then silence the
-#      remaining warnings that come from Chromium itself.
-if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
-  if command -v dbus-daemon >/dev/null 2>&1; then
-    _DBUS_SOCKET="/tmp/dbus-hc-$$.sock"
-    _DBUS_PID_FILE="/tmp/dbus-hc-$$.pid"
-    dbus-daemon --session \
-        --address="unix:path=${_DBUS_SOCKET}" \
-        --print-address=1 \
-        --fork \
-        --print-pid=3 \
-        3>"${_DBUS_PID_FILE}" \
-        >"${_DBUS_SOCKET}.addr" 2>/dev/null || true
-    if [ -s "${_DBUS_SOCKET}.addr" ]; then
-      export DBUS_SESSION_BUS_ADDRESS="$(cat "${_DBUS_SOCKET}.addr")"
-    fi
-    unset _DBUS_SOCKET _DBUS_PID_FILE
-  elif command -v dbus-launch >/dev/null 2>&1; then
-    eval "$(dbus-launch --sh-syntax 2>/dev/null)" || true
-    export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-disabled:}"
-  else
-    export DBUS_SESSION_BUS_ADDRESS="disabled:"
-  fi
-fi
-# Route system-bus probes to session bus so Chrome stops printing socket errors.
-export DBUS_SYSTEM_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-disabled:}"
-
-while true; do
-  # Check health-server process - restart if died unexpectedly
-  if [ -n "${HEALTH_PID:-}" ] && ! kill -0 "$HEALTH_PID" 2>/dev/null; then
-    echo "Warning: health-server exited (PID $HEALTH_PID dead); restarting..."
-    node /home/node/app/health-server.js &
-    HEALTH_PID=$!
-    echo "Health server restarted (PID: $HEALTH_PID)"
-  fi
-
-  # Check JupyterLab process - restart if died unexpectedly
-  if [ "$RUNTIME_JUPYTER_ENABLED" = "true" ]; then
-    if [ -n "${JUPYTER_PID:-}" ]; then
-      if ! kill -0 "$JUPYTER_PID" 2>/dev/null; then
-        echo "Warning: JupyterLab exited (PID $JUPYTER_PID dead); checking log..."
-        tail -5 /tmp/jupyterlab.log 2>/dev/null || echo "No log file"
-        echo "Attempting JupyterLab restart..."
-        unset JUPYTER_PID
-        start_jupyter_once
-      fi
-    else
-      # First start
-      start_jupyter_once
-    fi
-  fi
-
-  if [ "${AUTO_DOCTOR:-false}" = "true" ]; then
-    openclaw doctor --fix || true
-  fi
-  echo "Launching OpenClaw gateway on port ${GATEWAY_PORT}..."
-
-  GATEWAY_ARGS=(gateway run --port "${GATEWAY_PORT}" --bind lan)
-  if [ "${GATEWAY_VERBOSE:-0}" = "1" ]; then
-    GATEWAY_ARGS+=(--verbose)
-    echo "Gateway verbose logging enabled (GATEWAY_VERBOSE=1)"
-  fi
-
-  # Use stdbuf -oL -eL to ensure logs are not buffered and appear immediately
-  # in the console. NOTE: $! captures the LAST pipeline element (tee), not
-  # openclaw — fine for passing to `wait` (waits for the whole pipeline to
-  # finish), but kill -0 on it is uninformative. We probe TCP instead.
-  stdbuf -oL -eL openclaw "${GATEWAY_ARGS[@]}" 2>&1 | tee -a /home/node/.openclaw/gateway.log &
-  GATEWAY_PID=$!
-
-  # Poll for the gateway to start listening on ${GATEWAY_PORT}. OpenClaw can take 20-30s
-  # on cold start (plugin install + auto-restore). On HF Spaces the bootstrap-context
-  # stage alone can exceed 300 s on a cold start, so default to 300 s there and
-  # 90 s elsewhere. Bail out early if the pipeline died.
-  if [ -n "${SPACE_HOST:-}" ]; then
-    GATEWAY_READY_TIMEOUT="${GATEWAY_READY_TIMEOUT:-300}"
-  else
-    GATEWAY_READY_TIMEOUT="${GATEWAY_READY_TIMEOUT:-90}"
-  fi
-  ready=false
-  for ((i=0; i<GATEWAY_READY_TIMEOUT; i++)); do
-    if (echo > /dev/tcp/127.0.0.1/${GATEWAY_PORT}) 2>/dev/null; then
-      ready=true
-      break
-    fi
-    if ! kill -0 "$GATEWAY_PID" 2>/dev/null; then
-      break
-    fi
-    sleep 1
-  done
-
-  if [ "$ready" != "true" ]; then
-    echo ""
-    echo "Gateway failed to start. Last 30 lines of log:"
-    echo "────────────────────────────────────────────"
-    tail -30 /home/node/.openclaw/gateway.log
-    if [ "$DEV_MODE_ENABLED" = "true" ]; then
-      echo "Gateway failed — DEV_MODE active, retrying in 10s..."
-      sleep 10
-      continue
-    else
-      echo "Gateway failed — exiting."
-      exit 1
-    fi
-  fi
-
-  # 11. Start WhatsApp Guardian after the gateway is accepting connections
-  start_guardian_once
-
-  # 11.5 Warm up the managed browser so first browser actions have a live tab
-  warmup_browser
-
-  # 12. Start Workspace Sync after startup settles. Keep only one loop active;
-  # config edits can make OpenClaw exit/reload, and the gateway loop below will
-  # relaunch it without rerunning all startup code.
-  start_background_sync_once
-  start_background_devdata_sync
-
-  set +e
-  wait "$GATEWAY_PID"
-  GATEWAY_EXIT_CODE=$?
-  set -e
-
-  sync_before_gateway_restart
-
-  GATEWAY_RESTART_COUNT=$((GATEWAY_RESTART_COUNT + 1))
-  if [ "$GATEWAY_MAX_RESTARTS" != "0" ] && [ "$GATEWAY_RESTART_COUNT" -ge "$GATEWAY_MAX_RESTARTS" ]; then
-    echo "Gateway exited with code ${GATEWAY_EXIT_CODE}; restart limit (${GATEWAY_MAX_RESTARTS}) reached."
-    echo "Gateway stopped — JupyterLab and env-builder still running."
-    break
-  fi
-
-  echo "Gateway exited with code ${GATEWAY_EXIT_CODE}; restarting in ${GATEWAY_RESTART_DELAY}s..."
-  sleep "$GATEWAY_RESTART_DELAY"
-done
+  
