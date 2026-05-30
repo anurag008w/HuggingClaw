@@ -1359,12 +1359,19 @@ graceful_shutdown() {
     if [ -n "${SYNC_LOOP_PID:-}" ]; then
       kill "$SYNC_LOOP_PID" 2>/dev/null || true
       # Give Python a moment to flush and release the lock file.
-      sleep 0.5
+      # Reduced from 0.5 s → 0.3 s to reclaim time for the upload.
+      sleep 0.3
     fi
-    timeout 8s python3 /home/node/app/openclaw-sync.py sync-once-settled || \
+    # Pass 1: wait for config to settle then upload — avoids pushing a
+    # half-written JSON config to the dataset.  Timeout raised from 8 s
+    # to 15 s so the 3-second settle window + actual upload both fit
+    # within the budget (old 8 s left only 5 s for the upload itself).
+    timeout 15s python3 /home/node/app/openclaw-sync.py sync-once-settled || \
       echo "Warning: could not complete settled shutdown sync"
-    sleep 1
-    python3 /home/node/app/openclaw-sync.py sync-once || \
+    # Pass 2: catch any writes that arrived after the settled sync completed.
+    # BUG FIX: added timeout (previously unbounded) so HF container kill
+    # can't interrupt a hung upload and lose all data silently.
+    timeout 8s python3 /home/node/app/openclaw-sync.py sync-once || \
       echo "Warning: could not complete final shutdown sync"
   elif [ -f "/home/node/app/openclaw-sync.py" ]; then
     echo "HF_TOKEN not set; skipping shutdown backup sync."
@@ -2270,7 +2277,9 @@ sync_before_gateway_restart() {
   [ -f "/home/node/app/openclaw-sync.py" ] || return 0
 
   echo "Gateway stopped; saving latest OpenClaw state before restart..."
-  python3 /home/node/app/openclaw-sync.py sync-once-settled || \
+  # BUG FIX: added timeout — previously unbounded, so a slow HF upload
+  # could stall every gateway restart indefinitely.
+  timeout 15s python3 /home/node/app/openclaw-sync.py sync-once-settled || \
     echo "Warning: could not sync settled state before gateway restart"
 }
 
