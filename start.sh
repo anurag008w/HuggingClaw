@@ -377,13 +377,26 @@ promote_first_pool_key() {
   [ -n "$pool_val" ] || return 0
 
   local first
-  first=$(printf '%s' "$pool_val" | tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | awk 'NF{print; exit}')
+  first=$(printf '%s' "$pool_val" | tr ',\r' '\n\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | awk 'NF{print; exit}')
   [ -n "$first" ] || return 0
   export "${singular_var}=$first"
 }
 
 promote_first_pool_key "ANTHROPIC_API_KEY" "ANTHROPIC_API_KEYS"
 promote_first_pool_key "OPENAI_API_KEY" "OPENAI_API_KEYS"
+# Accept common Google/Gemini aliases used by SDK docs and existing Spaces, then
+# normalize them into GEMINI_* so OpenClaw config and the key rotator agree.
+for _HC_GOOGLE_POOL_ALIAS in GOOGLE_API_KEYS GOOGLE_GENERATIVE_AI_API_KEYS GOOGLE_AI_API_KEYS; do
+  if [ -z "${GEMINI_API_KEYS:-}" ] && [ -n "${!_HC_GOOGLE_POOL_ALIAS:-}" ]; then
+    export GEMINI_API_KEYS="${!_HC_GOOGLE_POOL_ALIAS}"
+  fi
+done
+for _HC_GOOGLE_KEY_ALIAS in GOOGLE_API_KEY GOOGLE_GENERATIVE_AI_API_KEY GOOGLE_AI_API_KEY; do
+  if [ -z "${GEMINI_API_KEY:-}" ] && [ -n "${!_HC_GOOGLE_KEY_ALIAS:-}" ]; then
+    export GEMINI_API_KEY="${!_HC_GOOGLE_KEY_ALIAS}"
+  fi
+done
+unset _HC_GOOGLE_POOL_ALIAS _HC_GOOGLE_KEY_ALIAS
 promote_first_pool_key "GEMINI_API_KEY" "GEMINI_API_KEYS"
 promote_first_pool_key "DEEPSEEK_API_KEY" "DEEPSEEK_API_KEYS"
 promote_first_pool_key "OPENROUTER_API_KEY" "OPENROUTER_API_KEYS"
