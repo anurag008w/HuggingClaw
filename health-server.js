@@ -328,6 +328,13 @@ function requireAuth(req, res) {
   return false;
 }
 
+function requireJsonAuth(req, res) {
+  if (isAuthorized(req)) return true;
+  res.writeHead(401, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+  res.end(JSON.stringify({ error: "unauthorized", message: "GATEWAY_TOKEN required" }));
+  return false;
+}
+
 function readBody(req) {
   return new Promise((resolve) => {
     let body = "";
@@ -893,7 +900,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (pathname === "/api/key-rotator/logs") {
-    if (!requireAuth(req, res)) return;
+    if (!requireJsonAuth(req, res)) return;
     const parsed = parseRequestUrl(req.url);
     const limit = Math.max(1, Math.min(2000, Number.parseInt(parsed.searchParams.get("limit") || "500", 10) || 500));
     res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });

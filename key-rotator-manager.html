@@ -17,8 +17,8 @@
 <body>
 <main>
   <section class="top">
-    <div><div class="eyebrow">HuggingClaw observability</div><h1>🔑 API Key Rotation Manager</h1><div class="sub">Live masked key picks, quota events, retries, and provider pool health. No extra env needed for this page; it reads the rotator event stream produced by the preload.</div></div>
-    <div class="actions"><a class="btn" href="/dashboard">← Dashboard</a><button id="pause" class="btn">Pause</button><button id="refresh" class="btn primary">Refresh</button></div>
+    <div><div class="eyebrow">HuggingClaw observability</div><h1>🔑 API Key Rotation Manager</h1><div class="sub">Gateway-token protected view of masked key picks, quota events, retries, and provider pool health. No extra env needed for this page; it reads the rotator event stream produced by the preload.</div></div>
+    <div class="actions"><span class="pill">🔒 GATEWAY_TOKEN protected</span><a class="btn" href="/dashboard">← Dashboard</a><button id="pause" class="btn">Pause</button><button id="refresh" class="btn primary">Refresh</button></div>
   </section>
   <section class="grid">
     <div class="card"><div class="metric-title">Configured keys</div><div id="mKeys" class="metric-value">0</div><div class="metric-detail">Across active provider pools</div></div>
@@ -57,7 +57,7 @@ function render(){
   if(q) filtered=filtered.filter(e=>JSON.stringify(e).toLowerCase().includes(q));
   $('events').innerHTML=filtered.length?filtered.map(e=>`<article class="event ${eventClass(e.type)}"><div class="time">${esc(fmtTime(e.ts))}</div><div><div class="etype">${esc(e.type||'event')}</div><div class="msg">${esc(eventText(e)||'system event')}</div></div><div class="key">${esc(e.key||'')}</div></article>`).join(''):'<div class="empty">No matching events yet. Send a message or enable an LLM request to generate picks.</div>';
 }
-async function load(){if(state.paused)return;try{const r=await fetch('/api/key-rotator/logs?limit=500',{cache:'no-store'});const d=await r.json();state.events=d.events||[];state.providers=d.providers||[];const log=d.log||{};$('source').textContent=log.exists?`${d.file||'event log'} · ${Math.round((log.size||0)/1024)} KiB`:`${d.file||'event log'} · waiting`;render();}catch(e){$('events').innerHTML='<div class="empty bad">Could not load rotator logs: '+esc(e.message)+'</div>';}}
+async function load(){if(state.paused)return;try{const r=await fetch('/api/key-rotator/logs?limit=500',{cache:'no-store'});if(r.status===401){location.href='/login?next='+encodeURIComponent('/key-rotator');return;}const d=await r.json();state.events=d.events||[];state.providers=d.providers||[];const log=d.log||{};$('source').textContent=log.exists?`${d.file||'event log'} · ${Math.round((log.size||0)/1024)} KiB`:`${d.file||'event log'} · waiting`;render();}catch(e){$('events').innerHTML='<div class="empty bad">Could not load rotator logs: '+esc(e.message)+'</div>';}}
 $('q').addEventListener('input',render);$('type').addEventListener('change',render);$('refresh').onclick=load;$('pause').onclick=()=>{state.paused=!state.paused;$('pause').textContent=state.paused?'Resume':'Pause';$('liveDot').classList.toggle('live',!state.paused);$('liveText').textContent=state.paused?'Paused':'Live';};
 load();setInterval(load,2500);
 </script>
