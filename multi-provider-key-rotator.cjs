@@ -19,6 +19,7 @@
 
 const http  = require('node:http');
 const https = require('node:https');
+const fs    = require('node:fs');
 
 const VERBOSE_PICKS = /^(1|true|yes|on)$/i.test(String(process.env.KEY_ROTATOR_VERBOSE_PICKS || '').trim());
 const RAW_LOG_LEVEL = String(process.env.KEY_ROTATOR_LOG_LEVEL || '').trim().toLowerCase();
@@ -75,6 +76,8 @@ const DIAGNOSTICS_INTERVAL_MS = Math.max(
   10_000,
   parseInt(process.env.KEY_ROTATOR_DIAGNOSTICS_INTERVAL_MS || '', 10) || 60_000,
 );
+const EVENT_LOG_FILE = process.env.KEY_ROTATOR_EVENT_LOG_FILE || '/tmp/huggingclaw-key-rotator-events.jsonl';
+const EVENT_LOG_MAX_BYTES = Math.max(64 * 1024, parseInt(process.env.KEY_ROTATOR_EVENT_LOG_MAX_BYTES || '', 10) || 1024 * 1024);
 
 const USE_SUSPENDED_KEY_AS_LAST_RESORT = !/^(0|false|no|off)$/i.test(
   String(process.env.KEY_USE_SUSPENDED_AS_LAST_RESORT || 'true').trim(),
@@ -172,6 +175,25 @@ function normalizeKeys(...inputs) {
 function keySlot(p, key) {
   const idx = p?.keys?.indexOf?.(key) ?? -1;
   return idx >= 0 ? `#${idx + 1}/${p.keys.length} ` : '';
+}
+
+function emitEvent(type, p, key, extra = {}) {
+  try {
+    const idx = key && p?.keys ? p.keys.indexOf(key) : -1;
+    const payload = {
+      ts: new Date().toISOString(),
+      type,
+      provider: p?.name || extra.provider || 'system',
+      ...(idx >= 0 ? { slot: idx + 1, total: p.keys.length, key: keyMask(key) } : {}),
+      ...extra,
+    };
+    fs.appendFileSync(EVENT_LOG_FILE, JSON.stringify(payload) + '\n', { encoding: 'utf8' });
+    const stat = fs.statSync(EVENT_LOG_FILE);
+    if (stat.size > EVENT_LOG_MAX_BYTES) {
+      const keep = fs.readFileSync(EVENT_LOG_FILE, 'utf8').slice(-Math.floor(EVENT_LOG_MAX_BYTES * 0.75));
+      fs.writeFileSync(EVENT_LOG_FILE, keep.replace(/^[^\n]*\n?/, ''), 'utf8');
+    }
+  } catch (_) { /* event logging must never affect requests */ }
 }
 
 // Per-key state: { strikes, blacklistedUntil }
@@ -513,6 +535,7 @@ function nextKey(p, model) {
       if (inflight < MAX_INFLIGHT_PER_KEY) {
         p.idx = (i + 1) % total;   // next call starts AFTER the key we just picked
         if (VERBOSE_PICKS) debug(`[key-rotator] ${p.name}: picked ${keySlot(p, key)}${keyMask(key)}${model ? ` model=${model}` : ''} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
+        emitEvent('pick', p, key, { model, inflight: inflight + 1, maxInflight: MAX_INFLIGHT_PER_KEY });
         return { key, waitMs: 0 };
       }
       if (!bestPick) bestPick = { i, key, inflight, score: Number.POSITIVE_INFINITY };
@@ -532,6 +555,7 @@ function nextKey(p, model) {
   if (bestPick) {
     p.idx = (bestPick.i + 1) % total;
     warn(`[key-rotator] ${p.name}: all active keys saturated, reusing ${keySlot(p, bestPick.key)}${keyMask(bestPick.key)}${model ? ` model=${model}` : ''} inflight=${bestPick.inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
+    emitEvent('saturated_reuse', p, bestPick.key, { model, inflight: bestPick.inflight + 1, maxInflight: MAX_INFLIGHT_PER_KEY });
     return { key: bestPick.key, waitMs: 0 };
   }
 
@@ -539,6 +563,7 @@ function nextKey(p, model) {
   // the soonest-recovering key, unless explicitly disabled.
   if (!USE_SUSPENDED_KEY_AS_LAST_RESORT) {
     warn(`[key-rotator] ${p.name}: all ${total} key(s) suspended — withholding key until cooldown expires (last-resort disabled)`);
+    emitEvent('all_suspended_withheld', p, null, { model, total });
     return { key: null, waitMs: 0 };
   }
 
@@ -563,6 +588,7 @@ function nextKey(p, model) {
   else
     warn(`[key-rotator] ${p.name}: all ${total} key(s) suspended — using soonest-recovering key ${keySlot(p, chosenKey)}${keyMask(chosenKey)}`);
 
+  emitEvent('all_suspended_pick', p, chosenKey, { model, waitMs });
   return { key: chosenKey, waitMs };
 }
 
@@ -609,6 +635,7 @@ function handleStatus(p, key, status, model, retryAfterMs) {
     ks.lastFailureAt = Date.now();
     ks.blacklistedUntil = Date.now() + PERM_SUSPEND_MS;
     warn(`[key-rotator] ${p.name}: ${keySlot(p, key)}${keyMask(key)} auth-failed (${status}) — suspended for ${formatHours(PERM_SUSPEND_MS)} h`);
+    emitEvent('auth_failed', p, key, { status, suspendMs: PERM_SUSPEND_MS });
     return;
   }
 
@@ -618,6 +645,7 @@ function handleStatus(p, key, status, model, retryAfterMs) {
     // Pass retryAfterMs so the key blacklist respects the server's stated wait time.
     recordFailure(p, key, model, retryAfterMs);
     warn(`[key-rotator] ${p.name}: quota/rate status=${status} on ${keySlot(p, key)}${keyMask(key)}${model ? ` model=${model}` : ''}${retryAfterMs ? ` retry-after=${Math.round(retryAfterMs/1000)}s` : ''}`);
+    emitEvent('rate_limited', p, key, { status, model, retryAfterMs: retryAfterMs || 0 });
     return;
   }
 
@@ -625,11 +653,13 @@ function handleStatus(p, key, status, model, retryAfterMs) {
     // Transient server errors are not model-specific — penalise key globally.
     recordTransientFailure(p, key);
     warn(`[key-rotator] ${p.name}: transient status=${status} on ${keySlot(p, key)}${keyMask(key)}`);
+    emitEvent('transient_status', p, key, { status, model });
     return;
   }
 
   if (status >= 200 && status < 400) {
     recordSuccess(p, key, model);
+    emitEvent('success', p, key, { status, model });
   }
 }
 
@@ -647,6 +677,7 @@ function handleTransportError(p, key, err) {
   if (retryable) {
     recordTransientFailure(p, key);
     warn(`[key-rotator] ${p.name}: retryable network ${name || 'Error'}${code ? ` code=${code}` : ''} on ${keySlot(p, key)}${keyMask(key)}`);
+    emitEvent('network_retryable', p, key, { name: name || 'Error', code });
   }
 }
 
@@ -1239,6 +1270,7 @@ function patchFetch() {
                 if (inflight < MAX_INFLIGHT_PER_KEY) {
                   provider.idx = (i + 1) % total;
                   key = candidate; waitMs = 0;
+                  emitEvent('pick_retry_fresh', provider, key, { model, attempt });
                   break;
                 }
               }
@@ -1477,6 +1509,12 @@ if (hasProviderKeys) {
   startDiagnostics();
 
   debug(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:${formatHours(PERM_SUSPEND_MS)}h (cap 16h) max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} max-retry-after:${MAX_RETRY_AFTER_MS/1000}s max-key-wait:${MAX_KEY_WAIT_MS/1000}s diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'} log-level:${LOG_LEVEL} verbose-picks:${VERBOSE_PICKS ? 'on' : 'off'} suspended-last-resort:${USE_SUSPENDED_KEY_AS_LAST_RESORT ? 'on' : 'off'} per-model-providers:${providerState.filter(p => p.perModelLimits).map(p => p.name).join(',') || 'none'} model-from-body:on`);
+  emitEvent('rotator_loaded', null, null, {
+    providers: providerState.filter(p => p.keys.length).map(p => ({ name: p.name, total: p.keys.length })),
+    logLevel: LOG_LEVEL,
+    verbosePicks: VERBOSE_PICKS,
+  });
 } else {
   debug('[key-rotator] skipped — no provider keys configured');
+  emitEvent('rotator_skipped', null, null, { reason: 'no_provider_keys' });
 }
