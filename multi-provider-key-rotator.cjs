@@ -874,6 +874,233 @@ function stripGeminiThoughtParts(bodyStr) {
   return bodyStr;
 }
 
+// ─── Patch undici (covers OpenClaw gateway's bundled undici AI calls) ───────────
+//
+// ROOT CAUSE: OpenClaw gateway uses a bundled undici for all AI provider HTTP
+// calls (Gemini, OpenRouter, NVIDIA, etc.).  patchFetch() and patchHttpModule()
+// only cover globalThis.fetch and node:http/https.request — bundled undici
+// bypasses both, so zero key-rotation or logging happens for gateway AI calls.
+//
+// FIX: wrap undici's dispatch() on Agent/Pool/Client prototypes, same approach
+// cloudflare-proxy.js uses for URL rewriting.  Since cloudflare-proxy loads
+// BEFORE this file (Dockerfile ENV sets it first in NODE_OPTIONS), its undici
+// dispatch wrapper is already in place when patchUndici() runs.  We wrap that
+// wrapper, so our code runs with the ORIGINAL origin before the proxy rewrites
+// it to the CF worker URL.  Call chain after both patches:
+//
+//   app undici call
+//     → rotator dispatch  (sees real hostname → picks key → injects key)
+//     → cf-proxy dispatch (sees real hostname → rewrites origin to worker)
+//     → original dispatch (sends to CF worker → forwards to real API)
+
+/**
+ * Get a header value from undici's flat [name, val, name, val] array
+ * or from a plain object (case-insensitive).
+ */
+function uGetHeader(headers, name) {
+  const lower = name.toLowerCase();
+  if (Array.isArray(headers)) {
+    for (let i = 0; i < headers.length; i += 2)
+      if (String(headers[i]).toLowerCase() === lower) return String(headers[i + 1] || '');
+    return '';
+  }
+  if (headers && typeof headers === 'object') {
+    for (const k of Object.keys(headers))
+      if (k.toLowerCase() === lower) return String(headers[k] || '');
+  }
+  return '';
+}
+
+/**
+ * Set / replace one header in undici flat-array or plain-object form.
+ * Always returns a NEW array/object — does not mutate the original.
+ */
+function uSetHeader(headers, name, value) {
+  const lower = name.toLowerCase();
+  if (Array.isArray(headers)) {
+    const out = [];
+    let found = false;
+    for (let i = 0; i < headers.length; i += 2) {
+      if (String(headers[i]).toLowerCase() === lower) {
+        if (!found) { out.push(headers[i], value); found = true; }
+        // drop duplicate entries silently
+      } else {
+        out.push(headers[i], headers[i + 1]);
+      }
+    }
+    if (!found) out.push(name, value);
+    return out;
+  }
+  // Plain object: case-insensitive replace
+  const out = {};
+  for (const k of Object.keys(headers || {})) {
+    if (k.toLowerCase() !== lower) out[k] = headers[k];
+  }
+  out[name] = value;
+  return out;
+}
+
+/**
+ * Wraps an undici dispatch() handler so we can observe the response status
+ * and call handleStatus / endInFlight after the request completes or errors.
+ * Uses a Proxy so all undici handler methods forward correctly, including any
+ * added in future undici versions (onBodySent, onRequestSent, onUpgrade …).
+ */
+function wrapUndiciHandler(handler, provider, key, model) {
+  if (!handler || typeof handler !== 'object') return handler;
+  let statusCode = 0;
+  let settled = false;
+  const settle = (fn) => {
+    if (settled) return;
+    settled = true;
+    try { endInFlight(provider, key); } catch (_) {}
+    try { fn(); } catch (_) {}
+  };
+  return new Proxy(handler, {
+    get(target, prop) {
+      if (prop === 'onHeaders') {
+        return function (sc, headers, resume, statusMessage) {
+          statusCode = sc;
+          return target.onHeaders ? target.onHeaders.call(target, sc, headers, resume, statusMessage) : undefined;
+        };
+      }
+      if (prop === 'onComplete') {
+        return function (trailers) {
+          settle(() => { try { handleStatus(provider, key, statusCode, model); } catch (_) {} });
+          return target.onComplete ? target.onComplete.call(target, trailers) : undefined;
+        };
+      }
+      if (prop === 'onError') {
+        return function (err) {
+          settle(() => { try { handleTransportError(provider, key, err); } catch (_) {} });
+          return target.onError ? target.onError.call(target, err) : undefined;
+        };
+      }
+      const v = target[prop];
+      return typeof v === 'function' ? v.bind(target) : v;
+    },
+  });
+}
+
+/**
+ * Patch one undici class prototype's dispatch() method to inject rotated keys.
+ * Guards against double-patching with _kRotatorPatched flag (separate from
+ * cloudflare-proxy's _patched flag so both can coexist on the same prototype).
+ */
+function patchUndiciDispatch(proto, tag) {
+  if (!proto || typeof proto.dispatch !== 'function') return;
+  if (proto.dispatch._kRotatorPatched) return;
+
+  const origDispatch = proto.dispatch;
+
+  proto.dispatch = function rotatorDispatch(options, handler) {
+    let usedKey = null, usedProvider = null, usedModel = null;
+    try {
+      // Read origin BEFORE cloudflare-proxy's dispatch wrapper rewrites it.
+      // We wrap CF proxy's wrapper, so at this point options.origin is still
+      // the real target (e.g. generativelanguage.googleapis.com).
+      let origin = options.origin;
+      if (origin == null && this && this.origin != null) origin = this.origin;
+      if (origin && typeof origin !== 'string') {
+        try { origin = origin.origin || origin.href || origin.toString(); } catch (_) { origin = ''; }
+      }
+      let hostname = '';
+      try {
+        if (origin) hostname = new URL(String(origin)).hostname;
+      } catch (_) {
+        hostname = String(origin || '').replace(/^https?:\/\//, '').split(/[/:?]/)[0];
+      }
+
+      const provider = matchProvider(hostname);
+      if (provider) {
+        const pathStr = options.path || '/';
+        const model = provider.perModelLimits
+          ? (pathStr.match(/\/models\/([^/:?]+)/)?.[1]?.toLowerCase() || null)
+          : null;
+
+        const { key, waitMs } = nextKey(provider, model);
+        if (key && waitMs > 0)
+          warn(`[key-rotator] ${provider.name}: undici (${tag}): all keys suspended (${Math.round(waitMs / 1000)}s) — best-effort on ${keyMask(key)}${model ? ` model=${model}` : ''} (sync)`);
+
+        if (key) {
+          usedKey = key; usedProvider = provider; usedModel = model;
+          beginInFlight(usedProvider, usedKey);
+
+          const newOptions = { ...options };
+
+          if (provider.queryParam) {
+            // Gemini REST endpoint: inject key as ?key=<rotated> in path
+            try {
+              const pu = new URL(pathStr, 'http://d');
+              pu.searchParams.set('key', key);
+              newOptions.path = pu.pathname + pu.search;
+            } catch (_) { /* leave path unchanged on URL parse failure */ }
+            // Gemini OpenAI-compat endpoint (/v1beta/openai/…) uses Bearer auth
+            // instead of ?key=.  Replace it so the rotated key is actually used.
+            const authVal = uGetHeader(options.headers || [], 'authorization');
+            if (String(authVal).toLowerCase().startsWith('bearer ')) {
+              newOptions.headers = uSetHeader(options.headers, 'authorization', `Bearer ${key}`);
+            }
+          } else {
+            // All other providers: inject / replace Authorization: Bearer
+            newOptions.headers = uSetHeader(options.headers || {}, 'authorization', `Bearer ${key}`);
+          }
+
+          const wrappedHandler = wrapUndiciHandler(handler, usedProvider, usedKey, usedModel);
+          return origDispatch.call(this, newOptions, wrappedHandler);
+        }
+      }
+    } catch (err) {
+      warn(`[key-rotator] undici (${tag}) dispatch patch error:`, err?.message || err);
+      if (usedProvider && usedKey) { try { endInFlight(usedProvider, usedKey); } catch (_) {} }
+    }
+
+    return origDispatch.call(this, options, handler);
+  };
+
+  proto.dispatch._kRotatorPatched = true;
+  debug(`[key-rotator] undici (${tag}) dispatch patched`);
+}
+
+function patchUndiciInstance(exports) {
+  if (!exports) return;
+  if (exports.Agent?.prototype)      patchUndiciDispatch(exports.Agent.prototype,      'Agent');
+  if (exports.Pool?.prototype)       patchUndiciDispatch(exports.Pool.prototype,       'Pool');
+  if (exports.Client?.prototype)     patchUndiciDispatch(exports.Client.prototype,     'Client');
+  if (exports.Dispatcher?.prototype) patchUndiciDispatch(exports.Dispatcher.prototype, 'Dispatcher');
+  // Also patch the live global dispatcher instance prototype
+  if (exports.getGlobalDispatcher) {
+    try {
+      const gd = exports.getGlobalDispatcher();
+      if (gd) {
+        const gdProto = Object.getPrototypeOf(gd);
+        if (gdProto && gdProto !== Object.prototype)
+          patchUndiciDispatch(gdProto, 'GlobalDispatcher');
+      }
+    } catch (_) {}
+  }
+}
+
+function patchUndici() {
+  // 1. Patch any undici already in the module cache (e.g. Node's built-in)
+  try { patchUndiciInstance(require('undici')); } catch (_) {}
+
+  // 2. Hook require() to patch undici instances that load later, including
+  //    OpenClaw's bundled copy deep inside node_modules.
+  //    Chain-safe: captures current Module.prototype.require (which may already
+  //    be cloudflare-proxy's hook) so both hooks compose correctly.
+  const Module = require('module');
+  const _prevRequire = Module.prototype.require;
+  const UNDICI_PATH_RE = /(?:^|\/)node_modules\/undici(?:\/|$)/;
+  Module.prototype.require = function kRotatorUndiciHook(id) {
+    const exp = _prevRequire.apply(this, arguments);
+    if (id === 'undici' || UNDICI_PATH_RE.test(id)) {
+      try { patchUndiciInstance(exp); } catch (_) {}
+    }
+    return exp;
+  };
+}
+
 // ─── Patch globalThis.fetch ───────────────────────────────────────────────────
 
 function patchFetch() {
@@ -1188,6 +1415,7 @@ function patchHttpModule(mod) {
 patchFetch();
 patchHttpModule(http);
 patchHttpModule(https);
+patchUndici();         // covers OpenClaw gateway's bundled undici AI calls
 startDiagnostics();
 
 log(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:${formatHours(PERM_SUSPEND_MS)}h (cap 16h) max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} max-retry-after:${MAX_RETRY_AFTER_MS/1000}s max-key-wait:${MAX_KEY_WAIT_MS/1000}s diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'} log-level:${LOG_LEVEL} verbose-picks:${VERBOSE_PICKS ? 'on' : 'off'} suspended-last-resort:${USE_SUSPENDED_KEY_AS_LAST_RESORT ? 'on' : 'off'} per-model-providers:${providerState.filter(p => p.perModelLimits).map(p => p.name).join(',') || 'none'} model-from-body:on`);
