@@ -19,7 +19,13 @@ DEFAULT_ALLOWED = [
     "discordapp.com",
     "gateway.discord.gg",
     "status.discord.com",
+    # WhatsApp uses multiple hosts: web.whatsapp.com for the web client and
+    # whatsapp.net / whatsapp.com subdomains for media, auth, and WebSocket
+    # support paths. Keep this in sync with cloudflare-proxy.js defaults so the
+    # local redirector never sends the Worker a host it will reject with 403.
     "web.whatsapp.com",
+    "whatsapp.com",
+    "whatsapp.net",
     # Social — confirmed/likely blocked by HF firewall
     "graph.facebook.com",
     "graph.instagram.com",
