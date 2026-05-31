@@ -213,9 +213,9 @@ const providerState = PROVIDERS.map(p => {
     : (llmFallbackEnabled ? normalizeKeys(process.env.LLM_API_KEY || '') : []);
 
   if (hasDedicated)
-    log(`[key-rotator] ${p.name}: ${keys.length} key${keys.length === 1 ? '' : 's'}`);
+    debug(`[key-rotator] ${p.name}: ${keys.length} key${keys.length === 1 ? '' : 's'}`);
   else if (!keys.length)
-    warn(`[key-rotator] No keys for provider "${p.name}"`);
+    debug(`[key-rotator] No keys for provider "${p.name}"`);
 
   // keyState: Map<keyString, {strikes, blacklistedUntil}>
   const keyState = new Map(keys.map(k => [k, makeKeyState()]));
@@ -243,7 +243,7 @@ const fallbackCount = providerState.filter(p => {
   return ded.length === 0 && p.keys.length > 0;
 }).length;
 if (fallbackCount > 0)
-  log(`[key-rotator] ${fallbackCount} provider(s) using LLM_API_KEY fallback`);
+  debug(`[key-rotator] ${fallbackCount} provider(s) using LLM_API_KEY fallback`);
 
 // ─── Per-key state helpers ────────────────────────────────────────────────────
 
@@ -330,8 +330,7 @@ function recordFailure(p, key, model, retryAfterMs) {
     if (isPerm)
       warn(`[key-rotator] ${p.name}: ${keyMask(key)} model=${model} hit ${MAX_STRIKES} strikes — suspended for ${formatHours(PERM_SUSPEND_MS)}h (quota likely exhausted for this model)`);
     else
-      // FIX: was debug() — invisible at default info level; users couldn't see key backoffs happening.
-      log(`[key-rotator] ${p.name}: ${keyMask(key)} model=${model} strike ${mks.strikes}/${MAX_STRIKES} — backoff ${Math.round(cooldown / 1000)}s${serverHintMs > 0 ? ` (server-hint ${Math.round(serverHintMs/1000)}s)` : ''}`);
+      debug(`[key-rotator] ${p.name}: ${keyMask(key)} model=${model} strike ${mks.strikes}/${MAX_STRIKES} — backoff ${Math.round(cooldown / 1000)}s${serverHintMs > 0 ? ` (server-hint ${Math.round(serverHintMs/1000)}s)` : ''}`);
     return;
   }
 
@@ -358,8 +357,7 @@ function recordFailure(p, key, model, retryAfterMs) {
   if (isPerm)
     warn(`[key-rotator] ${p.name}: ${keyMask(key)} reached ${MAX_STRIKES} strikes — suspended for ${formatHours(PERM_SUSPEND_MS)} h (quota likely exhausted)`);
   else
-    // FIX: was debug() — invisible at default info level; users couldn't see key backoffs happening.
-    log(`[key-rotator] ${p.name}: ${keyMask(key)} strike ${ks.strikes}/${MAX_STRIKES} — backoff ${Math.round(cooldown / 1000)}s${serverHintMs > 0 ? ` (server-hint ${Math.round(serverHintMs/1000)}s)` : ''}`);
+    debug(`[key-rotator] ${p.name}: ${keyMask(key)} strike ${ks.strikes}/${MAX_STRIKES} — backoff ${Math.round(cooldown / 1000)}s${serverHintMs > 0 ? ` (server-hint ${Math.round(serverHintMs/1000)}s)` : ''}`);
 }
 
 /**
@@ -478,9 +476,7 @@ function nextKey(p, model) {
       const inflight = p.inFlight.get(key) || 0;
       if (inflight < MAX_INFLIGHT_PER_KEY) {
         p.idx = (i + 1) % total;   // next call starts AFTER the key we just picked
-        // FIX: was debug() which silently does nothing unless LOG_LEVEL=debug — VERBOSE_PICKS
-        // is supposed to enable pick-level visibility without requiring full debug mode.
-        if (VERBOSE_PICKS) log(`[key-rotator] ${p.name}: picked ${keyMask(key)}${model ? ` model=${model}` : ''} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
+        if (VERBOSE_PICKS) debug(`[key-rotator] ${p.name}: picked ${keyMask(key)}${model ? ` model=${model}` : ''} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
         return { key, waitMs: 0 };
       }
       if (!bestPick) bestPick = { i, key, inflight, score: Number.POSITIVE_INFINITY };
@@ -1435,10 +1431,16 @@ function patchHttpModule(mod) {
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────
 
-patchFetch();
-patchHttpModule(http);
-patchHttpModule(https);
-patchUndici();         // covers OpenClaw gateway's bundled undici AI calls
-startDiagnostics();
+const hasProviderKeys = providerState.some(p => p.keys.length > 0);
 
-log(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:${formatHours(PERM_SUSPEND_MS)}h (cap 16h) max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} max-retry-after:${MAX_RETRY_AFTER_MS/1000}s max-key-wait:${MAX_KEY_WAIT_MS/1000}s diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'} log-level:${LOG_LEVEL} verbose-picks:${VERBOSE_PICKS ? 'on' : 'off'} suspended-last-resort:${USE_SUSPENDED_KEY_AS_LAST_RESORT ? 'on' : 'off'} per-model-providers:${providerState.filter(p => p.perModelLimits).map(p => p.name).join(',') || 'none'} model-from-body:on`);
+if (hasProviderKeys) {
+  patchFetch();
+  patchHttpModule(http);
+  patchHttpModule(https);
+  patchUndici();         // covers OpenClaw gateway's bundled undici AI calls
+  startDiagnostics();
+
+  debug(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:${formatHours(PERM_SUSPEND_MS)}h (cap 16h) max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} max-retry-after:${MAX_RETRY_AFTER_MS/1000}s max-key-wait:${MAX_KEY_WAIT_MS/1000}s diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'} log-level:${LOG_LEVEL} verbose-picks:${VERBOSE_PICKS ? 'on' : 'off'} suspended-last-resort:${USE_SUSPENDED_KEY_AS_LAST_RESORT ? 'on' : 'off'} per-model-providers:${providerState.filter(p => p.perModelLimits).map(p => p.name).join(',') || 'none'} model-from-body:on`);
+} else {
+  debug('[key-rotator] skipped — no provider keys configured');
+}

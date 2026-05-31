@@ -263,6 +263,76 @@ def snapshot_state_into_workspace() -> bool:
     return had_copy_failures
 
 
+def replace_path_atomically(source_path: Path, target_path: Path) -> None:
+    """Replace one restored state entry without deleting the live copy first.
+
+    A failed copy of openclaw.json/credentials must never leave existing users
+    with a missing or half-restored config.  Copy into a sibling temp path first,
+    move the live target aside only after the copy succeeds, then roll back if the
+    final rename fails.
+    """
+    parent = target_path.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = parent / f".{target_path.name}.restore-tmp-{os.getpid()}"
+    backup_path = parent / f".{target_path.name}.restore-old-{os.getpid()}"
+
+    for cleanup_path in (tmp_path, backup_path):
+        if cleanup_path.exists():
+            if cleanup_path.is_dir():
+                shutil.rmtree(cleanup_path, ignore_errors=True)
+            else:
+                cleanup_path.unlink(missing_ok=True)
+
+    try:
+        if source_path.is_dir():
+            shutil.copytree(source_path, tmp_path)
+        else:
+            shutil.copy2(source_path, tmp_path)
+
+        target_existed = target_path.exists()
+        if target_existed:
+            target_path.rename(backup_path)
+        tmp_path.rename(target_path)
+        if backup_path.exists():
+            if backup_path.is_dir():
+                shutil.rmtree(backup_path, ignore_errors=True)
+            else:
+                backup_path.unlink(missing_ok=True)
+    except Exception:
+        if tmp_path.exists():
+            if tmp_path.is_dir():
+                shutil.rmtree(tmp_path, ignore_errors=True)
+            else:
+                tmp_path.unlink(missing_ok=True)
+        if backup_path.exists() and not target_path.exists():
+            backup_path.rename(target_path)
+        raise
+
+
+def locally_existing_large_files(root: Path) -> set[str]:
+    """Files omitted from uploads only because of size, but still present locally.
+
+    These must not be pruned from the remote backup: pruning is for user-deleted
+    files, not for files that still exist but are over the upload size ceiling.
+    """
+    protected: set[str] = set()
+    if not root.exists():
+        return protected
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(root).as_posix()
+        parts = Path(rel).parts
+        if any(part in EXCLUDED_SYNC_DIRS for part in parts):
+            continue
+        try:
+            if path.stat().st_size > MAX_FILE_SIZE_BYTES:
+                protected.add(rel)
+        except OSError:
+            continue
+    return protected
+
+
 def restore_embedded_state() -> None:
     state_backup_root = STATE_DIR / "openclaw"
 
@@ -292,14 +362,7 @@ def restore_embedded_state() -> None:
                     source_path.unlink(missing_ok=True)
                 continue
             target_path = OPENCLAW_HOME / name
-            shutil.rmtree(target_path, ignore_errors=True)
-            if target_path.is_file():
-                target_path.unlink(missing_ok=True)
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-            if source_path.is_dir():
-                shutil.copytree(source_path, target_path)
-            else:
-                shutil.copy2(source_path, target_path)
+            replace_path_atomically(source_path, target_path)
         print("OpenClaw state restored.")
 
     if WHATSAPP_ENABLED and WHATSAPP_BACKUP_DIR.is_dir():
@@ -481,6 +544,7 @@ def prune_remote_deleted_files(
     repo_id: str,
     snapshot_dir: Path,
     skip_prefixes: set[str] | None = None,
+    protected_paths: set[str] | None = None,
 ) -> None:
     """Delete files that exist on the remote dataset but no longer exist locally.
 
@@ -492,6 +556,7 @@ def prune_remote_deleted_files(
     if HF_API is None:
         return
     skip_prefixes = skip_prefixes or set()
+    protected_paths = protected_paths or set()
 
     local_files = {
         path.relative_to(snapshot_dir).as_posix()
@@ -503,6 +568,7 @@ def prune_remote_deleted_files(
     stale_files = [
         path for path in remote_files
         if path not in local_files and path not in {".gitattributes"}
+        and path not in protected_paths
         and not any(path == prefix or path.startswith(prefix + "/") for prefix in skip_prefixes)
     ]
     if not stale_files:
@@ -678,7 +744,12 @@ def _sync_once_unlocked(
             )
         had_prune_failure = False
         try:
-            prune_remote_deleted_files(repo_id, snapshot_dir, skip_prefixes=skip_prune_prefixes)
+            prune_remote_deleted_files(
+                repo_id,
+                snapshot_dir,
+                skip_prefixes=skip_prune_prefixes,
+                protected_paths=locally_existing_large_files(WORKSPACE),
+            )
         except Exception as prune_exc:
             print(f"Warning: could not prune stale remote files: {prune_exc}")
             had_prune_failure = True

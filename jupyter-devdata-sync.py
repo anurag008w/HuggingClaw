@@ -158,8 +158,9 @@ def should_skip(p: Path):
     # Skip any component whose name looks like a secret file/dir.
     return any(_name_is_secret(part) for part in parts)
 
-def snapshot(src: Path, dst: Path) -> bool:
+def snapshot(src: Path, dst: Path) -> tuple[bool, set[str]]:
     had_copy_failures = False
+    protected_large_files: set[str] = set()
     for p in src.rglob("*"):
         rel = p.relative_to(src)
         if should_skip(rel):
@@ -173,6 +174,7 @@ def snapshot(src: Path, dst: Path) -> bool:
             # BUG FIX #5: Skip files that exceed the size limit.
             try:
                 if p.stat().st_size > MAX_FILE_SIZE_BYTES:
+                    protected_large_files.add(rel.as_posix())
                     continue
             except OSError:
                 continue
@@ -181,7 +183,7 @@ def snapshot(src: Path, dst: Path) -> bool:
                 shutil.copy2(p, target)
             except OSError:
                 had_copy_failures = True
-    return had_copy_failures
+    return had_copy_failures, protected_large_files
 
 def is_jupyter_running(port: int = 8888) -> bool:
     """Return True if JupyterLab is already listening on *port*.
@@ -237,6 +239,7 @@ def prune_remote_deleted_files(
     rid: str,
     snapshot_dir: Path,
     skip_prefixes: set[str] | None = None,
+    protected_paths: set[str] | None = None,
 ) -> None:
     """Delete from the HF dataset any files the user deleted locally.
 
@@ -250,6 +253,7 @@ def prune_remote_deleted_files(
     """
     try:
         skip_prefixes = skip_prefixes or set()
+        protected_paths = protected_paths or set()
         local_files = {
             p.relative_to(snapshot_dir).as_posix()
             for p in snapshot_dir.rglob("*")
@@ -260,6 +264,7 @@ def prune_remote_deleted_files(
             f for f in remote_files
             if f not in local_files
             and f != ".gitattributes"
+            and f not in protected_paths
             and not any(f == prefix or f.startswith(prefix + "/") for prefix in skip_prefixes)
         ]
         if not stale:
@@ -288,7 +293,7 @@ def sync_loop(api, rid: str):
     while True:
         tmp = Path(tempfile.mkdtemp(prefix="devdata-snap-"))
         try:
-            had_copy_failures = snapshot(JUPYTER_ROOT, tmp)
+            had_copy_failures, protected_large_files = snapshot(JUPYTER_ROOT, tmp)
             upload_folder(
                 folder_path=str(tmp),
                 repo_id=rid,
@@ -305,7 +310,13 @@ def sync_loop(api, rid: str):
                 # runtime-heavy Jupyter paths in that case.
                 skip_prune_prefixes.update({"runtime", ".local/share/jupyter/runtime"})
                 print("DevData snapshot had copy failures; pruning stale files with runtime-path safeguards.")
-            prune_remote_deleted_files(api, rid, tmp, skip_prefixes=skip_prune_prefixes)
+            prune_remote_deleted_files(
+                api,
+                rid,
+                tmp,
+                skip_prefixes=skip_prune_prefixes,
+                protected_paths=protected_large_files,
+            )
         except Exception as exc:
             kind = classify_error(exc)
             print(f"DevData sync warning [{kind}]: {exc}")
