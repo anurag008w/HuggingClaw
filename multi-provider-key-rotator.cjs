@@ -19,9 +19,18 @@
 
 const http  = require('node:http');
 const https = require('node:https');
+const fs    = require('node:fs');
+const path  = require('node:path');
 
-const LOG_LEVEL = String(process.env.KEY_ROTATOR_LOG_LEVEL || 'info').trim().toLowerCase();
 const VERBOSE_PICKS = /^(1|true|yes|on)$/i.test(String(process.env.KEY_ROTATOR_VERBOSE_PICKS || '').trim());
+const RAW_LOG_LEVEL = String(process.env.KEY_ROTATOR_LOG_LEVEL || '').trim().toLowerCase();
+const LOG_LEVEL = RAW_LOG_LEVEL || (
+  VERBOSE_PICKS ||
+  /^(1|true|yes|on)$/i.test(String(process.env.GATEWAY_VERBOSE || '').trim()) ||
+  String(process.env.OPENCLAW_CONSOLE_LOG_LEVEL || '').trim().toLowerCase() === 'debug'
+    ? 'debug'
+    : 'info'
+);
 const log  = (...a) => { if (LOG_LEVEL !== 'silent') console.error(...a); };
 const warn = (...a) => { if (LOG_LEVEL !== 'silent') console.warn(...a); };
 const debug = (...a) => { if (LOG_LEVEL === 'debug') console.error(...a); };
@@ -68,6 +77,8 @@ const DIAGNOSTICS_INTERVAL_MS = Math.max(
   10_000,
   parseInt(process.env.KEY_ROTATOR_DIAGNOSTICS_INTERVAL_MS || '', 10) || 60_000,
 );
+const EVENT_LOG_FILE = process.env.KEY_ROTATOR_EVENT_LOG_FILE || '/tmp/huggingclaw-key-rotator-events.jsonl';
+const EVENT_LOG_MAX_BYTES = Math.max(64 * 1024, parseInt(process.env.KEY_ROTATOR_EVENT_LOG_MAX_BYTES || '', 10) || 1024 * 1024);
 
 const USE_SUSPENDED_KEY_AS_LAST_RESORT = !/^(0|false|no|off)$/i.test(
   String(process.env.KEY_USE_SUSPENDED_AS_LAST_RESORT || 'true').trim(),
@@ -110,6 +121,8 @@ const PROVIDERS = [
   { name:'openai',       hostname:/(?:^|\.)api\.openai\.com$/i,               envPlural:'OPENAI_API_KEYS',           envSingular:'OPENAI_API_KEY' },
   { name:'gemini',       hostname:/(?:^|\.)(?:generativelanguage\.googleapis\.com|aiplatform\.googleapis\.com)$/i,
                                                                                envPlural:'GEMINI_API_KEYS',           envSingular:'GEMINI_API_KEY',  queryParam:true,
+    extraEnvPlural:['GOOGLE_API_KEYS', 'GOOGLE_GENERATIVE_AI_API_KEYS', 'GOOGLE_AI_API_KEYS'],
+    extraEnvSingular:['GOOGLE_API_KEY', 'GOOGLE_GENERATIVE_AI_API_KEY', 'GOOGLE_AI_API_KEY'],
     // Google enforces rate limits per-model per-key (RPM / TPD per model).
     // A 429 on gemini-2.5-pro must NOT blacklist the key for gemini-1.5-flash.
     perModelLimits: true },
@@ -151,9 +164,39 @@ const PROVIDERS = [
 function normalizeKeys(...inputs) {
   const seen = new Set(), out = [];
   for (const input of inputs)
-    for (const k of String(input || '').split(',').map(s => s.trim()).filter(Boolean))
+    // Accept comma-separated values (documented) plus newline-separated values
+    // (common when users paste many HF Space secrets from a spreadsheet/editor).
+    // Do not split on generic spaces because some providers may someday use
+    // structured token strings that contain spaces.
+    for (const k of String(input || '').split(/[\n\r,]+/).map(s => s.trim()).filter(Boolean))
       if (!seen.has(k)) { seen.add(k); out.push(k); }
   return out;
+}
+
+function keySlot(p, key) {
+  const idx = p?.keys?.indexOf?.(key) ?? -1;
+  return idx >= 0 ? `#${idx + 1}/${p.keys.length} ` : '';
+}
+
+function emitEvent(type, p, key, extra = {}) {
+  try {
+    const idx = key && p?.keys ? p.keys.indexOf(key) : -1;
+    const payload = {
+      ts: new Date().toISOString(),
+      type,
+      provider: p?.name || extra.provider || 'system',
+      ...(idx >= 0 ? { slot: idx + 1, total: p.keys.length, key: keyMask(key) } : {}),
+      ...extra,
+    };
+    const dir = path.dirname(EVENT_LOG_FILE);
+    if (dir && dir !== '.') fs.mkdirSync(dir, { recursive: true });
+    fs.appendFileSync(EVENT_LOG_FILE, JSON.stringify(payload) + '\n', { encoding: 'utf8' });
+    const stat = fs.statSync(EVENT_LOG_FILE);
+    if (stat.size > EVENT_LOG_MAX_BYTES) {
+      const keep = fs.readFileSync(EVENT_LOG_FILE, 'utf8').slice(-Math.floor(EVENT_LOG_MAX_BYTES * 0.75));
+      fs.writeFileSync(EVENT_LOG_FILE, keep.replace(/^[^\n]*\n?/, ''), 'utf8');
+    }
+  } catch (_) { /* event logging must never affect requests */ }
 }
 
 // Per-key state: { strikes, blacklistedUntil }
@@ -198,9 +241,19 @@ const providerState = PROVIDERS.map(p => {
     String(process.env.LLM_API_KEY_FALLBACK_ENABLED || '').trim().toLowerCase(),
   );
 
-  const extraKeys = (p._extraPlural || p._extraSingular)
-    ? normalizeKeys(process.env[p._extraPlural || ''] || '', process.env[p._extraSingular || ''] || '')
-    : [];
+  const envValues = (...names) => names
+    .flat()
+    .filter(Boolean)
+    .map(name => process.env[name] || '');
+
+  const extraKeys = normalizeKeys(
+    ...envValues(
+      p._extraPlural,
+      p._extraSingular,
+      p.extraEnvPlural,
+      p.extraEnvSingular,
+    ),
+  );
 
   const dedicatedKeys = normalizeKeys(
     process.env[p.envPlural]  || '',
@@ -213,9 +266,9 @@ const providerState = PROVIDERS.map(p => {
     : (llmFallbackEnabled ? normalizeKeys(process.env.LLM_API_KEY || '') : []);
 
   if (hasDedicated)
-    log(`[key-rotator] ${p.name}: ${keys.length} key${keys.length === 1 ? '' : 's'}`);
+    debug(`[key-rotator] ${p.name}: ${keys.length} key${keys.length === 1 ? '' : 's'}`);
   else if (!keys.length)
-    warn(`[key-rotator] No keys for provider "${p.name}"`);
+    debug(`[key-rotator] No keys for provider "${p.name}"`);
 
   // keyState: Map<keyString, {strikes, blacklistedUntil}>
   const keyState = new Map(keys.map(k => [k, makeKeyState()]));
@@ -234,16 +287,24 @@ const providerState = PROVIDERS.map(p => {
 
 // LLM_API_KEY fallback summary
 const fallbackCount = providerState.filter(p => {
+  const envValues = (...names) => names
+    .flat()
+    .filter(Boolean)
+    .map(name => process.env[name] || '');
   const ded = normalizeKeys(
-    process.env[p.envPlural]          || '',
-    process.env[p.envSingular]        || '',
-    process.env[p._extraPlural  || ''] || '',
-    process.env[p._extraSingular || ''] || '',
+    process.env[p.envPlural]   || '',
+    process.env[p.envSingular] || '',
+    ...envValues(
+      p._extraPlural,
+      p._extraSingular,
+      p.extraEnvPlural,
+      p.extraEnvSingular,
+    ),
   );
   return ded.length === 0 && p.keys.length > 0;
 }).length;
 if (fallbackCount > 0)
-  log(`[key-rotator] ${fallbackCount} provider(s) using LLM_API_KEY fallback`);
+  debug(`[key-rotator] ${fallbackCount} provider(s) using LLM_API_KEY fallback`);
 
 // ─── Per-key state helpers ────────────────────────────────────────────────────
 
@@ -267,7 +328,7 @@ function isActive(p, key, model) {
     // Natural expiry: give partial fresh start
     ks.blacklistedUntil = 0;
     if (ks.strikes > 0) ks.strikes -= 1;
-    debug(`[key-rotator] ${p.name}: ${keyMask(key)} back in pool (strikes now ${ks.strikes})`);
+    debug(`[key-rotator] ${p.name}: ${keySlot(p, key)}${keyMask(key)} back in pool (strikes now ${ks.strikes})`);
   }
 
   // ── Per-model check (gemini etc.) ──────────────────────────────────────────
@@ -278,7 +339,7 @@ function isActive(p, key, model) {
       if (Date.now() < mks.blacklistedUntil) return false;   // blocked for this model
       mks.blacklistedUntil = 0;
       if (mks.strikes > 0) mks.strikes -= 1;
-      debug(`[key-rotator] ${p.name}: ${keyMask(key)} back in pool for model=${model} (strikes now ${mks.strikes})`);
+      debug(`[key-rotator] ${p.name}: ${keySlot(p, key)}${keyMask(key)} back in pool for model=${model} (strikes now ${mks.strikes})`);
     }
   }
 
@@ -328,10 +389,9 @@ function recordFailure(p, key, model, retryAfterMs) {
     // ★ Set blacklistedUntil FIRST so it is always written even if the log below throws.
     mks.blacklistedUntil = Math.max(mks.blacklistedUntil || 0, Date.now() + cooldown);
     if (isPerm)
-      warn(`[key-rotator] ${p.name}: ${keyMask(key)} model=${model} hit ${MAX_STRIKES} strikes — suspended for ${formatHours(PERM_SUSPEND_MS)}h (quota likely exhausted for this model)`);
+      warn(`[key-rotator] ${p.name}: ${keySlot(p, key)}${keyMask(key)} model=${model} hit ${MAX_STRIKES} strikes — suspended for ${formatHours(PERM_SUSPEND_MS)}h (quota likely exhausted for this model)`);
     else
-      // FIX: was debug() — invisible at default info level; users couldn't see key backoffs happening.
-      log(`[key-rotator] ${p.name}: ${keyMask(key)} model=${model} strike ${mks.strikes}/${MAX_STRIKES} — backoff ${Math.round(cooldown / 1000)}s${serverHintMs > 0 ? ` (server-hint ${Math.round(serverHintMs/1000)}s)` : ''}`);
+      debug(`[key-rotator] ${p.name}: ${keySlot(p, key)}${keyMask(key)} model=${model} strike ${mks.strikes}/${MAX_STRIKES} — backoff ${Math.round(cooldown / 1000)}s${serverHintMs > 0 ? ` (server-hint ${Math.round(serverHintMs/1000)}s)` : ''}`);
     return;
   }
 
@@ -356,10 +416,9 @@ function recordFailure(p, key, model, retryAfterMs) {
   // ★ Set blacklistedUntil FIRST so it is always written even if the log below throws.
   ks.blacklistedUntil = Math.max(ks.blacklistedUntil || 0, Date.now() + cooldown);
   if (isPerm)
-    warn(`[key-rotator] ${p.name}: ${keyMask(key)} reached ${MAX_STRIKES} strikes — suspended for ${formatHours(PERM_SUSPEND_MS)} h (quota likely exhausted)`);
+    warn(`[key-rotator] ${p.name}: ${keySlot(p, key)}${keyMask(key)} reached ${MAX_STRIKES} strikes — suspended for ${formatHours(PERM_SUSPEND_MS)} h (quota likely exhausted)`);
   else
-    // FIX: was debug() — invisible at default info level; users couldn't see key backoffs happening.
-    log(`[key-rotator] ${p.name}: ${keyMask(key)} strike ${ks.strikes}/${MAX_STRIKES} — backoff ${Math.round(cooldown / 1000)}s${serverHintMs > 0 ? ` (server-hint ${Math.round(serverHintMs/1000)}s)` : ''}`);
+    debug(`[key-rotator] ${p.name}: ${keySlot(p, key)}${keyMask(key)} strike ${ks.strikes}/${MAX_STRIKES} — backoff ${Math.round(cooldown / 1000)}s${serverHintMs > 0 ? ` (server-hint ${Math.round(serverHintMs/1000)}s)` : ''}`);
 }
 
 /**
@@ -374,7 +433,7 @@ function recordTransientFailure(p, key) {
   const cooldown = Math.max(1000, Math.round(BASE_COOLDOWN_MS * jitter));
   ks.blacklistedUntil = Math.max(ks.blacklistedUntil || 0, Date.now() + cooldown);
   const secs = Math.round(cooldown / 1000);
-  debug(`[key-rotator] ${p.name}: ${keyMask(key)} transient backoff ${secs}s (strikes unchanged)`);
+  debug(`[key-rotator] ${p.name}: ${keySlot(p, key)}${keyMask(key)} transient backoff ${secs}s (strikes unchanged)`);
 }
 
 /**
@@ -391,7 +450,7 @@ function recordSuccess(p, key, model) {
     if (ks.strikes > 0) {
       ks.strikes = 0;
       ks.lastFailureAt = 0;
-      debug(`[key-rotator] ${p.name}: ${keyMask(key)} recovered (global) — strikes reset`);
+      debug(`[key-rotator] ${p.name}: ${keySlot(p, key)}${keyMask(key)} recovered (global) — strikes reset`);
     }
   }
 
@@ -403,7 +462,7 @@ function recordSuccess(p, key, model) {
       mks.strikes = 0;
       mks.lastFailureAt = 0;
       mks.blacklistedUntil = 0;
-      debug(`[key-rotator] ${p.name}: ${keyMask(key)} model=${model} recovered — strikes reset`);
+      debug(`[key-rotator] ${p.name}: ${keySlot(p, key)}${keyMask(key)} model=${model} recovered — strikes reset`);
     }
   }
 }
@@ -478,9 +537,8 @@ function nextKey(p, model) {
       const inflight = p.inFlight.get(key) || 0;
       if (inflight < MAX_INFLIGHT_PER_KEY) {
         p.idx = (i + 1) % total;   // next call starts AFTER the key we just picked
-        // FIX: was debug() which silently does nothing unless LOG_LEVEL=debug — VERBOSE_PICKS
-        // is supposed to enable pick-level visibility without requiring full debug mode.
-        if (VERBOSE_PICKS) log(`[key-rotator] ${p.name}: picked ${keyMask(key)}${model ? ` model=${model}` : ''} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
+        if (VERBOSE_PICKS) debug(`[key-rotator] ${p.name}: picked ${keySlot(p, key)}${keyMask(key)}${model ? ` model=${model}` : ''} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
+        emitEvent('pick', p, key, { model, inflight: inflight + 1, maxInflight: MAX_INFLIGHT_PER_KEY });
         return { key, waitMs: 0 };
       }
       if (!bestPick) bestPick = { i, key, inflight, score: Number.POSITIVE_INFINITY };
@@ -499,7 +557,8 @@ function nextKey(p, model) {
 
   if (bestPick) {
     p.idx = (bestPick.i + 1) % total;
-    warn(`[key-rotator] ${p.name}: all active keys saturated, reusing ${keyMask(bestPick.key)}${model ? ` model=${model}` : ''} inflight=${bestPick.inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
+    warn(`[key-rotator] ${p.name}: all active keys saturated, reusing ${keySlot(p, bestPick.key)}${keyMask(bestPick.key)}${model ? ` model=${model}` : ''} inflight=${bestPick.inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
+    emitEvent('saturated_reuse', p, bestPick.key, { model, inflight: bestPick.inflight + 1, maxInflight: MAX_INFLIGHT_PER_KEY });
     return { key: bestPick.key, waitMs: 0 };
   }
 
@@ -507,6 +566,7 @@ function nextKey(p, model) {
   // the soonest-recovering key, unless explicitly disabled.
   if (!USE_SUSPENDED_KEY_AS_LAST_RESORT) {
     warn(`[key-rotator] ${p.name}: all ${total} key(s) suspended — withholding key until cooldown expires (last-resort disabled)`);
+    emitEvent('all_suspended_withheld', p, null, { model, total });
     return { key: null, waitMs: 0 };
   }
 
@@ -527,10 +587,11 @@ function nextKey(p, model) {
   // This avoids firing into a guaranteed 429 and wasting a request slot.
   const waitMs = Math.max(0, bestExpiry - Date.now());
   if (waitMs > 0)
-    warn(`[key-rotator] ${p.name}: all ${total} key(s) suspended — soonest key ${keyMask(chosenKey)} recovers in ${Math.round(waitMs / 1000)}s${model ? ` (model=${model})` : ''}`);
+    warn(`[key-rotator] ${p.name}: all ${total} key(s) suspended — soonest key ${keySlot(p, chosenKey)}${keyMask(chosenKey)} recovers in ${Math.round(waitMs / 1000)}s${model ? ` (model=${model})` : ''}`);
   else
-    warn(`[key-rotator] ${p.name}: all ${total} key(s) suspended — using soonest-recovering key ${keyMask(chosenKey)}`);
+    warn(`[key-rotator] ${p.name}: all ${total} key(s) suspended — using soonest-recovering key ${keySlot(p, chosenKey)}${keyMask(chosenKey)}`);
 
+  emitEvent('all_suspended_pick', p, chosenKey, { model, waitMs });
   return { key: chosenKey, waitMs };
 }
 
@@ -576,7 +637,8 @@ function handleStatus(p, key, status, model, retryAfterMs) {
     ks.strikes = MAX_STRIKES;
     ks.lastFailureAt = Date.now();
     ks.blacklistedUntil = Date.now() + PERM_SUSPEND_MS;
-    warn(`[key-rotator] ${p.name}: ${keyMask(key)} auth-failed (${status}) — suspended for ${formatHours(PERM_SUSPEND_MS)} h`);
+    warn(`[key-rotator] ${p.name}: ${keySlot(p, key)}${keyMask(key)} auth-failed (${status}) — suspended for ${formatHours(PERM_SUSPEND_MS)} h`);
+    emitEvent('auth_failed', p, key, { status, suspendMs: PERM_SUSPEND_MS });
     return;
   }
 
@@ -585,19 +647,22 @@ function handleStatus(p, key, status, model, retryAfterMs) {
     // recordFailure will scope the blacklist to the model when model is provided.
     // Pass retryAfterMs so the key blacklist respects the server's stated wait time.
     recordFailure(p, key, model, retryAfterMs);
-    warn(`[key-rotator] ${p.name}: quota/rate status=${status} on ${keyMask(key)}${model ? ` model=${model}` : ''}${retryAfterMs ? ` retry-after=${Math.round(retryAfterMs/1000)}s` : ''}`);
+    warn(`[key-rotator] ${p.name}: quota/rate status=${status} on ${keySlot(p, key)}${keyMask(key)}${model ? ` model=${model}` : ''}${retryAfterMs ? ` retry-after=${Math.round(retryAfterMs/1000)}s` : ''}`);
+    emitEvent('rate_limited', p, key, { status, model, retryAfterMs: retryAfterMs || 0 });
     return;
   }
 
   if (classifyRetryableFailure(status)) {
     // Transient server errors are not model-specific — penalise key globally.
     recordTransientFailure(p, key);
-    warn(`[key-rotator] ${p.name}: transient status=${status} on ${keyMask(key)}`);
+    warn(`[key-rotator] ${p.name}: transient status=${status} on ${keySlot(p, key)}${keyMask(key)}`);
+    emitEvent('transient_status', p, key, { status, model });
     return;
   }
 
   if (status >= 200 && status < 400) {
     recordSuccess(p, key, model);
+    emitEvent('success', p, key, { status, model });
   }
 }
 
@@ -614,7 +679,8 @@ function handleTransportError(p, key, err) {
   const retryable = classifyRetryableFailure(undefined, code) || name === 'AbortError';
   if (retryable) {
     recordTransientFailure(p, key);
-    warn(`[key-rotator] ${p.name}: retryable network ${name || 'Error'}${code ? ` code=${code}` : ''} on ${keyMask(key)}`);
+    warn(`[key-rotator] ${p.name}: retryable network ${name || 'Error'}${code ? ` code=${code}` : ''} on ${keySlot(p, key)}${keyMask(key)}`);
+    emitEvent('network_retryable', p, key, { name: name || 'Error', code });
   }
 }
 
@@ -664,7 +730,7 @@ function startDiagnostics() {
         // Status icon:  ✅ active  🔴 globally suspended  ⚠️ active globally but some models blocked
         const icon = globalSuspended ? '🔴' : anyModelSusp ? '⚠️ ' : '✅';
 
-        let row = `[key-rotator]   ${icon} ${keyMask(k)}`;
+        let row = `[key-rotator]   ${icon} #${p.keys.indexOf(k) + 1}/${p.keys.length} ${keyMask(k)}`;
         row += `  strikes:${ks.strikes}/${MAX_STRIKES}`;
         row += `  used:${ks.timesUsed || 0}`;
         row += `  inflight:${inflight}`;
@@ -1020,7 +1086,7 @@ function patchUndiciDispatch(proto, tag) {
 
         const { key, waitMs } = nextKey(provider, model);
         if (key && waitMs > 0)
-          warn(`[key-rotator] ${provider.name}: undici (${tag}): all keys suspended (${Math.round(waitMs / 1000)}s) — best-effort on ${keyMask(key)}${model ? ` model=${model}` : ''} (sync)`);
+          warn(`[key-rotator] ${provider.name}: undici (${tag}): all keys suspended (${Math.round(waitMs / 1000)}s) — best-effort on ${keySlot(provider, key)}${keyMask(key)}${model ? ` model=${model}` : ''} (sync)`);
 
         if (key) {
           usedKey = key; usedProvider = provider; usedModel = model;
@@ -1207,6 +1273,7 @@ function patchFetch() {
                 if (inflight < MAX_INFLIGHT_PER_KEY) {
                   provider.idx = (i + 1) % total;
                   key = candidate; waitMs = 0;
+                  emitEvent('pick_retry_fresh', provider, key, { model, attempt });
                   break;
                 }
               }
@@ -1310,7 +1377,7 @@ function patchHttpModule(mod) {
         // Real-cycle sleep is only available through patchFetch (async path).
         // Log a warning if we would have benefited from it.
         if (key && waitMs > 0)
-          warn(`[key-rotator] ${provider.name}: http: all keys suspended (waitMs=${Math.round(waitMs/1000)}s) — firing best-effort on ${keyMask(key)}${model ? ` model=${model}` : ''} (sync path; use fetch for real-cycle)`);
+          warn(`[key-rotator] ${provider.name}: http: all keys suspended (waitMs=${Math.round(waitMs/1000)}s) — firing best-effort on ${keySlot(provider, key)}${keyMask(key)}${model ? ` model=${model}` : ''} (sync path; use fetch for real-cycle)`);
 
         if (key) {
           usedKey = key; usedProvider = provider; usedModel = model;
@@ -1435,10 +1502,22 @@ function patchHttpModule(mod) {
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────
 
-patchFetch();
-patchHttpModule(http);
-patchHttpModule(https);
-patchUndici();         // covers OpenClaw gateway's bundled undici AI calls
-startDiagnostics();
+const hasProviderKeys = providerState.some(p => p.keys.length > 0);
 
-log(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:${formatHours(PERM_SUSPEND_MS)}h (cap 16h) max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} max-retry-after:${MAX_RETRY_AFTER_MS/1000}s max-key-wait:${MAX_KEY_WAIT_MS/1000}s diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'} log-level:${LOG_LEVEL} verbose-picks:${VERBOSE_PICKS ? 'on' : 'off'} suspended-last-resort:${USE_SUSPENDED_KEY_AS_LAST_RESORT ? 'on' : 'off'} per-model-providers:${providerState.filter(p => p.perModelLimits).map(p => p.name).join(',') || 'none'} model-from-body:on`);
+if (hasProviderKeys) {
+  patchFetch();
+  patchHttpModule(http);
+  patchHttpModule(https);
+  patchUndici();         // covers OpenClaw gateway's bundled undici AI calls
+  startDiagnostics();
+
+  debug(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:${formatHours(PERM_SUSPEND_MS)}h (cap 16h) max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} max-retry-after:${MAX_RETRY_AFTER_MS/1000}s max-key-wait:${MAX_KEY_WAIT_MS/1000}s diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'} log-level:${LOG_LEVEL} verbose-picks:${VERBOSE_PICKS ? 'on' : 'off'} suspended-last-resort:${USE_SUSPENDED_KEY_AS_LAST_RESORT ? 'on' : 'off'} per-model-providers:${providerState.filter(p => p.perModelLimits).map(p => p.name).join(',') || 'none'} model-from-body:on`);
+  emitEvent('rotator_loaded', null, null, {
+    providers: providerState.filter(p => p.keys.length).map(p => ({ name: p.name, total: p.keys.length })),
+    logLevel: LOG_LEVEL,
+    verbosePicks: VERBOSE_PICKS,
+  });
+} else {
+  debug('[key-rotator] skipped — no provider keys configured');
+  emitEvent('rotator_skipped', null, null, { reason: 'no_provider_keys' });
+}
