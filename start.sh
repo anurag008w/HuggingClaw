@@ -1200,14 +1200,20 @@ if [ -f "$EXISTING_CONFIG" ]; then
      | if (($desired.models.providers // {} | length) > 0) then
          reduce ($desired.models.providers // {} | to_entries)[] as $pe (.;
            # Propagate custom/new providers from desired config that are absent in existing.
-           # For known providers that already exist, only merge in baseUrl/apiKey/api when missing.
+           # For known providers that already exist, merge in baseUrl/apiKey/api from env.
+           # ENV WINS over existing config: if an env var supplies a value it always takes
+           # effect (e.g. rotating an API key in HF Secrets is immediately reflected).
+           # If the env var is unset/empty the existing config value is preserved.
            if .models.providers[$pe.key] == null then
              .models.providers[$pe.key] = $pe.value
            else
              .models.providers[$pe.key] = (
-               {"baseUrl": $pe.value.baseUrl, "apiKey": $pe.value.apiKey, "api": $pe.value.api}
-               | with_entries(select(.value != null and .value != ""))
-             ) * (.models.providers[$pe.key] // {})
+               (.models.providers[$pe.key] // {})
+               * (
+                   {"baseUrl": $pe.value.baseUrl, "apiKey": $pe.value.apiKey, "api": $pe.value.api}
+                   | with_entries(select(.value != null and .value != ""))
+                 )
+             )
            end
          )
        else
