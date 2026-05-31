@@ -9,8 +9,11 @@
 const https = require("https");
 const http = require("http");
 
-// Use stderr for logs to avoid breaking child processes that communicate via stdout JSON
-const log = (...args) => console.error(...args);
+// Use stderr for logs to avoid breaking child processes that communicate via stdout JSON.
+// Default output should stay quiet: debug chatter only appears when
+// CLOUDFLARE_PROXY_DEBUG=true, while real problems are emitted as warnings.
+const debug = (...args) => { if (DEBUG) console.error(...args); };
+const warn = (...args) => console.warn(...args);
 
 let PROXY_URL = process.env.CLOUDFLARE_PROXY_URL;
 if (
@@ -27,7 +30,8 @@ const DEFAULT_PROXY_DOMAINS = [
   // Messaging & social platforms — these are the primary use-case for the
   // Cloudflare proxy on HF Spaces (geo-restrictions on Telegram, Discord, WA).
   "api.telegram.org", "discord.com", "discordapp.com",
-  "gateway.discord.gg", "status.discord.com", "web.whatsapp.com",
+  "gateway.discord.gg", "status.discord.com",
+  "web.whatsapp.com", "whatsapp.com", "whatsapp.net",
   "graph.facebook.com", "graph.instagram.com",
   "api.twitter.com", "api.x.com", "upload.twitter.com",
   "api.linkedin.com", "www.linkedin.com",
@@ -124,7 +128,7 @@ if (PROXY_URL) {
 
         if (shouldProxy && !alreadyProxied && !hasTargetHeader) {
           if (DEBUG) {
-            log(
+            debug(
               `[cloudflare-proxy] Redirecting ${originalModuleName}://${hostname}${path} -> ${proxy.hostname}`,
             );
           }
@@ -192,7 +196,7 @@ if (PROXY_URL) {
         }
 
         if (DEBUG) {
-          log(
+          debug(
             `[cloudflare-proxy] Redirecting fetch://${hostname}${url.pathname}${url.search} -> ${proxy.hostname}`,
           );
         }
@@ -219,12 +223,12 @@ if (PROXY_URL) {
               .then(() => proxyFetchFn())
               .then((r) => {
                 if (DEBUG && !r.ok) {
-                  log(`[cloudflare-proxy] Proxy HTTP ${r.status} for ${hostname}: ${r.statusText}`);
+                  debug(`[cloudflare-proxy] Proxy HTTP ${r.status} for ${hostname}: ${r.statusText}`);
                 }
                 return r;
               })
               .catch((err) => {
-                if (DEBUG && debugInfo) log(`[cloudflare-proxy] Debug (${label}): ${debugInfo}`);
+                if (DEBUG && debugInfo) debug(`[cloudflare-proxy] Debug (${label}): ${debugInfo}`);
                 throw err;
               });
           };
@@ -233,19 +237,19 @@ if (PROXY_URL) {
           // proxy x3 -> direct x1 -> proxy x1
           return runProxyAttempt("proxy-1")
             .catch((e1) => {
-              log(`[cloudflare-proxy] Proxy FAILED ${hostname} [1/3]: ${e1?.message}${formatCause(e1)}`);
+              debug(`[cloudflare-proxy] Proxy FAILED ${hostname} [1/3]: ${e1?.message}${formatCause(e1)}`);
               return runProxyAttempt("proxy-2");
             })
             .catch((e2) => {
-              log(`[cloudflare-proxy] Proxy FAILED ${hostname} [2/3]: ${e2?.message}${formatCause(e2)}`);
+              debug(`[cloudflare-proxy] Proxy FAILED ${hostname} [2/3]: ${e2?.message}${formatCause(e2)}`);
               return runProxyAttempt("proxy-3");
             })
             .catch((e3) => {
-              log(`[cloudflare-proxy] Proxy FAILED ${hostname} [3/3]: ${e3?.message}${formatCause(e3)} — trying direct`);
+              warn(`[cloudflare-proxy] Proxy failed for ${hostname} after 3 attempts: ${e3?.message}${formatCause(e3)} — trying direct`);
               return Promise.resolve()
                 .then(() => directFallbackFn())
                 .catch((directErr) => {
-                  log(`[cloudflare-proxy] Direct fallback FAILED ${hostname}: ${directErr?.message}${formatCause(directErr)} — trying proxy final`);
+                  warn(`[cloudflare-proxy] Direct fallback failed for ${hostname}: ${directErr?.message}${formatCause(directErr)} — trying proxy final`);
                   return runProxyAttempt("proxy-final");
                 });
             });
@@ -327,7 +331,7 @@ if (PROXY_URL) {
             }
 
             if (hostname && shouldProxyHost(hostname)) {
-              if (DEBUG) log(`[cloudflare-proxy] Redirecting undici ${name}.dispatch: ${hostname}${options.path || ""} -> ${proxy.hostname}`);
+              if (DEBUG) debug(`[cloudflare-proxy] Redirecting undici ${name}.dispatch: ${hostname}${options.path || ""} -> ${proxy.hostname}`);
               
               const targetHeader = "x-target-host";
               const secretHeader = "x-proxy-key";
@@ -411,7 +415,7 @@ if (PROXY_URL) {
           }
 
           if (DEBUG) {
-            log(
+            debug(
               `[cloudflare-proxy] Redirecting undici.fetch://${hostname}${url.pathname}${url.search} -> ${proxy.hostname}`,
             );
           }
@@ -497,7 +501,7 @@ if (PROXY_URL) {
         require("fs").writeFileSync("/tmp/.cf-proxy-banner-shown", "1", {
           flag: "wx",
         });
-        log(
+        debug(
           `[cloudflare-proxy] active (${PROXY_ALL ? "wildcard" : "list"}) -> ${proxy.hostname}`,
         );
       } catch (_) {
@@ -505,6 +509,6 @@ if (PROXY_URL) {
       }
     }
   } catch (error) {
-    log(`[cloudflare-proxy] Failed to initialize: ${error.message}`);
+    warn(`[cloudflare-proxy] Failed to initialize: ${error.message}`);
   }
 }
