@@ -101,7 +101,7 @@ const formatHours = (ms) => (ms / (60 * 60 * 1000)).toFixed(ms % (60 * 60 * 1000
  * e.g. "AIzaSyBaklu...abc123" so logs are readable but keys stay private.
  * Short keys (≤12 chars) are fully masked as "***".
  */
-const keyMask = (k) => (k && k.length > 12 ? `${k.slice(0, 4)}...${keyMask(k)}` : '***');
+const keyMask = (k) => (k && k.length > 12 ? `${k.slice(0, 4)}...${k.slice(-6)}` : '***');
 
 // ─── Provider definitions ────────────────────────────────────────────────────
 
@@ -316,17 +316,21 @@ function recordFailure(p, key, model, retryAfterMs) {
     mks.lastFailureAt = Date.now();
 
     let cooldown;
-    if (mks.strikes >= MAX_STRIKES) {
+    const isPerm = mks.strikes >= MAX_STRIKES;
+    if (isPerm) {
       cooldown = PERM_SUSPEND_MS;
-      warn(`[key-rotator] ${p.name}: ${keyMask(key)} model=${model} hit ${MAX_STRIKES} strikes — suspended for ${formatHours(PERM_SUSPEND_MS)}h (quota likely exhausted for this model)`);
     } else {
       cooldown = BASE_COOLDOWN_MS * Math.pow(4, mks.strikes - 1);
       const jitter = 1 + ((Math.random() * 2 - 1) * (COOLDOWN_JITTER_PCT / 100));
       cooldown = Math.max(1_000, Math.round(cooldown * jitter));
       if (serverHintMs > cooldown) cooldown = serverHintMs;
-      debug(`[key-rotator] ${p.name}: ${keyMask(key)} model=${model} strike ${mks.strikes}/${MAX_STRIKES} — backoff ${Math.round(cooldown / 1000)}s${serverHintMs > 0 ? ` (server-hint ${Math.round(serverHintMs/1000)}s)` : ''}`);
     }
+    // ★ Set blacklistedUntil FIRST so it is always written even if the log below throws.
     mks.blacklistedUntil = Math.max(mks.blacklistedUntil || 0, Date.now() + cooldown);
+    if (isPerm)
+      warn(`[key-rotator] ${p.name}: ${keyMask(key)} model=${model} hit ${MAX_STRIKES} strikes — suspended for ${formatHours(PERM_SUSPEND_MS)}h (quota likely exhausted for this model)`);
+    else
+      debug(`[key-rotator] ${p.name}: ${keyMask(key)} model=${model} strike ${mks.strikes}/${MAX_STRIKES} — backoff ${Math.round(cooldown / 1000)}s${serverHintMs > 0 ? ` (server-hint ${Math.round(serverHintMs/1000)}s)` : ''}`);
     return;
   }
 
@@ -338,20 +342,22 @@ function recordFailure(p, key, model, retryAfterMs) {
   ks.lastFailureAt = Date.now();
 
   let cooldown;
-  if (ks.strikes >= MAX_STRIKES) {
+  const isPerm = ks.strikes >= MAX_STRIKES;
+  if (isPerm) {
     cooldown = PERM_SUSPEND_MS;
-    warn(`[key-rotator] ${p.name}: ${keyMask(key)} reached ${MAX_STRIKES} strikes — suspended for ${formatHours(PERM_SUSPEND_MS)} h (quota likely exhausted)`);
   } else {
     // Exponential: 1× → 4× (strikes 1 and 2)
     cooldown = BASE_COOLDOWN_MS * Math.pow(4, ks.strikes - 1);
     const jitter = 1 + ((Math.random() * 2 - 1) * (COOLDOWN_JITTER_PCT / 100));
     cooldown = Math.max(1000, Math.round(cooldown * jitter));
     if (serverHintMs > cooldown) cooldown = serverHintMs;
-    debug(`[key-rotator] ${p.name}: ${keyMask(key)} strike ${ks.strikes}/${MAX_STRIKES} — backoff ${Math.round(cooldown / 1000)}s${serverHintMs > 0 ? ` (server-hint ${Math.round(serverHintMs/1000)}s)` : ''}`);
   }
-
-  // Use Math.max so a longer existing suspension is never shortened.
+  // ★ Set blacklistedUntil FIRST so it is always written even if the log below throws.
   ks.blacklistedUntil = Math.max(ks.blacklistedUntil || 0, Date.now() + cooldown);
+  if (isPerm)
+    warn(`[key-rotator] ${p.name}: ${keyMask(key)} reached ${MAX_STRIKES} strikes — suspended for ${formatHours(PERM_SUSPEND_MS)} h (quota likely exhausted)`);
+  else
+    debug(`[key-rotator] ${p.name}: ${keyMask(key)} strike ${ks.strikes}/${MAX_STRIKES} — backoff ${Math.round(cooldown / 1000)}s${serverHintMs > 0 ? ` (server-hint ${Math.round(serverHintMs/1000)}s)` : ''}`);
 }
 
 /**
@@ -378,12 +384,13 @@ function recordSuccess(p, key, model) {
   // Reset global strikes and increment usage counter
   const ks = p.keyState.get(key);
   if (ks) {
+    // ★ Increment timesUsed BEFORE the debug so it's always written even if log throws.
+    ks.timesUsed = (ks.timesUsed || 0) + 1;
     if (ks.strikes > 0) {
       ks.strikes = 0;
       ks.lastFailureAt = 0;
       debug(`[key-rotator] ${p.name}: ${keyMask(key)} recovered (global) — strikes reset`);
     }
-    ks.timesUsed = (ks.timesUsed || 0) + 1;
   }
 
   // Also clear model-specific state on success
@@ -877,7 +884,7 @@ function patchFetch() {
     if (!provider) return await orig(input, init);
 
     // Extract model for per-model-limit providers (gemini etc.)
-    const model = provider.perModelLimits ? extractModelFromUrl(urlLike) : null;
+    let model = provider.perModelLimits ? extractModelFromUrl(urlLike) : null;
 
     // ── Gemini: normalise thought parts / thought_signature before sending ───
     if (provider.name === 'gemini') {
@@ -891,6 +898,28 @@ function patchFetch() {
           }
         }
       } catch (_) { /* never break the request on sanitiser error */ }
+    }
+
+    // ★ FIX: OpenAI-compatible Gemini endpoint (/v1beta/openai/chat/completions)
+    // does NOT include the model name in the URL path — it's in the JSON body as
+    // {"model": "gemini-2.5-pro", ...}.  extractModelFromUrl() returns null for
+    // these URLs, causing per-model cooldowns to silently fall through to the
+    // GLOBAL key blacklist (wrong — a 429 on gemini-2.5-pro blocks all models).
+    //
+    // Read the model from the (already-sanitised) body when URL extraction fails,
+    // so per-model cooldown scoping works correctly for the openai-completions path.
+    if (provider.perModelLimits && model === null) {
+      try {
+        const rawBody = init?.body ?? (typeof input === 'object' && !(input instanceof URL) ? input?.body : null);
+        if (typeof rawBody === 'string') {
+          const bodyModel = JSON.parse(rawBody)?.model;
+          if (bodyModel && typeof bodyModel === 'string' && bodyModel.length > 0) {
+            // Strip provider prefix when present (e.g. "google/gemini-2.5-pro" → "gemini-2.5-pro").
+            model = (bodyModel.includes('/') ? bodyModel.split('/').slice(1).join('/') : bodyModel).toLowerCase();
+            debug(`[key-rotator] ${provider.name}: model extracted from request body: ${model}`);
+          }
+        }
+      } catch (_) { /* malformed or non-JSON body — leave model as null */ }
     }
 
     try {
@@ -1141,4 +1170,4 @@ patchHttpModule(http);
 patchHttpModule(https);
 startDiagnostics();
 
-log(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:${formatHours(PERM_SUSPEND_MS)}h (cap 16h) max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} max-retry-after:${MAX_RETRY_AFTER_MS/1000}s max-key-wait:${MAX_KEY_WAIT_MS/1000}s diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'} log-level:${LOG_LEVEL} verbose-picks:${VERBOSE_PICKS ? 'on' : 'off'} suspended-last-resort:${USE_SUSPENDED_KEY_AS_LAST_RESORT ? 'on' : 'off'} per-model-providers:${providerState.filter(p => p.perModelLimits).map(p => p.name).join(',') || 'none'}`);
+log(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:${formatHours(PERM_SUSPEND_MS)}h (cap 16h) max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} max-retry-after:${MAX_RETRY_AFTER_MS/1000}s max-key-wait:${MAX_KEY_WAIT_MS/1000}s diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'} log-level:${LOG_LEVEL} verbose-picks:${VERBOSE_PICKS ? 'on' : 'off'} suspended-last-resort:${USE_SUSPENDED_KEY_AS_LAST_RESORT ? 'on' : 'off'} per-model-providers:${providerState.filter(p => p.perModelLimits).map(p => p.name).join(',') || 'none'} model-from-body:on`);
