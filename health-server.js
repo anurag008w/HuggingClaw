@@ -590,6 +590,11 @@ function splitKeyPool(value) {
   return String(value || "").split(/[\n\r,]+/).map((s) => s.trim()).filter(Boolean);
 }
 
+function maskApiKey(value) {
+  const key = String(value || "");
+  return key.length > 12 ? `${key.slice(0, 4)}...${key.slice(-6)}` : "***";
+}
+
 function providerKeySummary() {
   const providers = [
     { name: "gemini", env: ["GEMINI_API_KEYS", "GEMINI_API_KEY"], aliases: ["GOOGLE_API_KEYS", "GOOGLE_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEYS", "GOOGLE_GENERATIVE_AI_API_KEY", "GOOGLE_AI_API_KEYS", "GOOGLE_AI_API_KEY"] },
@@ -629,7 +634,13 @@ function providerKeySummary() {
       if (vals.length) used.push(name);
       for (const val of vals) if (!seen.has(val)) { seen.add(val); keys.push(val); }
     }
-    return { name: p.name, total: keys.length, env: used.slice(0, 2).join(", "), aliases: used.length > 2 ? `${used.length - 2} more envs` : "" };
+    return {
+      name: p.name,
+      total: keys.length,
+      env: used.slice(0, 2).join(", "),
+      aliases: used.length > 2 ? `${used.length - 2} more envs` : "",
+      keys: keys.map((key, idx) => ({ slot: idx + 1, total: keys.length, key: maskApiKey(key) })),
+    };
   }).filter((p) => p.total > 0);
 }
 function keyRotatorEventLogStatus() {
