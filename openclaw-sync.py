@@ -178,11 +178,23 @@ def snapshot_state_into_workspace() -> bool:
         # If staging was seeded from a previous backup, remove entries that no
         # longer exist in OPENCLAW_HOME so the backup remains a true mirror of
         # current state (except entries intentionally excluded from sync).
+        # BUG FIX: entries that *failed* to copy but still exist in OPENCLAW_HOME
+        # keep their previous backup version in staging.  Removing them here
+        # (old behaviour) caused a transient copy error to look like a deletion,
+        # making prune_remote_deleted_files incorrectly delete them from the HF
+        # dataset on the next sync.  Only remove an entry from staging when the
+        # source has genuinely been deleted from OPENCLAW_HOME.
         for staged_path in list(staging_dir.iterdir()):
             if staged_path.name in EXCLUDED_STATE_NAMES:
                 continue
             if staged_path.name in copied_entry_names:
                 continue
+            # Source still exists → copy failed transiently; keep the previous
+            # backup version so the remote is not pruned on a transient error.
+            if (OPENCLAW_HOME / staged_path.name).exists():
+                continue
+            # Source no longer exists → entry was genuinely deleted; remove it
+            # from staging so the remote is pruned on the next sync.
             if staged_path.exists():
                 if staged_path.is_dir():
                     shutil.rmtree(staged_path, ignore_errors=True)
@@ -371,7 +383,12 @@ def metadata_marker(root: Path) -> WorkspaceMarker:
         if not path.is_file():
             continue
         rel = path.relative_to(root).as_posix()
-        if _should_exclude(rel, path):
+        # BUG FIX: use directory-only exclusion here (not size-based) so that
+        # deleting a large file changes the marker and triggers a sync/prune
+        # pass.  Large files are still excluded from the upload snapshot via
+        # _should_exclude; this only controls change-detection.
+        parts = Path(rel).parts
+        if any(part in EXCLUDED_SYNC_DIRS for part in parts):
             continue
         try:
             stat = path.stat()
@@ -398,10 +415,26 @@ def fingerprint_dir(root: Path) -> str:
 
     for path in sorted(p for p in root.rglob("*") if p.is_file()):
         rel = path.relative_to(root).as_posix()
-        if _should_exclude(rel, path):
+        # BUG FIX: use directory-only exclusion (not size-based) so that
+        # creating or deleting a large file changes the fingerprint.
+        # Large files are hashed by path + metadata only (no content read)
+        # to avoid reading gigabytes for a change-detection hash.
+        parts = Path(rel).parts
+        if any(part in EXCLUDED_SYNC_DIRS for part in parts):
             continue
         hasher.update(rel.encode("utf-8"))
         try:
+            stat = path.stat()
+            size = int(stat.st_size)
+            if size > MAX_FILE_SIZE_BYTES:
+                # Too large to upload; fingerprint via metadata only so
+                # deletions and creations are detected without I/O cost.
+                hasher.update(b"[large-file]\0")
+                hasher.update(str(size).encode("ascii"))
+                hasher.update(b"\0")
+                hasher.update(str(int(stat.st_mtime_ns)).encode("ascii"))
+                hasher.update(b"\0")
+                continue
             with path.open("rb") as handle:
                 for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                     hasher.update(chunk)
@@ -623,14 +656,17 @@ def _sync_once_unlocked(
             )
         skip_prune_prefixes: set[str] = set()
         if had_snapshot_copy_failures:
-            # Keep pruning normal workspace deletions, but avoid pruning embedded
-            # OpenClaw state paths when that state snapshot had copy failures.
-            # This prevents accidental state deletions while still removing stale
-            # regular files from the backup dataset.
-            skip_prune_prefixes.add("huggingclaw-state/openclaw")
+            # BUG FIX: the old code added "huggingclaw-state/openclaw" to
+            # skip_prune_prefixes here, which prevented ANY openclaw state file
+            # from being pruned whenever any copy failure occurred — including
+            # files the user had legitimately deleted.
+            # That protection is no longer needed: snapshot_state_into_workspace
+            # now keeps the previous backup version for entries that fail to copy
+            # (transient error), so the snapshot already contains those files and
+            # prune_remote_deleted_files will not consider them stale.
             print(
-                "Warning: state snapshot had copy failures; pruning stale files "
-                "except huggingclaw-state/openclaw."
+                "Warning: state snapshot had copy failures; previous backup "
+                "versions preserved for affected entries."
             )
         had_prune_failure = False
         try:
