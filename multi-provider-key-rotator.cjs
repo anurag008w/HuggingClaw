@@ -678,6 +678,18 @@ function buildAttemptFetchArgs(input, init, provider, usedKey) {
       const url = new URL(rawUrl);
       url.searchParams.set('key', usedKey);
 
+      // BUG FIX: Google's OpenAI-compatible endpoint (/v1beta/openai/...) reads the
+      // rotated key from the Authorization: Bearer header, NOT from ?key=.
+      // If the caller already has an Authorization header (OpenClaw's openai-transport
+      // sets Bearer <GEMINI_API_KEY> for every request), replace it with the rotated
+      // key so the pool actually gets used instead of the single env-var key.
+      const existingAuth = baseHeaders.get
+        ? baseHeaders.get('authorization')
+        : (baseHeaders['authorization'] || baseHeaders['Authorization'] || '');
+      if (existingAuth && String(existingAuth).toLowerCase().startsWith('bearer ')) {
+        setAuthHeader(baseHeaders, usedKey);
+      }
+
       // With Request input and no explicit init overrides, keep request semantics by cloning shape.
       if (inputIsRequest && (!init || Object.keys(initObj).length === 0)) {
         const reqInit = {
@@ -938,8 +950,15 @@ function patchHttpModule(mod) {
                 : `https://${options.hostname}${options.path || '/'}`
             ));
             u.searchParams.set('key', key);
+            // BUG FIX: Also replace Authorization: Bearer header if present
+            // (Google OpenAI-compatible endpoint uses Bearer, not ?key=).
+            const existingHeaders = (typeof options === 'object' && options.headers) ? options.headers : {};
+            const authVal = existingHeaders['authorization'] || existingHeaders['Authorization'] || '';
+            const patchedHeaders = String(authVal).toLowerCase().startsWith('bearer ')
+              ? setAuthHeader(typeof existingHeaders === 'object' ? { ...existingHeaders } : existingHeaders, key)
+              : existingHeaders;
             args[0] = typeof options === 'object' && !(options instanceof URL)
-              ? { ...options, path:`${u.pathname}${u.search}` }
+              ? { ...options, path:`${u.pathname}${u.search}`, headers: patchedHeaders }
               : u.toString();
           } else if (typeof options === 'string' || options instanceof URL) {
             const u = new URL(String(options));
