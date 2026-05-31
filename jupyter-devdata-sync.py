@@ -15,6 +15,9 @@ INTERVAL = int((os.environ.get("DEVDATA_SYNC_INTERVAL", "").strip() or "180"))
 MAX_FILE_SIZE_BYTES = int(
     (os.environ.get("DEVDATA_MAX_FILE_BYTES", "").strip() or str(50 * 1024 * 1024))
 )
+# Max stale files to delete per commit.  Mirrors openclaw-sync.py behaviour.
+# Override via DEVDATA_PRUNE_BATCH_SIZE.
+PRUNE_BATCH_SIZE = int((os.environ.get("DEVDATA_PRUNE_BATCH_SIZE", "").strip() or "50"))
 
 def is_true(value):
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
@@ -235,10 +238,15 @@ def prune_remote_deleted_files(
     snapshot_dir: Path,
     skip_prefixes: set[str] | None = None,
 ) -> None:
-    """BUG FIX #6: Delete from the HF dataset any files the user deleted
-    locally.  Without this, deleted files re-appear on the next Space restart
-    because restore_once() copies everything in the dataset back to disk.
-    Mirrors the prune_remote_deleted_files() logic in openclaw-sync.py.
+    """Delete from the HF dataset any files the user deleted locally.
+
+    Without this, deleted files re-appear on the next Space restart because
+    restore_once() copies everything in the dataset back to disk.
+
+    Uses create_commit directly with CommitOperationDelete to avoid the extra
+    list_repo_files call inside the SDK's delete_files wrapper, and batches
+    deletions into PRUNE_BATCH_SIZE chunks to avoid hitting the HF API payload
+    limit when many files are pruned at once.
     """
     try:
         skip_prefixes = skip_prefixes or set()
@@ -254,14 +262,24 @@ def prune_remote_deleted_files(
             and f != ".gitattributes"
             and not any(f == prefix or f.startswith(prefix + "/") for prefix in skip_prefixes)
         ]
-        if stale:
-            api.delete_files(
-                delete_patterns=stale,
+        if not stale:
+            return
+
+        total = len(stale)
+        num_batches = (total + PRUNE_BATCH_SIZE - 1) // PRUNE_BATCH_SIZE
+        ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        for batch_idx in range(num_batches):
+            batch = stale[batch_idx * PRUNE_BATCH_SIZE:(batch_idx + 1) * PRUNE_BATCH_SIZE]
+            batch_label = f" (batch {batch_idx + 1}/{num_batches})" if num_batches > 1 else ""
+            operations = [CommitOperationDelete(path_in_repo=p) for p in batch]
+            api.create_commit(
                 repo_id=rid,
                 repo_type="dataset",
-                commit_message=f"DevData prune {len(stale)} deleted file(s) {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
+                operations=operations,
+                commit_message=f"DevData prune {len(batch)} deleted file(s) {ts}{batch_label}",
             )
-            print(f"DevData pruned {len(stale)} deleted file(s) from {rid}")
+        print(f"DevData pruned {total} deleted file(s) from {rid}"
+              + (f" in {num_batches} batches" if num_batches > 1 else ""))
     except Exception as exc:
         kind = classify_error(exc)
         print(f"DevData prune warning [{kind}]: {exc}")
@@ -301,7 +319,7 @@ if __name__ == "__main__":
         print("DevData sync disabled.")
         raise SystemExit(0)
 
-    from huggingface_hub import HfApi, upload_folder, snapshot_download
+    from huggingface_hub import CommitOperationDelete, HfApi, upload_folder, snapshot_download
     from huggingface_hub.errors import RepositoryNotFoundError
 
     api = HfApi(token=HF_TOKEN)
