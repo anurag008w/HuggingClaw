@@ -601,7 +601,7 @@ function providerKeySummary() {
     { name: "kilocode", env: ["KILOCODE_API_KEYS", "KILOCODE_API_KEY"] },
     { name: "opencode", env: ["OPENCODE_API_KEYS", "OPENCODE_API_KEY"] },
     { name: "zai", env: ["ZAI_API_KEYS", "ZAI_API_KEY"] },
-    { name: "moonshot/kimi", env: ["MOONSHOT_API_KEYS", "MOONSHOT_API_KEY", "KIMI_API_KEYS", "KIMI_API_KEY"] },
+    { name: "kimi-moonshot", env: ["KIMI_API_KEYS", "KIMI_API_KEY", "MOONSHOT_API_KEYS", "MOONSHOT_API_KEY"] },
     { name: "minimax", env: ["MINIMAX_API_KEYS", "MINIMAX_API_KEY"] },
     { name: "modelstudio/qwen", env: ["MODELSTUDIO_API_KEYS", "MODELSTUDIO_API_KEY"] },
     { name: "xiaomi", env: ["XIAOMI_API_KEYS", "XIAOMI_API_KEY"] },
@@ -610,6 +610,7 @@ function providerKeySummary() {
     { name: "qianfan", env: ["QIANFAN_API_KEYS", "QIANFAN_API_KEY"] },
     { name: "venice", env: ["VENICE_API_KEYS", "VENICE_API_KEY"] },
     { name: "github-copilot", env: ["COPILOT_GITHUB_TOKENS", "COPILOT_GITHUB_TOKEN"] },
+    { name: "synthetic", env: ["SYNTHETIC_API_KEYS", "SYNTHETIC_API_KEY"] },
   ];
   return providers.map((p) => {
     const names = [...p.env, ...(p.aliases || [])];
@@ -624,21 +625,34 @@ function providerKeySummary() {
     return { name: p.name, total: keys.length, env: used.slice(0, 2).join(", "), aliases: used.length > 2 ? `${used.length - 2} more envs` : "" };
   }).filter((p) => p.total > 0);
 }
+function keyRotatorEventLogStatus() {
+  try {
+    const stat = fs.statSync(KEY_ROTATOR_EVENT_LOG_FILE);
+    return { exists: true, size: stat.size, updatedAt: stat.mtime.toISOString() };
+  } catch {
+    return { exists: false, size: 0, updatedAt: null };
+  }
+}
+
 function readKeyRotatorEvents(limit = 500) {
+  let fd = null;
   try {
     if (!fs.existsSync(KEY_ROTATOR_EVENT_LOG_FILE)) return [];
     const maxBytes = 1024 * 1024;
     const stat = fs.statSync(KEY_ROTATOR_EVENT_LOG_FILE);
-    const fd = fs.openSync(KEY_ROTATOR_EVENT_LOG_FILE, "r");
+    fd = fs.openSync(KEY_ROTATOR_EVENT_LOG_FILE, "r");
     const size = Math.min(stat.size, maxBytes);
     const buf = Buffer.alloc(size);
     fs.readSync(fd, buf, 0, size, Math.max(0, stat.size - size));
-    fs.closeSync(fd);
     return buf.toString("utf8").split("\n").filter(Boolean).slice(-limit).map((line) => {
       try { return JSON.parse(line); } catch { return null; }
     }).filter(Boolean);
   } catch {
     return [];
+  } finally {
+    if (fd !== null) {
+      try { fs.closeSync(fd); } catch {}
+    }
   }
 }
 
@@ -885,6 +899,7 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
     return res.end(JSON.stringify({
       file: KEY_ROTATOR_EVENT_LOG_FILE,
+      log: keyRotatorEventLogStatus(),
       providers: providerKeySummary(),
       events: readKeyRotatorEvents(limit),
     }));

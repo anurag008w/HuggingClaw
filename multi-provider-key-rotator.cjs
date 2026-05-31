@@ -20,6 +20,7 @@
 const http  = require('node:http');
 const https = require('node:https');
 const fs    = require('node:fs');
+const path  = require('node:path');
 
 const VERBOSE_PICKS = /^(1|true|yes|on)$/i.test(String(process.env.KEY_ROTATOR_VERBOSE_PICKS || '').trim());
 const RAW_LOG_LEVEL = String(process.env.KEY_ROTATOR_LOG_LEVEL || '').trim().toLowerCase();
@@ -187,6 +188,8 @@ function emitEvent(type, p, key, extra = {}) {
       ...(idx >= 0 ? { slot: idx + 1, total: p.keys.length, key: keyMask(key) } : {}),
       ...extra,
     };
+    const dir = path.dirname(EVENT_LOG_FILE);
+    if (dir && dir !== '.') fs.mkdirSync(dir, { recursive: true });
     fs.appendFileSync(EVENT_LOG_FILE, JSON.stringify(payload) + '\n', { encoding: 'utf8' });
     const stat = fs.statSync(EVENT_LOG_FILE);
     if (stat.size > EVENT_LOG_MAX_BYTES) {

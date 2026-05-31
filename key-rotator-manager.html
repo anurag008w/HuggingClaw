@@ -28,7 +28,7 @@
   </section>
   <section class="layout">
     <aside class="card"><div class="panel-title"><h2>Provider pools</h2><span id="providerCount" class="pill">0</span></div><div id="providers" class="providers"></div><p class="foot">Tip: use <span class="kbd">GEMINI_API_KEYS</span> or <span class="kbd">GOOGLE_API_KEYS</span> with comma/newline-separated keys. Verbose pick logs show slots like <span class="kbd">#3/8</span>.</p></aside>
-    <section class="card"><div class="panel-title"><h2>Rotation event log</h2><span id="source" class="pill">/tmp</span></div><div class="toolbar"><input id="q" class="input" placeholder="Filter provider, key, model, event…"><select id="type" class="select"><option value="">All events</option><option value="pick">Picks</option><option value="success">Success</option><option value="rate_limited">Rate limits</option><option value="network_retryable">Network retries</option><option value="auth_failed">Auth failures</option></select></div><div id="events" class="events"><div class="empty">Loading rotator events…</div></div></section>
+    <section class="card"><div class="panel-title"><h2>Rotation event log</h2><span id="source" class="pill">/tmp</span></div><div class="toolbar"><input id="q" class="input" placeholder="Filter provider, key, model, event…"><select id="type" class="select"><option value="">All events</option><option value="pick">Picks</option><option value="success">Success</option><option value="rate_limited">Rate limits</option><option value="network_retryable">Network retries</option><option value="pick_retry_fresh">Retry picks</option><option value="auth_failed">Auth failures</option></select></div><div id="events" class="events"><div class="empty">Loading rotator events…</div></div></section>
   </section>
 </main>
 <script>
@@ -57,7 +57,7 @@ function render(){
   if(q) filtered=filtered.filter(e=>JSON.stringify(e).toLowerCase().includes(q));
   $('events').innerHTML=filtered.length?filtered.map(e=>`<article class="event ${eventClass(e.type)}"><div class="time">${esc(fmtTime(e.ts))}</div><div><div class="etype">${esc(e.type||'event')}</div><div class="msg">${esc(eventText(e)||'system event')}</div></div><div class="key">${esc(e.key||'')}</div></article>`).join(''):'<div class="empty">No matching events yet. Send a message or enable an LLM request to generate picks.</div>';
 }
-async function load(){if(state.paused)return;try{const r=await fetch('/api/key-rotator/logs?limit=500',{cache:'no-store'});const d=await r.json();state.events=d.events||[];state.providers=d.providers||[];$('source').textContent=d.file||'event log';render();}catch(e){$('events').innerHTML='<div class="empty bad">Could not load rotator logs: '+esc(e.message)+'</div>';}}
+async function load(){if(state.paused)return;try{const r=await fetch('/api/key-rotator/logs?limit=500',{cache:'no-store'});const d=await r.json();state.events=d.events||[];state.providers=d.providers||[];const log=d.log||{};$('source').textContent=log.exists?`${d.file||'event log'} · ${Math.round((log.size||0)/1024)} KiB`:`${d.file||'event log'} · waiting`;render();}catch(e){$('events').innerHTML='<div class="empty bad">Could not load rotator logs: '+esc(e.message)+'</div>';}}
 $('q').addEventListener('input',render);$('type').addEventListener('change',render);$('refresh').onclick=load;$('pause').onclick=()=>{state.paused=!state.paused;$('pause').textContent=state.paused?'Resume':'Pause';$('liveDot').classList.toggle('live',!state.paused);$('liveText').textContent=state.paused?'Paused':'Live';};
 load();setInterval(load,2500);
 </script>
