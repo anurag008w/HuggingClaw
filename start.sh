@@ -90,11 +90,9 @@ OPENCLAW_RUNTIME_VERSION=""
 OPENCLAW_FILE_LOG_LEVEL_CONFIGURED=false
 OPENCLAW_CONSOLE_LOG_LEVEL_CONFIGURED=false
 OPENCLAW_CONSOLE_LOG_STYLE_CONFIGURED=false
-WHATSAPP_ENABLED_CONFIGURED=false
 [ "${OPENCLAW_FILE_LOG_LEVEL+x}" = "x" ] && OPENCLAW_FILE_LOG_LEVEL_CONFIGURED=true
 [ "${OPENCLAW_CONSOLE_LOG_LEVEL+x}" = "x" ] && OPENCLAW_CONSOLE_LOG_LEVEL_CONFIGURED=true
 [ "${OPENCLAW_CONSOLE_LOG_STYLE+x}" = "x" ] && OPENCLAW_CONSOLE_LOG_STYLE_CONFIGURED=true
-[ "${WHATSAPP_ENABLED+x}" = "x" ] && WHATSAPP_ENABLED_CONFIGURED=true
 WHATSAPP_ENABLED="${WHATSAPP_ENABLED:-false}"
 WHATSAPP_ENABLED_NORMALIZED=$(printf '%s' "$WHATSAPP_ENABLED" | tr '[:upper:]' '[:lower:]')
 DEV_MODE_RAW="${DEV_MODE:-false}"
@@ -198,9 +196,9 @@ if [ "$BROWSER_PLUGIN_MODE" = "remote" ]; then
   esac
 fi
 echo ""
-echo "  ╔══════════════════════════════════════════╗"
-echo "  ║     🦞 HuggingClaw + 💻 JupyterLab      ║"
-echo "  ╚══════════════════════════════════════════╝"
+echo "  ╔══════════════════════════════════════╗"
+echo "  ║     🦞 HuggingClaw + 💻 JupyterLab    ║"
+echo "  ╚══════════════════════════════════════╝"
 echo ""
 
 # ── Validate required secrets ──
@@ -1154,7 +1152,6 @@ if [ -f "$EXISTING_CONFIG" ]; then
     --argjson fileLogConfigured "$OPENCLAW_FILE_LOG_LEVEL_CONFIGURED" \
     --argjson consoleLogConfigured "$OPENCLAW_CONSOLE_LOG_LEVEL_CONFIGURED" \
     --argjson consoleStyleConfigured "$OPENCLAW_CONSOLE_LOG_STYLE_CONFIGURED" \
-    --argjson whatsappConfigured "$WHATSAPP_ENABLED_CONFIGURED" \
     --argjson whatsappEnabled "$WHATSAPP_CONFIG_ENABLED" \
     --argjson telegramConfigured "$TELEGRAM_CONFIG_ENABLED" \
     --argjson browserEnabled "$BROWSER_SHOULD_ENABLE" \
@@ -1249,11 +1246,6 @@ if [ -f "$EXISTING_CONFIG" ]; then
          | .channels.whatsapp = (($existingWhatsapp * $desiredWhatsapp)
              | if ($existingWhatsapp | has("dmPolicy")) then .dmPolicy = $existingWhatsapp.dmPolicy else . end
              | if ($existingWhatsapp | has("allowFrom")) then .allowFrom = $existingWhatsapp.allowFrom else . end)
-       elif $whatsappConfigured then
-         .plugins.entries.whatsapp.enabled = false
-         # Preserve channels.whatsapp user settings, but remove loader allow
-         # aliases so a disabled/missing runtime cannot make config invalid.
-         | .plugins.allow = ((.plugins.allow // []) | map(select(. != "whatsapp" and . != "@openclaw/whatsapp" and . != "clawhub:@openclaw/whatsapp")))
        else
          .
        end
@@ -2207,6 +2199,18 @@ install_whatsapp_plugin_runtime() {
 
   echo "WhatsApp is enabled but OpenClaw reports the external @openclaw/whatsapp runtime is missing/broken; checking the official install path before gateway start..."
 
+  # Remove stale/broken extension directories so openclaw gets a clean slate.
+  # This is the primary fix for "WhatsApp enabled but won't install on restart":
+  # the backed-up extensions dir (now excluded from sync) or any leftover dir
+  # from a previous partial install can cause openclaw plugins install to skip
+  # or fail silently.  A clean delete ensures the install always runs fresh.
+  local _wa_ext_dir="/home/node/.openclaw/extensions/whatsapp"
+  local _wa_ext_dir_scoped="/home/node/.openclaw/extensions/@openclaw/whatsapp"
+  if [ -d "$_wa_ext_dir" ] || [ -d "$_wa_ext_dir_scoped" ]; then
+    echo "Removing stale WhatsApp extension directories before reinstall..."
+    rm -rf "$_wa_ext_dir" "$_wa_ext_dir_scoped" 2>/dev/null || true
+  fi
+
   local config="/home/node/.openclaw/openclaw.json"
   local install_config=""
   if [ -f "$config" ]; then
@@ -2216,10 +2220,21 @@ install_whatsapp_plugin_runtime() {
       # Use a temporary installer-only config so the user's real WhatsApp
       # channel settings (dmPolicy/allowFrom/group rules/session choices) are
       # never deleted just to bootstrap the missing plugin runtime.
+      #
+      # Also wipe plugins.installs entries for whatsapp so openclaw does NOT
+      # see an existing install record and skip the download.  This is the fix
+      # for "install command runs but nothing is actually downloaded": openclaw
+      # treats a non-empty installs entry as "already installed" and returns
+      # early even when the dist files are missing.
       jq '
         .plugins.entries.whatsapp.enabled = false
         | del(.channels.whatsapp)
         | .plugins.allow = ((.plugins.allow // []) | map(select(. != "whatsapp" and . != "@openclaw/whatsapp" and . != "clawhub:@openclaw/whatsapp")))
+        | if .plugins.installs then
+            .plugins.installs = (.plugins.installs | with_entries(select(
+              (.key | test("whatsapp|@openclaw/whatsapp"; "i")) | not
+            )))
+          else . end
       ' "$install_config" > "$install_config.tmp" 2>/dev/null && mv "$install_config.tmp" "$install_config" || rm -f "$install_config.tmp"
     fi
   fi
