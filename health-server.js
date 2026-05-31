@@ -385,7 +385,7 @@ function tile({ title, value, detail = "", tone = "neutral", meta = "" }) {
 
 function renderDashboard(data) {
   const syncStatus = String(data.sync?.status || "unknown");
-  const syncTone = ["success","restored","synced","configured"].includes(syncStatus) ? "ok" : syncStatus === "disabled" ? "warn" : "neutral";
+  const syncTone = ["success","restored","synced","configured"].includes(syncStatus) ? "ok" : syncStatus === "disabled" ? "warn" : syncStatus === "error" ? "off" : "neutral";
   const kaConf = data.keepalive?.configured === true;
   const kaStatus = String(data.keepalive?.status || (process.env.CLOUDFLARE_WORKERS_TOKEN ? "pending" : "not configured"));
   const kaTone = kaConf ? "ok" : process.env.CLOUDFLARE_WORKERS_TOKEN ? "warn" : "neutral";
