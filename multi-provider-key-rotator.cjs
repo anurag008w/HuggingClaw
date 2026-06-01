@@ -606,39 +606,57 @@ function shouldRetryMethod(method, hasReplayableBody) {
   return hasReplayableBody;
 }
 
-function beginInFlight(p, key) {
-  if (!p || !key) return;
-  p.inFlight.set(key, (p.inFlight.get(key) || 0) + 1);
-  const timer = setTimeout(() => {
-    const timers = p.inFlightTimers?.get(key) || [];
-    const idx = timers.indexOf(timer);
-    if (idx >= 0) timers.splice(idx, 1);
-    if (timers.length) p.inFlightTimers.set(key, timers);
-    else p.inFlightTimers?.delete(key);
-    const before = p.inFlight.get(key) || 0;
-    if (before > 0) {
-      const next = before - 1;
-      if (next === 0) p.inFlight.delete(key);
-      else p.inFlight.set(key, next);
-      emitEvent('inflight_timeout', p, key, { inflightBefore: before, inflightAfter: next, ttlMs: INFLIGHT_TTL_MS });
-    }
-  }, INFLIGHT_TTL_MS);
-  timer.unref?.();
-  const timers = p.inFlightTimers?.get(key) || [];
-  timers.push(timer);
-  p.inFlightTimers?.set(key, timers);
-}
-
-function endInFlight(p, key) {
-  if (!p || !key) return;
-  const timers = p.inFlightTimers?.get(key) || [];
-  const timer = timers.shift();
-  if (timer) clearTimeout(timer);
-  if (timers.length) p.inFlightTimers.set(key, timers);
-  else p.inFlightTimers?.delete(key);
+function decrementInFlight(p, key) {
   const next = Math.max(0, (p.inFlight.get(key) || 0) - 1);
   if (next === 0) p.inFlight.delete(key);
   else p.inFlight.set(key, next);
+  return next;
+}
+
+function removeInFlightToken(p, key, token) {
+  if (!p?.inFlightTimers || !key || !token) return;
+  const tokens = p.inFlightTimers.get(key) || [];
+  const idx = tokens.indexOf(token);
+  if (idx >= 0) tokens.splice(idx, 1);
+  if (tokens.length) p.inFlightTimers.set(key, tokens);
+  else p.inFlightTimers.delete(key);
+}
+
+function beginInFlight(p, key) {
+  if (!p || !key) return null;
+  const token = { done: false, timer: null };
+  p.inFlight.set(key, (p.inFlight.get(key) || 0) + 1);
+  token.timer = setTimeout(() => {
+    if (token.done) return;
+    token.done = true;
+    removeInFlightToken(p, key, token);
+    const before = p.inFlight.get(key) || 0;
+    if (before > 0) {
+      const next = decrementInFlight(p, key);
+      emitEvent('inflight_timeout', p, key, { inflightBefore: before, inflightAfter: next, ttlMs: INFLIGHT_TTL_MS });
+    }
+  }, INFLIGHT_TTL_MS);
+  token.timer.unref?.();
+  const tokens = p.inFlightTimers?.get(key) || [];
+  tokens.push(token);
+  p.inFlightTimers?.set(key, tokens);
+  return token;
+}
+
+function endInFlight(p, key, token = null) {
+  if (!p || !key) return;
+  let activeToken = token;
+  if (!activeToken) {
+    const tokens = p.inFlightTimers?.get(key) || [];
+    activeToken = tokens[0] || null;
+  }
+  if (activeToken) {
+    if (activeToken.done) return;
+    activeToken.done = true;
+    if (activeToken.timer) clearTimeout(activeToken.timer);
+    removeInFlightToken(p, key, activeToken);
+  }
+  decrementInFlight(p, key);
 }
 
 // ─── Round-robin selection ────────────────────────────────────────────────────
@@ -1293,7 +1311,7 @@ function uSetHeader(headers, name, value) {
  * Uses a Proxy so all undici handler methods forward correctly, including any
  * added in future undici versions (onBodySent, onRequestSent, onUpgrade …).
  */
-function wrapUndiciHandler(handler, provider, key, getModel) {
+function wrapUndiciHandler(handler, provider, key, inFlightToken, getModel) {
   if (!handler || typeof handler !== 'object') return handler;
   let statusCode = 0;
   let retryAfterMs = 0;
@@ -1308,7 +1326,7 @@ function wrapUndiciHandler(handler, provider, key, getModel) {
   const settle = (fn) => {
     if (settled) return;
     settled = true;
-    try { endInFlight(provider, key); } catch (_) {}
+    try { endInFlight(provider, key, inFlightToken); } catch (_) {}
     try { fn(); } catch (_) {}
   };
   return new Proxy(handler, {
@@ -1357,7 +1375,7 @@ function patchUndiciDispatch(proto, tag) {
   const origDispatch = proto.dispatch;
 
   proto.dispatch = function rotatorDispatch(options, handler) {
-    let usedKey = null, usedProvider = null, usedModel = null;
+    let usedKey = null, usedProvider = null, usedModel = null, usedInFlight = null;
     try {
       // Read origin BEFORE cloudflare-proxy's dispatch wrapper rewrites it.
       // We wrap CF proxy's wrapper, so at this point options.origin is still
@@ -1399,7 +1417,7 @@ function patchUndiciDispatch(proto, tag) {
 
         if (key) {
           usedKey = key; usedProvider = provider; usedModel = model;
-          beginInFlight(usedProvider, usedKey);
+          usedInFlight = beginInFlight(usedProvider, usedKey);
 
           const newOptions = { ...options };
 
@@ -1430,13 +1448,13 @@ function patchUndiciDispatch(proto, tag) {
             () => usedModel,
             (model) => { usedModel = model; },
           );
-          const wrappedHandler = wrapUndiciHandler(handler, usedProvider, usedKey, () => usedModel);
+          const wrappedHandler = wrapUndiciHandler(handler, usedProvider, usedKey, usedInFlight, () => usedModel);
           return origDispatch.call(this, newOptions, wrappedHandler);
         }
       }
     } catch (err) {
       warn(`[key-rotator] undici (${tag}) dispatch patch error:`, err?.message || err);
-      if (usedProvider && usedKey) { try { endInFlight(usedProvider, usedKey); } catch (_) {} }
+      if (usedProvider && usedKey) { try { endInFlight(usedProvider, usedKey, usedInFlight); } catch (_) {} }
     }
 
     return origDispatch.call(this, options, handler);
@@ -1575,6 +1593,7 @@ function patchFetch() {
 
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         let usedKey = null;
+        let usedInFlight = null;
         try {
           let { key, waitMs } = nextKey(provider, model);
 
@@ -1613,7 +1632,7 @@ function patchFetch() {
           if (key) {
             triedKeys.add(key);
             usedKey = key;
-            beginInFlight(provider, key);
+            usedInFlight = beginInFlight(provider, key);
           }
 
           const attemptArgs = buildAttemptFetchArgs(input, init, provider, usedKey);
@@ -1624,7 +1643,7 @@ function patchFetch() {
           // Parse Retry-After BEFORE calling handleStatus so the key blacklist
           // is set to the correct duration the server asked for.
           const retryAfterMs = parseRetryAfterMs(response.headers?.get?.('retry-after'));
-          try { endInFlight(provider, usedKey); } catch (_) {}
+          try { endInFlight(provider, usedKey, usedInFlight); } catch (_) {}
           try { handleStatus(provider, usedKey, response.status, model, retryAfterMs); } catch (_) {}
 
           const shouldRetry = attempt < maxAttempts && classifyRetryableFailure(response.status);
@@ -1642,7 +1661,7 @@ function patchFetch() {
           return response;
         } catch (err) {
           lastErr = err;
-          try { endInFlight(provider, usedKey); } catch (_) {}
+          try { endInFlight(provider, usedKey, usedInFlight); } catch (_) {}
           try { handleTransportError(provider, usedKey, err); } catch (_) {}
           // Node.js 18+ undici fetch: network errors are TypeError("fetch failed")
           // where the real code (ECONNRESET, ETIMEDOUT, ENOTFOUND …) is in
@@ -1681,7 +1700,7 @@ function patchHttpModule(mod) {
   const orig = mod.request;
 
   mod.request = function patchedRequest(...args) {
-    let usedKey = null, usedProvider = null, usedModel = null;
+    let usedKey = null, usedProvider = null, usedModel = null, usedInFlight = null;
 
     try {
       const options  = args[0];
@@ -1706,7 +1725,7 @@ function patchHttpModule(mod) {
 
         if (key) {
           usedKey = key; usedProvider = provider; usedModel = model;
-          beginInFlight(usedProvider, usedKey);
+          usedInFlight = beginInFlight(usedProvider, usedKey);
           if (provider.queryParam) {
             const u = new URL(String(
               typeof options === 'string' || options instanceof URL
@@ -1786,6 +1805,7 @@ function patchHttpModule(mod) {
                   if (bodyModel) {
                     usedModel = bodyModel;
                     promoteStickyKeyModel(usedProvider, usedKey, null, usedModel);
+                    emitEvent('model_detected', usedProvider, usedKey, { model: usedModel, source: 'http_request_body' });
                     debug(`[key-rotator] ${usedProvider.name}: (http) model extracted from request body: ${usedModel}`);
                   }
                 } catch (_) { /* non-JSON body — leave model null */ }
@@ -1809,17 +1829,21 @@ function patchHttpModule(mod) {
     // Intercept response to track 429/success — pass model for per-model accounting
     if (usedProvider && usedKey) {
       const _emit = req.emit.bind(req);
+      let statusHandled = false;
       req.emit = function (event, ...rest) {
         if (event === 'response') {
           const res = rest[0];
-          try { endInFlight(usedProvider, usedKey); } catch (_) {}
+          statusHandled = true;
+          try { endInFlight(usedProvider, usedKey, usedInFlight); } catch (_) {}
           try { handleStatus(usedProvider, usedKey, res?.statusCode, usedModel); } catch (_) {}
         }
         return _emit(event, ...rest);
       };
       req.on('error', (err) => {
-        try { endInFlight(usedProvider, usedKey); } catch (_) {}
-        try { handleTransportError(usedProvider, usedKey, err); } catch (_) {}
+        try { endInFlight(usedProvider, usedKey, usedInFlight); } catch (_) {}
+        if (!statusHandled) {
+          try { handleTransportError(usedProvider, usedKey, err); } catch (_) {}
+        }
       });
     }
     return req;
