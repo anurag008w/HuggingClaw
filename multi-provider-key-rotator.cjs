@@ -43,8 +43,14 @@ const debug = (...a) => { if (LOG_LEVEL === 'debug') console.error(...a); };
 // nextKey()/beginInFlight()/handler wrapper, otherwise one API call can burn 2-3
 // keys and inflate the dashboard.
 const rotatorRequestContext = new AsyncLocalStorage();
-const isInRotatorRequest = () => !!rotatorRequestContext.getStore()?.active;
+let rotatorSyncRequestDepth = 0;
+const isInRotatorRequest = () => rotatorSyncRequestDepth > 0 || !!rotatorRequestContext.getStore()?.active;
 const runInRotatorRequest = (fn) => rotatorRequestContext.run({ active: true }, fn);
+const runInRotatorSyncRequest = (fn) => {
+  rotatorSyncRequestDepth += 1;
+  try { return fn(); }
+  finally { rotatorSyncRequestDepth = Math.max(0, rotatorSyncRequestDepth - 1); }
+};
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -899,6 +905,17 @@ function nextKey(p, model) {
 
 // ─── Auth header injection ────────────────────────────────────────────────────
 
+function normalizeHostname(hostLike) {
+  const raw = String(hostLike || '').trim();
+  if (!raw) return null;
+  try {
+    const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `http://${raw}`;
+    return new URL(withScheme).hostname || null;
+  } catch {
+    return raw.replace(/^\[|\]$/g, '').split(':')[0] || null;
+  }
+}
+
 function resolveHostname(urlLike) {
   try {
     const u =
@@ -908,7 +925,12 @@ function resolveHostname(urlLike) {
       : urlLike && typeof urlLike.href === 'string'       ? new URL(urlLike.href)
       : urlLike && typeof urlLike.hostname === 'string'   ? urlLike
       : null;
-    return u ? u.hostname : null;
+    if (u?.hostname) return normalizeHostname(u.hostname);
+    // node:http accepts `host` as an alias for `hostname` (often with a port).
+    // Some SDKs and small probes use that form; without this the rotator never
+    // picked a key, so /key-rotator looked empty even though keys were configured.
+    if (urlLike && typeof urlLike.host === 'string') return normalizeHostname(urlLike.host);
+    return null;
   } catch { return null; }
 }
 
@@ -917,7 +939,7 @@ function matchProvider(hostname) {
   return providerState.find(p => p.hostname.test(hostname)) || null;
 }
 function resolveProviderFromHeaders(headers) {
-  const targetHost = uGetHeader(headers || [], 'x-target-host');
+  const targetHost = normalizeHostname(uGetHeader(headers || [], 'x-target-host'));
   return targetHost ? matchProvider(targetHost) : null;
 }
 
@@ -1859,6 +1881,7 @@ function patchFetch() {
 
 function patchHttpModule(mod) {
   const orig = mod.request;
+  const origGet = mod.get;
 
   mod.request = function patchedRequest(...args) {
     if (isInRotatorRequest()) return orig.apply(mod, args);
@@ -1932,7 +1955,7 @@ function patchHttpModule(mod) {
       }
     } catch (err) { warn('[key-rotator] http patch error:', err?.message || err); }
 
-    const req = runInRotatorRequest(() => orig.apply(mod, args));
+    const req = runInRotatorSyncRequest(() => orig.apply(mod, args));
 
     // ── Gemini: normalise thought parts / thought_signature before sending ───
     // patchFetch handles globalThis.fetch callers.  SDKs that use node:http
@@ -2054,6 +2077,20 @@ function patchHttpModule(mod) {
     }
     return req;
   };
+
+  // node:http.get/node:https.get are separate exports. They do not reliably
+  // dispatch through a replaced module.request in all Node versions, so patch
+  // them explicitly and preserve the native get() contract: create request,
+  // immediately end it, and return the ClientRequest.
+  if (typeof origGet === 'function') {
+    mod.get = function patchedGet(...args) {
+      const req = mod.request.apply(mod, args);
+      req.end();
+      return req;
+    };
+    Object.defineProperty(mod.get, '_kRotatorPatched', { value: true });
+    Object.defineProperty(mod.get, '_patched', { value: true });
+  }
 }
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────
