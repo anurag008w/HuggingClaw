@@ -638,6 +638,10 @@ function keyRotatorRuntimeSummary() {
 }
 
 function providerKeySummary() {
+  const llmFallbackEnabled = !/^(0|false|no|off)$/i.test(
+    String(process.env.LLM_API_KEY_FALLBACK_ENABLED || "").trim(),
+  );
+  const fallbackKeys = llmFallbackEnabled ? splitKeyPool(process.env.LLM_API_KEY) : [];
   const providers = [
     { name: "gemini", env: ["GEMINI_API_KEYS", "GEMINI_API_KEY"], aliases: ["GOOGLE_API_KEYS", "GOOGLE_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEYS", "GOOGLE_GENERATIVE_AI_API_KEY", "GOOGLE_AI_API_KEYS", "GOOGLE_AI_API_KEY", "GOOGLE_GENAI_API_KEYS", "GOOGLE_GENAI_API_KEY"] },
     { name: "openai", env: ["OPENAI_API_KEYS", "OPENAI_API_KEY"] },
@@ -676,6 +680,14 @@ function providerKeySummary() {
       const vals = splitKeyPool(process.env[name]);
       if (vals.length) used.push(name);
       for (const val of vals) if (!seen.has(val)) { seen.add(val); keys.push(val); }
+    }
+    // Keep /key-rotator aligned with multi-provider-key-rotator.cjs: when a
+    // provider has no dedicated pool and fallback is enabled, the rotator uses
+    // LLM_API_KEY for that provider. Show that fallback pool instead of making
+    // the dashboard look disconnected or empty.
+    if (!keys.length && fallbackKeys.length) {
+      used.push("LLM_API_KEY fallback");
+      for (const val of fallbackKeys) if (!seen.has(val)) { seen.add(val); keys.push(val); }
     }
     return {
       name: p.name,

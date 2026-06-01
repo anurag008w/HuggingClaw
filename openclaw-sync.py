@@ -127,31 +127,53 @@ def count_files(path: Path) -> int:
 
 
 def copy_state_entry_with_retry(source_path: Path, backup_path: Path, attempts: int = 3) -> None:
-    """Copy one top-level .openclaw entry with short retries for hot files/dirs."""
+    """Copy one top-level .openclaw entry with short retries for hot files/dirs.
+
+    The state staging dir is seeded from the last known-good backup before this
+    function runs.  Never delete that seeded entry until a fresh copy has fully
+    succeeded; hot session files can change mid-copy, and a failed copy must not
+    turn into a deletion that later prunes valid remote session data.
+    """
     last_exc: Exception | None = None
+    parent = backup_path.parent
     for attempt in range(1, attempts + 1):
-        try:
-            if backup_path.exists():
-                if backup_path.is_dir():
-                    shutil.rmtree(backup_path, ignore_errors=True)
+        tmp_path = parent / f".{backup_path.name}.snapshot-tmp-{os.getpid()}-{attempt}"
+        old_path = parent / f".{backup_path.name}.snapshot-old-{os.getpid()}-{attempt}"
+        for cleanup_path in (tmp_path, old_path):
+            if cleanup_path.exists():
+                if cleanup_path.is_dir():
+                    shutil.rmtree(cleanup_path, ignore_errors=True)
                 else:
-                    backup_path.unlink(missing_ok=True)
+                    cleanup_path.unlink(missing_ok=True)
+        try:
             if source_path.is_dir():
-                shutil.copytree(source_path, backup_path)
+                shutil.copytree(source_path, tmp_path)
+            elif source_path.is_file():
+                tmp_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source_path, tmp_path)
+            else:
                 return
-            if source_path.is_file():
-                shutil.copy2(source_path, backup_path)
-                return
+
+            if backup_path.exists():
+                backup_path.rename(old_path)
+            tmp_path.rename(backup_path)
+            if old_path.exists():
+                if old_path.is_dir():
+                    shutil.rmtree(old_path, ignore_errors=True)
+                else:
+                    old_path.unlink(missing_ok=True)
             return
         except Exception as exc:
             last_exc = exc
+            if tmp_path.exists():
+                if tmp_path.is_dir():
+                    shutil.rmtree(tmp_path, ignore_errors=True)
+                else:
+                    tmp_path.unlink(missing_ok=True)
+            if old_path.exists() and not backup_path.exists():
+                old_path.rename(backup_path)
             if attempt < attempts:
                 time.sleep(0.2 * attempt)
-                if backup_path.exists():
-                    if backup_path.is_dir():
-                        shutil.rmtree(backup_path, ignore_errors=True)
-                    else:
-                        backup_path.unlink(missing_ok=True)
                 continue
             raise last_exc
 
@@ -682,6 +704,7 @@ def restore_workspace() -> bool:
 def _sync_once_unlocked(
     last_fingerprint: str | None = None,
     last_marker: WorkspaceMarker | None = None,
+    force_fingerprint_check: bool = False,
 ) -> tuple[str, WorkspaceMarker]:
     if not HF_TOKEN:
         write_status("disabled", "HF_TOKEN is not configured.")
@@ -692,7 +715,15 @@ def _sync_once_unlocked(
     had_snapshot_copy_failures = snapshot_state_into_workspace()
     repo_id = ensure_repo_exists()
     current_marker = metadata_marker(WORKSPACE)
-    if last_marker is not None and current_marker == last_marker and not _prune_needed:
+    # Session watcher uses content digests and can detect same-size rewrites
+    # whose workspace metadata marker is unchanged.  In that case, force the
+    # stronger fingerprint pass instead of returning early on metadata alone.
+    if (
+        last_marker is not None
+        and current_marker == last_marker
+        and not _prune_needed
+        and not force_fingerprint_check
+    ):
         write_status("synced", "No workspace changes detected.")
         return (last_fingerprint or "", current_marker)
 
@@ -759,12 +790,17 @@ def _sync_once_unlocked(
 def sync_once(
     last_fingerprint: str | None = None,
     last_marker: WorkspaceMarker | None = None,
+    force_fingerprint_check: bool = False,
 ) -> tuple[str, WorkspaceMarker]:
     SYNC_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
     with SYNC_LOCK_FILE.open("w", encoding="utf-8") as lock_handle:
         fcntl.flock(lock_handle, fcntl.LOCK_EX)
         try:
-            return _sync_once_unlocked(last_fingerprint, last_marker)
+            return _sync_once_unlocked(
+                last_fingerprint,
+                last_marker,
+                force_fingerprint_check=force_fingerprint_check,
+            )
         finally:
             fcntl.flock(lock_handle, fcntl.LOCK_UN)
 
@@ -974,7 +1010,14 @@ def loop() -> int:
     while not STOP_EVENT.is_set():
         try:
             sync_started_config_marker = file_marker(OPENCLAW_CONFIG_FILE)
-            last_fingerprint, last_marker = sync_once(last_fingerprint, last_marker)
+            last_fingerprint, last_marker = sync_once(
+                last_fingerprint,
+                last_marker,
+                # A sessions trigger came from sessions_marker(), which hashes
+                # session contents.  Bypass the metadata-only fast path so
+                # same-size session rewrites still reach the dataset.
+                force_fingerprint_check=sync_trigger == "sessions",
+            )
             if sync_trigger == "sessions":
                 last_sessions_sync_time = time.monotonic()
             config_marker = file_marker(OPENCLAW_CONFIG_FILE)
