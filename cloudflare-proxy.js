@@ -209,26 +209,46 @@ if (PROXY_URL) {
         // back to a direct connection so callers still get a response.
         // HTTP-level errors from the Worker (4xx/5xx) are NOT retried —
         // only hard network failures (rejected promise) trigger the fallback.
-        const proxyWithFallback = (proxyPromise, directFallbackFn, debugInfo) => {
-          return proxyPromise.then(r => {
-            if (DEBUG && !r.ok) {
-              log(`[cloudflare-proxy] Proxy HTTP ${r.status} for ${hostname}: ${r.statusText}`);
-            }
-            return r;
-          }).catch(err => {
+        const proxyWithFallback = (proxyFetchFn, directFallbackFn, debugInfo) => {
+          const formatCause = (err) => {
             const cause = err?.cause;
-            const causeStr = cause
-              ? ` | cause: ${cause?.code || cause?.message || String(cause)}`
-              : "";
-            log(`[cloudflare-proxy] Proxy FAILED ${hostname}: ${err?.message}${causeStr} — retrying direct`);
-            if (DEBUG && debugInfo) {
-              log(`[cloudflare-proxy] Debug: ${debugInfo}`);
-            }
-            // Direct fallback: bypasses proxy for this request so infrastructure
-            // calls (update checks, plugin installs, etc.) still succeed even
-            // when the Worker cannot reach the destination.
-            return directFallbackFn();
-          });
+            return cause ? ` | cause: ${cause?.code || cause?.message || String(cause)}` : "";
+          };
+          const runProxyAttempt = (label) => {
+            return Promise.resolve()
+              .then(() => proxyFetchFn())
+              .then((r) => {
+                if (DEBUG && !r.ok) {
+                  log(`[cloudflare-proxy] Proxy HTTP ${r.status} for ${hostname}: ${r.statusText}`);
+                }
+                return r;
+              })
+              .catch((err) => {
+                if (DEBUG && debugInfo) log(`[cloudflare-proxy] Debug (${label}): ${debugInfo}`);
+                throw err;
+              });
+          };
+
+          // Requested failover chain:
+          // proxy x3 -> direct x1 -> proxy x1
+          return runProxyAttempt("proxy-1")
+            .catch((e1) => {
+              log(`[cloudflare-proxy] Proxy FAILED ${hostname} [1/3]: ${e1?.message}${formatCause(e1)}`);
+              return runProxyAttempt("proxy-2");
+            })
+            .catch((e2) => {
+              log(`[cloudflare-proxy] Proxy FAILED ${hostname} [2/3]: ${e2?.message}${formatCause(e2)}`);
+              return runProxyAttempt("proxy-3");
+            })
+            .catch((e3) => {
+              log(`[cloudflare-proxy] Proxy FAILED ${hostname} [3/3]: ${e3?.message}${formatCause(e3)} — trying direct`);
+              return Promise.resolve()
+                .then(() => directFallbackFn())
+                .catch((directErr) => {
+                  log(`[cloudflare-proxy] Direct fallback FAILED ${hostname}: ${directErr?.message}${formatCause(directErr)} — trying proxy final`);
+                  return runProxyAttempt("proxy-final");
+                });
+            });
         };
 
         if (request) {
@@ -242,7 +262,7 @@ if (PROXY_URL) {
             fetchOpts.duplex = request.duplex || "half";
           }
           return proxyWithFallback(
-            originalFetch(String(proxiedUrl), fetchOpts),
+            () => originalFetch(String(proxiedUrl), fetchOpts),
             () => originalFetch(input, init),
             `request-mode method=${request.method} hasBody=${!!request.body}`,
           );
@@ -279,7 +299,7 @@ if (PROXY_URL) {
             : (init.body?.constructor?.name || typeof init.body);
 
         return proxyWithFallback(
-          originalFetch(String(proxiedUrl), newInit),
+          () => originalFetch(String(proxiedUrl), newInit),
           () => originalFetch(input, init),
           `init-mode method=${newInit.method} body=${bodyType} initKeys=${Object.keys(init || {}).join(",")}`,
         );
