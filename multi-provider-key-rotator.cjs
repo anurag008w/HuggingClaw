@@ -96,6 +96,13 @@ const MAX_KEY_WAIT_MS = Math.max(
 // Capped to 16h to avoid oversuppressing pools for too long.
 const formatHours = (ms) => (ms / (60 * 60 * 1000)).toFixed(ms % (60 * 60 * 1000) === 0 ? 0 : 2);
 
+/**
+ * Returns a masked key string: first 4 chars + "..." + last 6 chars.
+ * e.g. "AIzaSyBaklu...abc123" so logs are readable but keys stay private.
+ * Short keys (≤12 chars) are fully masked as "***".
+ */
+const keyMask = (k) => (k && k.length > 12 ? `${k.slice(0, 4)}...${keyMask(k)}` : '***');
+
 // ─── Provider definitions ────────────────────────────────────────────────────
 
 const PROVIDERS = [
@@ -152,7 +159,7 @@ function normalizeKeys(...inputs) {
 // Per-key state: { strikes, blacklistedUntil }
 // strikes   – consecutive 429/402 count; resets on success
 // blacklistedUntil – epoch ms; 0 = active
-function makeKeyState() { return { strikes: 0, blacklistedUntil: 0, lastFailureAt: 0 }; }
+function makeKeyState() { return { strikes: 0, blacklistedUntil: 0, lastFailureAt: 0, timesUsed: 0 }; }
 
 /**
  * Extracts the model name from a request URL.
@@ -260,7 +267,7 @@ function isActive(p, key, model) {
     // Natural expiry: give partial fresh start
     ks.blacklistedUntil = 0;
     if (ks.strikes > 0) ks.strikes -= 1;
-    debug(`[key-rotator] ${p.name}: ...${key.slice(-6)} back in pool (strikes now ${ks.strikes})`);
+    debug(`[key-rotator] ${p.name}: ${keyMask(key)} back in pool (strikes now ${ks.strikes})`);
   }
 
   // ── Per-model check (gemini etc.) ──────────────────────────────────────────
@@ -271,7 +278,7 @@ function isActive(p, key, model) {
       if (Date.now() < mks.blacklistedUntil) return false;   // blocked for this model
       mks.blacklistedUntil = 0;
       if (mks.strikes > 0) mks.strikes -= 1;
-      debug(`[key-rotator] ${p.name}: ...${key.slice(-6)} back in pool for model=${model} (strikes now ${mks.strikes})`);
+      debug(`[key-rotator] ${p.name}: ${keyMask(key)} back in pool for model=${model} (strikes now ${mks.strikes})`);
     }
   }
 
@@ -311,13 +318,13 @@ function recordFailure(p, key, model, retryAfterMs) {
     let cooldown;
     if (mks.strikes >= MAX_STRIKES) {
       cooldown = PERM_SUSPEND_MS;
-      warn(`[key-rotator] ${p.name}: ...${key.slice(-6)} model=${model} hit ${MAX_STRIKES} strikes — suspended for ${formatHours(PERM_SUSPEND_MS)}h (quota likely exhausted for this model)`);
+      warn(`[key-rotator] ${p.name}: ${keyMask(key)} model=${model} hit ${MAX_STRIKES} strikes — suspended for ${formatHours(PERM_SUSPEND_MS)}h (quota likely exhausted for this model)`);
     } else {
       cooldown = BASE_COOLDOWN_MS * Math.pow(4, mks.strikes - 1);
       const jitter = 1 + ((Math.random() * 2 - 1) * (COOLDOWN_JITTER_PCT / 100));
       cooldown = Math.max(1_000, Math.round(cooldown * jitter));
       if (serverHintMs > cooldown) cooldown = serverHintMs;
-      debug(`[key-rotator] ${p.name}: ...${key.slice(-6)} model=${model} strike ${mks.strikes}/${MAX_STRIKES} — backoff ${Math.round(cooldown / 1000)}s${serverHintMs > 0 ? ` (server-hint ${Math.round(serverHintMs/1000)}s)` : ''}`);
+      debug(`[key-rotator] ${p.name}: ${keyMask(key)} model=${model} strike ${mks.strikes}/${MAX_STRIKES} — backoff ${Math.round(cooldown / 1000)}s${serverHintMs > 0 ? ` (server-hint ${Math.round(serverHintMs/1000)}s)` : ''}`);
     }
     mks.blacklistedUntil = Math.max(mks.blacklistedUntil || 0, Date.now() + cooldown);
     return;
@@ -333,14 +340,14 @@ function recordFailure(p, key, model, retryAfterMs) {
   let cooldown;
   if (ks.strikes >= MAX_STRIKES) {
     cooldown = PERM_SUSPEND_MS;
-    warn(`[key-rotator] ${p.name}: ...${key.slice(-6)} reached ${MAX_STRIKES} strikes — suspended for ${formatHours(PERM_SUSPEND_MS)} h (quota likely exhausted)`);
+    warn(`[key-rotator] ${p.name}: ${keyMask(key)} reached ${MAX_STRIKES} strikes — suspended for ${formatHours(PERM_SUSPEND_MS)} h (quota likely exhausted)`);
   } else {
     // Exponential: 1× → 4× (strikes 1 and 2)
     cooldown = BASE_COOLDOWN_MS * Math.pow(4, ks.strikes - 1);
     const jitter = 1 + ((Math.random() * 2 - 1) * (COOLDOWN_JITTER_PCT / 100));
     cooldown = Math.max(1000, Math.round(cooldown * jitter));
     if (serverHintMs > cooldown) cooldown = serverHintMs;
-    debug(`[key-rotator] ${p.name}: ...${key.slice(-6)} strike ${ks.strikes}/${MAX_STRIKES} — backoff ${Math.round(cooldown / 1000)}s${serverHintMs > 0 ? ` (server-hint ${Math.round(serverHintMs/1000)}s)` : ''}`);
+    debug(`[key-rotator] ${p.name}: ${keyMask(key)} strike ${ks.strikes}/${MAX_STRIKES} — backoff ${Math.round(cooldown / 1000)}s${serverHintMs > 0 ? ` (server-hint ${Math.round(serverHintMs/1000)}s)` : ''}`);
   }
 
   // Use Math.max so a longer existing suspension is never shortened.
@@ -359,7 +366,7 @@ function recordTransientFailure(p, key) {
   const cooldown = Math.max(1000, Math.round(BASE_COOLDOWN_MS * jitter));
   ks.blacklistedUntil = Math.max(ks.blacklistedUntil || 0, Date.now() + cooldown);
   const secs = Math.round(cooldown / 1000);
-  debug(`[key-rotator] ${p.name}: ...${key.slice(-6)} transient backoff ${secs}s (strikes unchanged)`);
+  debug(`[key-rotator] ${p.name}: ${keyMask(key)} transient backoff ${secs}s (strikes unchanged)`);
 }
 
 /**
@@ -368,12 +375,15 @@ function recordTransientFailure(p, key) {
  * a key that recovered for a given model is immediately reusable.
  */
 function recordSuccess(p, key, model) {
-  // Reset global strikes
+  // Reset global strikes and increment usage counter
   const ks = p.keyState.get(key);
-  if (ks && ks.strikes > 0) {
-    ks.strikes = 0;
-    ks.lastFailureAt = 0;
-    debug(`[key-rotator] ${p.name}: ...${key.slice(-6)} recovered (global) — strikes reset`);
+  if (ks) {
+    if (ks.strikes > 0) {
+      ks.strikes = 0;
+      ks.lastFailureAt = 0;
+      debug(`[key-rotator] ${p.name}: ${keyMask(key)} recovered (global) — strikes reset`);
+    }
+    ks.timesUsed = (ks.timesUsed || 0) + 1;
   }
 
   // Also clear model-specific state on success
@@ -384,7 +394,7 @@ function recordSuccess(p, key, model) {
       mks.strikes = 0;
       mks.lastFailureAt = 0;
       mks.blacklistedUntil = 0;
-      debug(`[key-rotator] ${p.name}: ...${key.slice(-6)} model=${model} recovered — strikes reset`);
+      debug(`[key-rotator] ${p.name}: ${keyMask(key)} model=${model} recovered — strikes reset`);
     }
   }
 }
@@ -459,7 +469,7 @@ function nextKey(p, model) {
       const inflight = p.inFlight.get(key) || 0;
       if (inflight < MAX_INFLIGHT_PER_KEY) {
         p.idx = (i + 1) % total;   // next call starts AFTER the key we just picked
-        if (VERBOSE_PICKS) debug(`[key-rotator] ${p.name}: picked ...${key.slice(-6)}${model ? ` model=${model}` : ''} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
+        if (VERBOSE_PICKS) debug(`[key-rotator] ${p.name}: picked ${keyMask(key)}${model ? ` model=${model}` : ''} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
         return { key, waitMs: 0 };
       }
       if (!bestPick) bestPick = { i, key, inflight, score: Number.POSITIVE_INFINITY };
@@ -478,7 +488,7 @@ function nextKey(p, model) {
 
   if (bestPick) {
     p.idx = (bestPick.i + 1) % total;
-    warn(`[key-rotator] ${p.name}: all active keys saturated, reusing ...${bestPick.key.slice(-6)}${model ? ` model=${model}` : ''} inflight=${bestPick.inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
+    warn(`[key-rotator] ${p.name}: all active keys saturated, reusing ${keyMask(bestPick.key)}${model ? ` model=${model}` : ''} inflight=${bestPick.inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
     return { key: bestPick.key, waitMs: 0 };
   }
 
@@ -506,9 +516,9 @@ function nextKey(p, model) {
   // This avoids firing into a guaranteed 429 and wasting a request slot.
   const waitMs = Math.max(0, bestExpiry - Date.now());
   if (waitMs > 0)
-    warn(`[key-rotator] ${p.name}: all ${total} key(s) suspended — soonest key ...${chosenKey.slice(-6)} recovers in ${Math.round(waitMs / 1000)}s${model ? ` (model=${model})` : ''}`);
+    warn(`[key-rotator] ${p.name}: all ${total} key(s) suspended — soonest key ${keyMask(chosenKey)} recovers in ${Math.round(waitMs / 1000)}s${model ? ` (model=${model})` : ''}`);
   else
-    warn(`[key-rotator] ${p.name}: all ${total} key(s) suspended — using soonest-recovering key ...${chosenKey.slice(-6)}`);
+    warn(`[key-rotator] ${p.name}: all ${total} key(s) suspended — using soonest-recovering key ${keyMask(chosenKey)}`);
 
   return { key: chosenKey, waitMs };
 }
@@ -555,7 +565,7 @@ function handleStatus(p, key, status, model, retryAfterMs) {
     ks.strikes = MAX_STRIKES;
     ks.lastFailureAt = Date.now();
     ks.blacklistedUntil = Date.now() + PERM_SUSPEND_MS;
-    warn(`[key-rotator] ${p.name}: ...${key.slice(-6)} auth-failed (${status}) — suspended for ${formatHours(PERM_SUSPEND_MS)} h`);
+    warn(`[key-rotator] ${p.name}: ${keyMask(key)} auth-failed (${status}) — suspended for ${formatHours(PERM_SUSPEND_MS)} h`);
     return;
   }
 
@@ -564,14 +574,14 @@ function handleStatus(p, key, status, model, retryAfterMs) {
     // recordFailure will scope the blacklist to the model when model is provided.
     // Pass retryAfterMs so the key blacklist respects the server's stated wait time.
     recordFailure(p, key, model, retryAfterMs);
-    warn(`[key-rotator] ${p.name}: quota/rate status=${status} on ...${key.slice(-6)}${model ? ` model=${model}` : ''}${retryAfterMs ? ` retry-after=${Math.round(retryAfterMs/1000)}s` : ''}`);
+    warn(`[key-rotator] ${p.name}: quota/rate status=${status} on ${keyMask(key)}${model ? ` model=${model}` : ''}${retryAfterMs ? ` retry-after=${Math.round(retryAfterMs/1000)}s` : ''}`);
     return;
   }
 
   if (classifyRetryableFailure(status)) {
     // Transient server errors are not model-specific — penalise key globally.
     recordTransientFailure(p, key);
-    warn(`[key-rotator] ${p.name}: transient status=${status} on ...${key.slice(-6)}`);
+    warn(`[key-rotator] ${p.name}: transient status=${status} on ${keyMask(key)}`);
     return;
   }
 
@@ -593,48 +603,127 @@ function handleTransportError(p, key, err) {
   const retryable = classifyRetryableFailure(undefined, code) || name === 'AbortError';
   if (retryable) {
     recordTransientFailure(p, key);
-    warn(`[key-rotator] ${p.name}: retryable network ${name || 'Error'}${code ? ` code=${code}` : ''} on ...${key.slice(-6)}`);
+    warn(`[key-rotator] ${p.name}: retryable network ${name || 'Error'}${code ? ` code=${code}` : ''} on ${keyMask(key)}`);
   }
+}
+
+/**
+ * Formats a remaining-suspend duration into a human-readable string.
+ */
+function formatRemaining(ms) {
+  if (ms <= 0) return '0s';
+  if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
+  if (ms < 60 * 60_000) return `${(ms / 60_000).toFixed(1)}m`;
+  return `${(ms / (60 * 60_000)).toFixed(2)}h`;
 }
 
 function startDiagnostics() {
   if (!DIAGNOSTICS_ENABLED) return;
   setInterval(() => {
     const now = Date.now();
-    const snapshot = providerState.map(p => {
-      const keyStats = p.keys.map(k => {
-        const ks = p.keyState.get(k) || makeKeyState();
-        const globalActive = ks.blacklistedUntil === 0 || now >= ks.blacklistedUntil;
-        return {
-          keySuffix: k.slice(-6),
-          active: globalActive,
-          strikes: ks.strikes,
-          inFlight: p.inFlight.get(k) || 0,
-        };
-      });
-      const active    = keyStats.filter(s => s.active).length;
-      const suspended = keyStats.length - active;
-      const avgStrikes = keyStats.length
-        ? Number((keyStats.reduce((sum, s) => sum + s.strikes, 0) / keyStats.length).toFixed(2))
-        : 0;
+    const SEP = '─'.repeat(62);
+    const lines = [`[key-rotator] ${SEP}`];
 
-      // Per-model summary for providers with perModelLimits (gemini etc.)
-      let modelSummary;
-      if (p.modelKeyState && p.modelKeyState.size > 0) {
-        const modelBlocked = {};
-        for (const [mKey, mks] of p.modelKeyState) {
-          if (mks.blacklistedUntil > now) {
-            const model = mKey.split(':').slice(1).join(':');
-            modelBlocked[model] = (modelBlocked[model] || 0) + 1;
+    for (const p of providerState) {
+      if (!p.keys.length) continue;
+
+      // ── Per-key detail ─────────────────────────────────────────────────────
+      const keyRows = p.keys.map(k => {
+        const ks        = p.keyState.get(k) || makeKeyState();
+        const inflight  = p.inFlight.get(k) || 0;
+        const globalSuspended = ks.blacklistedUntil > now;
+        const remainMs  = globalSuspended ? ks.blacklistedUntil - now : 0;
+
+        // For perModelLimits providers (gemini), collect per-model suspensions.
+        const modelSuspensions = [];
+        if (p.modelKeyState) {
+          for (const [mKey, mks] of p.modelKeyState) {
+            if (!mKey.startsWith(k + ':')) continue;
+            if (mks.blacklistedUntil > now) {
+              const model = mKey.slice(k.length + 1);
+              modelSuspensions.push({ model, remainMs: mks.blacklistedUntil - now });
+            }
           }
+          modelSuspensions.sort((a, b) => b.remainMs - a.remainMs);
         }
-        if (Object.keys(modelBlocked).length > 0) modelSummary = modelBlocked;
-      }
 
-      return { provider: p.name, total: keyStats.length, active, suspended, avgStrikes, keys: keyStats,
-               ...(modelSummary ? { modelBlocked: modelSummary } : {}) };
-    });
-    log('[key-rotator] diagnostics', JSON.stringify({ ts: new Date().toISOString(), providers: snapshot }));
+        const neverUsed    = !ks.timesUsed;
+        const anyModelSusp = modelSuspensions.length > 0;
+
+        // Status icon:  ✅ active  🔴 globally suspended  ⚠️ active globally but some models blocked
+        const icon = globalSuspended ? '🔴' : anyModelSusp ? '⚠️ ' : '✅';
+
+        let row = `[key-rotator]   ${icon} ${keyMask(k)}`;
+        row += `  strikes:${ks.strikes}/${MAX_STRIKES}`;
+        row += `  used:${ks.timesUsed || 0}`;
+        row += `  inflight:${inflight}`;
+
+        if (inflight > 0)         row += '  ← IN USE';
+        else if (neverUsed)       row += '  (never used)';
+
+        if (globalSuspended) {
+          row += `  SUSPENDED ${formatRemaining(remainMs)}`;
+        }
+
+        if (modelSuspensions.length > 0) {
+          const parts = modelSuspensions.map(m => `${m.model}:${formatRemaining(m.remainMs)}`);
+          row += `  [models blocked: ${parts.join(', ')}]`;
+        }
+
+        return { row, globalSuspended, anyModelSusp, neverUsed, inflight };
+      });
+
+      const total     = keyRows.length;
+      const active    = keyRows.filter(r => !r.globalSuspended).length;
+      const suspended = total - active;
+      const neverUsed = keyRows.filter(r => r.neverUsed).length;
+      const inUse     = keyRows.filter(r => r.inflight > 0).length;
+
+      // ── Provider header ────────────────────────────────────────────────────
+      let header = `[key-rotator] 📦 ${p.name.toUpperCase()}`;
+      header += `  total:${total}  ✅ active:${active}  🔴 suspended:${suspended}`;
+      if (neverUsed) header += `  ⬜ unused:${neverUsed}`;
+      if (inUse)     header += `  🔵 in-use:${inUse}`;
+      lines.push(header);
+
+      for (const { row } of keyRows) lines.push(row);
+    }
+
+    lines.push(`[key-rotator] ${SEP}`);
+    lines.forEach(l => log(l));
+
+    // Also emit machine-readable JSON on debug level for log consumers.
+    if (LOG_LEVEL === 'debug') {
+      const snapshot = providerState.filter(p => p.keys.length).map(p => {
+        const keyStats = p.keys.map(k => {
+          const ks           = p.keyState.get(k) || makeKeyState();
+          const globalActive = ks.blacklistedUntil === 0 || now >= ks.blacklistedUntil;
+          const modelSusp = {};
+          if (p.modelKeyState) {
+            for (const [mKey, mks] of p.modelKeyState) {
+              if (!mKey.startsWith(k + ':')) continue;
+              if (mks.blacklistedUntil > now) {
+                const model = mKey.slice(k.length + 1);
+                modelSusp[model] = Math.round((mks.blacklistedUntil - now) / 1000);
+              }
+            }
+          }
+          return {
+            key: keyMask(k),
+            active: globalActive,
+            strikes: ks.strikes,
+            inFlight: p.inFlight.get(k) || 0,
+            timesUsed: ks.timesUsed || 0,
+            ...(ks.blacklistedUntil > now ? { suspendedForSec: Math.round((ks.blacklistedUntil - now) / 1000) } : {}),
+            ...(Object.keys(modelSusp).length ? { modelSusp } : {}),
+          };
+        });
+        const active    = keyStats.filter(s => s.active).length;
+        const suspended = keyStats.length - active;
+        return { provider: p.name, total: keyStats.length, active, suspended, keys: keyStats };
+      });
+      debug('[key-rotator] diagnostics-json', JSON.stringify({ ts: new Date().toISOString(), providers: snapshot }));
+    }
   }, DIAGNOSTICS_INTERVAL_MS).unref?.();
 }
 
@@ -938,7 +1027,7 @@ function patchHttpModule(mod) {
         // Real-cycle sleep is only available through patchFetch (async path).
         // Log a warning if we would have benefited from it.
         if (key && waitMs > 0)
-          warn(`[key-rotator] ${provider.name}: http: all keys suspended (waitMs=${Math.round(waitMs/1000)}s) — firing best-effort on ...${key.slice(-6)}${model ? ` model=${model}` : ''} (sync path; use fetch for real-cycle)`);
+          warn(`[key-rotator] ${provider.name}: http: all keys suspended (waitMs=${Math.round(waitMs/1000)}s) — firing best-effort on ${keyMask(key)}${model ? ` model=${model}` : ''} (sync path; use fetch for real-cycle)`);
 
         if (key) {
           usedKey = key; usedProvider = provider; usedModel = model;
