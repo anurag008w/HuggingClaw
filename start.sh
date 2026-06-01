@@ -1414,32 +1414,63 @@ if [ -n "${WEBHOOK_URL:-}" ]; then
 fi
 
 # ── Trap SIGTERM for graceful shutdown ──
+stop_background_sync_loop() {
+  [ -n "${SYNC_LOOP_PID:-}" ] || return 0
+
+  if ! kill -0 "$SYNC_LOOP_PID" 2>/dev/null; then
+    SYNC_LOOP_PID=""
+    return 0
+  fi
+
+  kill "$SYNC_LOOP_PID" 2>/dev/null || true
+  # Wait for the Python process to actually exit so its fcntl lock is released.
+  # A fixed short sleep was not enough when the process was inside a HF upload,
+  # which made the following one-shot syncs burn their timeout waiting on the
+  # lock and left sessions/config changes unsaved.
+  for _sync_stop_i in 1 2 3 4 5 6 7 8 9 10; do
+    if ! kill -0 "$SYNC_LOOP_PID" 2>/dev/null; then
+      SYNC_LOOP_PID=""
+      unset _sync_stop_i
+      return 0
+    fi
+    sleep 0.2
+  done
+
+  echo "Warning: workspace sync loop did not stop after SIGTERM; forcing it to release the sync lock."
+  kill -9 "$SYNC_LOOP_PID" 2>/dev/null || true
+  sleep 0.2
+  SYNC_LOOP_PID=""
+  unset _sync_stop_i
+}
+
+run_openclaw_sync_with_timeout() {
+  local timeout_seconds="$1"
+  local command_name="$2"
+  local lock_timeout_seconds="$3"
+  if [ "${timeout_seconds}" = "0" ]; then
+    env SYNC_LOCK_TIMEOUT="$lock_timeout_seconds" \
+      python3 /home/node/app/openclaw-sync.py "$command_name"
+  else
+    timeout --kill-after=10s "${timeout_seconds}s" env SYNC_LOCK_TIMEOUT="$lock_timeout_seconds" \
+      python3 /home/node/app/openclaw-sync.py "$command_name"
+  fi
+}
+
 graceful_shutdown() {
   echo "Shutting down..."
   if [ -f "/home/node/app/openclaw-sync.py" ] && [ -n "${HF_TOKEN:-}" ]; then
     echo "Saving state before exit..."
-    # BUG FIX: kill the background sync loop *before* running the shutdown
-    # syncs.  The loop holds the sync lock while uploading; if it is
-    # mid-upload when sync-once-settled runs, the 8-second timeout fires
-    # before the lock is released and the settled-sync is silently skipped.
-    # Killing the loop first releases the lock immediately (fcntl.flock is
-    # released on process exit) so sync-once-settled can acquire it cleanly.
-    if [ -n "${SYNC_LOOP_PID:-}" ]; then
-      kill "$SYNC_LOOP_PID" 2>/dev/null || true
-      # Give Python a moment to flush and release the lock file.
-      # Reduced from 0.5 s → 0.3 s to reclaim time for the upload.
-      sleep 0.3
-    fi
+    stop_background_sync_loop
     # Pass 1: wait for config to settle then upload — avoids pushing a
-    # half-written JSON config to the dataset.  Timeout raised from 8 s
-    # to 15 s so the 3-second settle window + actual upload both fit
-    # within the budget (old 8 s left only 5 s for the upload itself).
-    timeout 15s python3 /home/node/app/openclaw-sync.py sync-once-settled || \
+    # half-written JSON config to the dataset.  The per-command lock wait is
+    # intentionally shorter than the outer timeout so a stuck lock fails clearly
+    # and leaves time for the final catch-up pass.
+    run_openclaw_sync_with_timeout "${SYNC_SETTLED_TIMEOUT:-120}" sync-once-settled "${SYNC_ONE_SHOT_LOCK_TIMEOUT:-5}" || \
       echo "Warning: could not complete settled shutdown sync"
     # Pass 2: catch any writes that arrived after the settled sync completed.
     # BUG FIX: added timeout (previously unbounded) so HF container kill
     # can't interrupt a hung upload and lose all data silently.
-    timeout 8s python3 /home/node/app/openclaw-sync.py sync-once || \
+    run_openclaw_sync_with_timeout "${SYNC_FINAL_TIMEOUT:-120}" sync-once "${SYNC_ONE_SHOT_LOCK_TIMEOUT:-5}" || \
       echo "Warning: could not complete final shutdown sync"
   elif [ -f "/home/node/app/openclaw-sync.py" ]; then
     echo "HF_TOKEN not set; skipping shutdown backup sync."
@@ -2439,27 +2470,21 @@ sync_before_gateway_restart() {
 
   echo "Gateway stopped; saving latest OpenClaw state before restart..."
   # Kill the background sync loop before syncing — same reason as in
-  # graceful_shutdown: the loop holds the fcntl.flock while uploading;
-  # if it is mid-upload when sync-once-settled runs, the lock contention
-  # will eat into (or exhaust) the 15s timeout budget, silently skipping
-  # the upload.  Killing the loop releases the lock immediately (fcntl.flock
-  # is released on process exit) so sync-once-settled can acquire it cleanly.
-  if [ -n "${SYNC_LOOP_PID:-}" ]; then
-    kill "$SYNC_LOOP_PID" 2>/dev/null || true
-    sleep 0.3
-    SYNC_LOOP_PID=""
-  fi
+  # graceful_shutdown: the loop holds the fcntl.flock while uploading.  Wait for
+  # it to exit (and force-kill as a last resort) before the one-shot syncs so
+  # gateway restarts cannot hang behind a stale lock.
+  stop_background_sync_loop
   # Pass 1: wait for config to settle then upload — avoids pushing a
   # half-written JSON config to the dataset.  Timeout added (was unbounded)
   # so a slow HF upload cannot stall gateway restarts indefinitely.
-  timeout 15s python3 /home/node/app/openclaw-sync.py sync-once-settled || \
+  run_openclaw_sync_with_timeout "${SYNC_SETTLED_TIMEOUT:-120}" sync-once-settled "${SYNC_ONE_SHOT_LOCK_TIMEOUT:-5}" || \
     echo "Warning: could not sync settled state before gateway restart"
   # Pass 2: catch any writes that arrived after the settled sync completed
   # (e.g. session state flushed by OpenClaw just before exit).
   # BUG FIX: this second pass was missing from the restart path (it existed
   # only in graceful_shutdown), so last-second writes were lost on watchdog
   # restarts — causing sessions to disappear after OpenClaw auto-restarts.
-  timeout 8s python3 /home/node/app/openclaw-sync.py sync-once || \
+  run_openclaw_sync_with_timeout "${SYNC_FINAL_TIMEOUT:-120}" sync-once "${SYNC_ONE_SHOT_LOCK_TIMEOUT:-5}" || \
     echo "Warning: could not complete final sync before gateway restart"
 }
 
