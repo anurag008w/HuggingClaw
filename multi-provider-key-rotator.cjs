@@ -108,9 +108,9 @@ const USE_SUSPENDED_KEY_AS_LAST_RESORT = !/^(0|false|no|off)$/i.test(
 
 // Sticky mode keeps one key assigned to the same provider/model bucket until
 // that key is suspended or fails.  Gemini enables it by default because Google
-// quotas are model-scoped; each model starts from the first healthy key and only
-// advances after that key fails for that model, preventing round-robin from
-// burning 2-3 keys for one logical chat turn.
+// quotas are model-scoped. New model buckets are initially balanced through
+// normal round-robin, then stay pinned until their selected key fails for that
+// model, preventing a logical chat turn from burning 2-3 keys.
 const STICKY_UNTIL_FAILURE = !/^(0|false|no|off)$/i.test(
   String(process.env.KEY_STICKY_UNTIL_FAILURE || 'true').trim(),
 );
@@ -1964,16 +1964,46 @@ function patchHttpModule(mod) {
       } catch (_) { /* never break the request */ }
     }
 
-    // Intercept response to track 429/success — pass model for per-model accounting
+    // Intercept response to track provider status.  For ambiguous provider
+    // errors (for example Gemini 403 RESOURCE_EXHAUSTED), sniff the response
+    // body before classification so quota failures stay model-scoped instead
+    // of becoming global auth suspensions.
     if (usedProvider && usedKey) {
       const _emit = req.emit.bind(req);
       let statusHandled = false;
+      const finishStatus = (res, errorInfo) => {
+        if (statusHandled) return;
+        statusHandled = true;
+        const retryAfterMs = parseRetryAfterMs(res?.headers?.['retry-after']);
+        try { endInFlight(usedProvider, usedKey, usedInFlight); } catch (_) {}
+        try { handleStatus(usedProvider, usedKey, res?.statusCode, usedModel, retryAfterMs, errorInfo); } catch (_) {}
+      };
       req.emit = function (event, ...rest) {
         if (event === 'response') {
           const res = rest[0];
-          statusHandled = true;
-          try { endInFlight(usedProvider, usedKey, usedInFlight); } catch (_) {}
-          try { handleStatus(usedProvider, usedKey, res?.statusCode, usedModel); } catch (_) {}
+          if (statusNeedsErrorBodyForScope(res?.statusCode)) {
+            const chunks = [];
+            let total = 0;
+            res.on('data', (chunk) => {
+              if (total >= ERROR_BODY_SNIFF_MAX_BYTES) return;
+              const buf = chunkToBuffer(chunk);
+              if (!buf?.length) return;
+              const remaining = ERROR_BODY_SNIFF_MAX_BYTES - total;
+              const slice = buf.length > remaining ? buf.subarray(0, remaining) : buf;
+              chunks.push(slice);
+              total += slice.length;
+            });
+            const finishWithSniffedBody = () => {
+              const errorInfo = chunks.length
+                ? parseProviderErrorInfo(Buffer.concat(chunks).toString('utf8'))
+                : null;
+              finishStatus(res, errorInfo);
+            };
+            res.on('end', finishWithSniffedBody);
+            res.on('close', finishWithSniffedBody);
+          } else {
+            finishStatus(res, null);
+          }
         }
         return _emit(event, ...rest);
       };
