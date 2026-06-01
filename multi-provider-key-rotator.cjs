@@ -62,13 +62,23 @@ const PERM_SUSPEND_MS = Math.min(
   MAX_PERM_SUSPEND_MS,
   Math.max(60_000, parseInt(process.env.KEY_PERM_SUSPEND_MS || '', 10) || MAX_PERM_SUSPEND_MS),
 );
+const RAW_FETCH_MAX_RETRIES = parseInt(process.env.KEY_FETCH_MAX_RETRIES || '', 10);
+// Default to zero extra upstream attempts so the rotator never "eats" more
+// provider quota than the caller requested. Users can opt in to same-request
+// failover with KEY_FETCH_MAX_RETRIES=1 or 2.
 const FETCH_MAX_RETRIES = Math.max(
   0,
-  Math.min(2, parseInt(process.env.KEY_FETCH_MAX_RETRIES || '', 10) || 2),
+  Math.min(2, Number.isFinite(RAW_FETCH_MAX_RETRIES) ? RAW_FETCH_MAX_RETRIES : 0),
 );
 const FETCH_RETRY_BASE_DELAY_MS = Math.max(
   0,
   Math.min(10_000, parseInt(process.env.KEY_FETCH_RETRY_BASE_DELAY_MS || '', 10) || 250),
+);
+const EMIT_SYNTHETIC_EVENTS = /^(1|true|yes|on)$/i.test(
+  String(process.env.KEY_ROTATOR_EMIT_SYNTHETIC_EVENTS || '').trim(),
+);
+const ASSERT_NO_EXTRA_CALLS = /^(1|true|yes|on)$/i.test(
+  String(process.env.KEY_ROTATOR_ASSERT_NO_EXTRA_CALLS || '').trim(),
 );
 const DIAGNOSTICS_ENABLED = /^(1|true|yes|on)$/i.test(
   String(process.env.KEY_ROTATOR_DIAGNOSTICS || '').trim(),
@@ -245,6 +255,17 @@ function extractModelFromBody(body) {
     const bodyModel = JSON.parse(text)?.model;
     return normalizeModelName(bodyModel);
   } catch { return null; }
+}
+
+function isGeminiOpenAICompatPath(pathOrUrl) {
+  try {
+    const raw = String(pathOrUrl || '');
+    if (!raw) return false;
+    const pathname = raw.startsWith('http://') || raw.startsWith('https://')
+      ? new URL(raw).pathname
+      : new URL(raw, 'https://generativelanguage.googleapis.com').pathname;
+    return /\/v\d+(?:beta|alpha)?\/openai(?:\/|$)/i.test(pathname);
+  } catch { return false; }
 }
 
 /**
@@ -867,17 +888,20 @@ function buildAttemptFetchArgs(input, init, provider, usedKey) {
       : (input && typeof input.url === 'string' ? input.url : null);
     if (rawUrl) {
       const url = new URL(rawUrl);
-      url.searchParams.set('key', usedKey);
+      const openAICompatGemini = isGeminiOpenAICompatPath(rawUrl);
+      if (!openAICompatGemini) url.searchParams.set('key', usedKey);
 
       // BUG FIX: Google's OpenAI-compatible endpoint (/v1beta/openai/...) reads the
       // rotated key from the Authorization: Bearer header, NOT from ?key=.
-      // If the caller already has an Authorization header (OpenClaw's openai-transport
-      // sets Bearer <GEMINI_API_KEY> for every request), replace it with the rotated
-      // key so the pool actually gets used instead of the single env-var key.
+      // Always set Bearer for /openai/... even if the caller omitted auth;
+      // otherwise Gemini ignores ?key= and the rotated pool is never used.
+      // If a Bearer header already exists, replace it with the rotated key.
       const existingAuth = baseHeaders.get
         ? baseHeaders.get('authorization')
         : (baseHeaders['authorization'] || baseHeaders['Authorization'] || '');
-      if (existingAuth && String(existingAuth).toLowerCase().startsWith('bearer ')) {
+      const needsBearerAuth = openAICompatGemini ||
+        (existingAuth && String(existingAuth).toLowerCase().startsWith('bearer '));
+      if (needsBearerAuth) {
         setAuthHeader(baseHeaders, usedKey);
       }
 
@@ -1059,14 +1083,16 @@ function wrapUndiciHandler(handler, provider, key, model) {
       }
       if (prop === 'onComplete') {
         return function (trailers) {
+          const result = target.onComplete ? target.onComplete.call(target, trailers) : undefined;
           settle(() => { try { handleStatus(provider, key, statusCode, model, retryAfterMs); } catch (_) {} });
-          return target.onComplete ? target.onComplete.call(target, trailers) : undefined;
+          return result;
         };
       }
       if (prop === 'onError') {
         return function (err) {
+          const result = target.onError ? target.onError.call(target, err) : undefined;
           settle(() => { try { handleTransportError(provider, key, err); } catch (_) {} });
-          return target.onError ? target.onError.call(target, err) : undefined;
+          return result;
         };
       }
       const v = target[prop];
@@ -1134,17 +1160,19 @@ function patchUndiciDispatch(proto, tag) {
           const newOptions = { ...options };
 
           if (provider.queryParam) {
-            // Gemini REST endpoint: inject key as ?key=<rotated> in path
+            // Gemini native REST endpoint: inject key as ?key=<rotated> in path.
+            // Gemini OpenAI-compatible endpoints use Bearer auth instead, per
+            // Google's compatibility docs, so do not put the key in the URL there.
             try {
               const pu = new URL(pathStr, 'http://d');
-              pu.searchParams.set('key', key);
+              if (!isGeminiOpenAICompatPath(pathStr)) pu.searchParams.set('key', key);
               newOptions.path = pu.pathname + pu.search;
             } catch (_) { /* leave path unchanged on URL parse failure */ }
             // Gemini OpenAI-compat endpoint (/v1beta/openai/…) uses Bearer auth
-            // instead of ?key=.  Replace it so the rotated key is actually used.
+            // instead of ?key=. Set it even if the caller omitted auth.
             const authVal = uGetHeader(options.headers || [], 'authorization');
-            if (String(authVal).toLowerCase().startsWith('bearer ')) {
-              newOptions.headers = uSetHeader(options.headers, 'authorization', `Bearer ${key}`);
+            if (isGeminiOpenAICompatPath(pathStr) || String(authVal).toLowerCase().startsWith('bearer ')) {
+              newOptions.headers = uSetHeader(options.headers || {}, 'authorization', `Bearer ${key}`);
             }
           } else {
             // All other providers: inject / replace Authorization: Bearer
@@ -1290,6 +1318,7 @@ function patchFetch() {
       const triedKeys = new Set();
       let lastErr = null;
       let lastResponse = null;
+      let upstreamAttempts = 0;
 
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         let usedKey = null;
@@ -1333,14 +1362,15 @@ function patchFetch() {
           }
 
           const attemptArgs = buildAttemptFetchArgs(input, init, provider, usedKey);
+          upstreamAttempts += 1;
           const response = await orig(...attemptArgs);
           lastResponse = response;
 
           // Parse Retry-After BEFORE calling handleStatus so the key blacklist
           // is set to the correct duration the server asked for.
           const retryAfterMs = parseRetryAfterMs(response.headers?.get?.('retry-after'));
-          try { handleStatus(provider, usedKey, response.status, model, retryAfterMs); } catch (_) {}
           try { endInFlight(provider, usedKey); } catch (_) {}
+          try { handleStatus(provider, usedKey, response.status, model, retryAfterMs); } catch (_) {}
 
           const shouldRetry = attempt < maxAttempts && classifyRetryableFailure(response.status);
           if (shouldRetry) {
@@ -1357,8 +1387,8 @@ function patchFetch() {
           return response;
         } catch (err) {
           lastErr = err;
-          try { handleTransportError(provider, usedKey, err); } catch (_) {}
           try { endInFlight(provider, usedKey); } catch (_) {}
+          try { handleTransportError(provider, usedKey, err); } catch (_) {}
           // Node.js 18+ undici fetch: network errors are TypeError("fetch failed")
           // where the real code (ECONNRESET, ETIMEDOUT, ENOTFOUND …) is in
           // err.cause.code.  Check that first before falling back to err.code.
@@ -1377,6 +1407,9 @@ function patchFetch() {
         }
       }
 
+      if (ASSERT_NO_EXTRA_CALLS && upstreamAttempts > 1) {
+        warn(`[key-rotator] ${provider.name}: ASSERT_NO_EXTRA_CALLS observed ${upstreamAttempts} upstream attempts for one ${method} request`);
+      }
       if (lastResponse) return lastResponse;
       if (lastErr) throw lastErr;
       return await orig(input, init);
@@ -1424,12 +1457,12 @@ function patchHttpModule(mod) {
                 ? options
                 : `https://${options.hostname}${options.path || '/'}`
             ));
-            u.searchParams.set('key', key);
-            // BUG FIX: Also replace Authorization: Bearer header if present
-            // (Google OpenAI-compatible endpoint uses Bearer, not ?key=).
+            if (!isGeminiOpenAICompatPath(u.pathname)) u.searchParams.set('key', key);
+            // BUG FIX: Google OpenAI-compatible endpoint uses Bearer, not ?key=.
+            // Set it even if the caller omitted Authorization.
             const existingHeaders = (typeof options === 'object' && options.headers) ? options.headers : {};
             const authVal = existingHeaders['authorization'] || existingHeaders['Authorization'] || '';
-            const patchedHeaders = String(authVal).toLowerCase().startsWith('bearer ')
+            const patchedHeaders = (isGeminiOpenAICompatPath(u.pathname) || String(authVal).toLowerCase().startsWith('bearer '))
               ? setAuthHeader(typeof existingHeaders === 'object' ? { ...existingHeaders } : existingHeaders, key)
               : existingHeaders;
             args[0] = typeof options === 'object' && !(options instanceof URL)
@@ -1522,14 +1555,14 @@ function patchHttpModule(mod) {
       req.emit = function (event, ...rest) {
         if (event === 'response') {
           const res = rest[0];
-          try { handleStatus(usedProvider, usedKey, res?.statusCode, usedModel); } catch (_) {}
           try { endInFlight(usedProvider, usedKey); } catch (_) {}
+          try { handleStatus(usedProvider, usedKey, res?.statusCode, usedModel); } catch (_) {}
         }
         return _emit(event, ...rest);
       };
       req.on('error', (err) => {
-        try { handleTransportError(usedProvider, usedKey, err); } catch (_) {}
         try { endInFlight(usedProvider, usedKey); } catch (_) {}
+        try { handleTransportError(usedProvider, usedKey, err); } catch (_) {}
       });
     }
     return req;
@@ -1556,4 +1589,23 @@ if (hasProviderKeys) {
 } else {
   debug('[key-rotator] skipped — no provider keys configured');
   emitEvent('rotator_skipped', null, null, { reason: 'no_provider_keys' });
+}
+
+if (EMIT_SYNTHETIC_EVENTS) {
+  const syntheticProvider = providerState.find(p => p.name === 'synthetic');
+  if (syntheticProvider?.keys?.length) {
+    const { key } = nextKey(syntheticProvider, 'health-check');
+    if (key) {
+      handleStatus(syntheticProvider, key, 204, 'health-check');
+      emitEvent('synthetic_probe', syntheticProvider, key, {
+        model: 'health-check',
+        note: 'Synthetic rotator event only; no upstream provider request was sent.',
+      });
+    }
+  } else {
+    emitEvent('synthetic_probe_skipped', null, null, {
+      provider: 'synthetic',
+      reason: 'SYNTHETIC_API_KEYS not configured',
+    });
+  }
 }

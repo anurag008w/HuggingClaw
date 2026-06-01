@@ -61,7 +61,7 @@ def is_true(value):
 WHATSAPP_ENABLED = is_true(os.environ.get("WHATSAPP_ENABLED", ""))
 
 EXCLUDED_SYNC_DIRS = {
-    "node_modules", ".git", "__pycache__", ".venv", "venv",
+    "node_modules", "__pycache__", ".venv", "venv",
     ".npm", ".cache", ".yarn", "dist", "build", ".next", ".nuxt",
     ".turbo", ".parcel-cache", "target", ".gradle", ".mvn",
 }
@@ -628,19 +628,11 @@ def restore_workspace() -> bool:
             staging.mkdir(parents=True, exist_ok=True)
 
             for child in tmp_path.iterdir():
-                if child.name == ".git":
-                    continue
                 destination = staging / child.name
                 if child.is_dir():
                     shutil.copytree(child, destination)
                 else:
                     shutil.copy2(child, destination)
-
-            # Preserve any .git directory from the live workspace into staging
-            # so git history isn't destroyed by a restore.
-            git_dir = WORKSPACE / ".git"
-            if git_dir.exists() and not (staging / ".git").exists():
-                shutil.copytree(git_dir, staging / ".git")
 
         # Atomic swap: rename current workspace aside, promote staging.
         # Both paths live under WORKSPACE.parent so rename() stays on-filesystem.
@@ -727,7 +719,6 @@ def _sync_once_unlocked(
                 repo_type="dataset",
                 token=HF_TOKEN,
                 commit_message=f"HuggingClaw sync {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
-                ignore_patterns=[".git/*", ".git"],
             )
         skip_prune_prefixes: set[str] = set()
         if had_snapshot_copy_failures:
