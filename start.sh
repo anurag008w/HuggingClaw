@@ -384,33 +384,53 @@ promote_first_pool_key() {
   export "${singular_var}=$first"
 }
 
+normalize_key_aliases() {
+  local canonical_pool_var="$1"
+  local canonical_key_var="$2"
+  shift 2
+  local alias
+  for alias in "$@"; do
+    case "$alias" in
+      *_API_KEYS|*_TOKENS|*_TOKEN_POOL)
+        if [ -z "${!canonical_pool_var:-}" ] && [ -n "${!alias:-}" ]; then
+          export "${canonical_pool_var}=${!alias}"
+        fi
+        ;;
+      *)
+        if [ -z "${!canonical_key_var:-}" ] && [ -n "${!alias:-}" ]; then
+          export "${canonical_key_var}=${!alias}"
+        fi
+        ;;
+    esac
+  done
+}
+
 promote_first_pool_key "ANTHROPIC_API_KEY" "ANTHROPIC_API_KEYS"
 promote_first_pool_key "OPENAI_API_KEY" "OPENAI_API_KEYS"
-# Accept common Google/Gemini aliases used by SDK docs and existing Spaces, then
-# normalize them into GEMINI_* so OpenClaw config and the key rotator agree.
-for _HC_GOOGLE_POOL_ALIAS in GOOGLE_API_KEYS GOOGLE_GENERATIVE_AI_API_KEYS GOOGLE_AI_API_KEYS; do
-  if [ -z "${GEMINI_API_KEYS:-}" ] && [ -n "${!_HC_GOOGLE_POOL_ALIAS:-}" ]; then
-    export GEMINI_API_KEYS="${!_HC_GOOGLE_POOL_ALIAS}"
-  fi
-done
-for _HC_GOOGLE_KEY_ALIAS in GOOGLE_API_KEY GOOGLE_GENERATIVE_AI_API_KEY GOOGLE_AI_API_KEY; do
-  if [ -z "${GEMINI_API_KEY:-}" ] && [ -n "${!_HC_GOOGLE_KEY_ALIAS:-}" ]; then
-    export GEMINI_API_KEY="${!_HC_GOOGLE_KEY_ALIAS}"
-  fi
-done
-unset _HC_GOOGLE_POOL_ALIAS _HC_GOOGLE_KEY_ALIAS
+# Accept common provider aliases used by SDK docs and existing Spaces, then
+# normalize them into canonical envs so OpenClaw config and the key rotator agree.
+normalize_key_aliases "GEMINI_API_KEYS" "GEMINI_API_KEY" \
+  GOOGLE_API_KEYS GOOGLE_GENERATIVE_AI_API_KEYS GOOGLE_AI_API_KEYS GOOGLE_GENAI_API_KEYS \
+  GOOGLE_API_KEY GOOGLE_GENERATIVE_AI_API_KEY GOOGLE_AI_API_KEY GOOGLE_GENAI_API_KEY
 promote_first_pool_key "GEMINI_API_KEY" "GEMINI_API_KEYS"
 promote_first_pool_key "DEEPSEEK_API_KEY" "DEEPSEEK_API_KEYS"
 promote_first_pool_key "OPENROUTER_API_KEY" "OPENROUTER_API_KEYS"
 promote_first_pool_key "KILOCODE_API_KEY" "KILOCODE_API_KEYS"
 promote_first_pool_key "OPENCODE_API_KEY" "OPENCODE_API_KEYS"
+normalize_key_aliases "ZAI_API_KEYS" "ZAI_API_KEY" \
+  ZHIPU_API_KEYS BIGMODEL_API_KEYS ZHIPU_API_KEY BIGMODEL_API_KEY
 promote_first_pool_key "ZAI_API_KEY" "ZAI_API_KEYS"
 promote_first_pool_key "MOONSHOT_API_KEY" "MOONSHOT_API_KEYS"
 promote_first_pool_key "MINIMAX_API_KEY" "MINIMAX_API_KEYS"
 promote_first_pool_key "XIAOMI_API_KEY" "XIAOMI_API_KEYS"
+normalize_key_aliases "VOLCANO_ENGINE_API_KEYS" "VOLCANO_ENGINE_API_KEY" \
+  VOLCENGINE_API_KEYS ARK_API_KEYS VOLCENGINE_API_KEY ARK_API_KEY
 promote_first_pool_key "VOLCANO_ENGINE_API_KEY" "VOLCANO_ENGINE_API_KEYS"
 promote_first_pool_key "BYTEPLUS_API_KEY" "BYTEPLUS_API_KEYS"
 promote_first_pool_key "QIANFAN_API_KEY" "QIANFAN_API_KEYS"
+normalize_key_aliases "MODELSTUDIO_API_KEYS" "MODELSTUDIO_API_KEY" \
+  DASHSCOPE_API_KEYS QWEN_API_KEYS ALIBABA_CLOUD_API_KEYS \
+  DASHSCOPE_API_KEY QWEN_API_KEY ALIBABA_CLOUD_API_KEY
 promote_first_pool_key "MODELSTUDIO_API_KEY" "MODELSTUDIO_API_KEYS"
 promote_first_pool_key "KIMI_API_KEY" "KIMI_API_KEYS"
 promote_first_pool_key "MISTRAL_API_KEY" "MISTRAL_API_KEYS"
@@ -422,7 +442,11 @@ promote_first_pool_key "TOGETHER_API_KEY" "TOGETHER_API_KEYS"
 promote_first_pool_key "CEREBRAS_API_KEY" "CEREBRAS_API_KEYS"
 promote_first_pool_key "VENICE_API_KEY" "VENICE_API_KEYS"
 promote_first_pool_key "SYNTHETIC_API_KEY" "SYNTHETIC_API_KEYS"
+normalize_key_aliases "COPILOT_GITHUB_TOKENS" "COPILOT_GITHUB_TOKEN" \
+  GITHUB_COPILOT_TOKENS GITHUB_COPILOT_API_KEYS GITHUB_COPILOT_TOKEN GITHUB_COPILOT_API_KEY
 promote_first_pool_key "COPILOT_GITHUB_TOKEN" "COPILOT_GITHUB_TOKENS"
+normalize_key_aliases "AI_GATEWAY_API_KEYS" "AI_GATEWAY_API_KEY" \
+  VERCEL_AI_GATEWAY_API_KEYS VERCEL_AI_GATEWAY_API_KEY VERCEL_OIDC_TOKEN
 promote_first_pool_key "AI_GATEWAY_API_KEY" "AI_GATEWAY_API_KEYS"
 
 # kimi-coding uses Moonshot AI endpoint (api.moonshot.cn).
@@ -431,6 +455,9 @@ promote_first_pool_key "AI_GATEWAY_API_KEY" "AI_GATEWAY_API_KEYS"
 if [ -z "${MOONSHOT_API_KEY:-}" ] && [ -n "${KIMI_API_KEY:-}" ]; then
   export MOONSHOT_API_KEY="$KIMI_API_KEY"
 fi
+normalize_key_aliases "HUGGINGFACE_HUB_TOKENS" "HUGGINGFACE_HUB_TOKEN" \
+  HUGGINGFACE_API_KEYS HUGGINGFACE_HUB_API_KEYS HF_TOKEN_POOL \
+  HUGGINGFACE_API_KEY HUGGINGFACE_HUB_API_KEY HF_TOKEN
 promote_first_pool_key "HUGGINGFACE_HUB_TOKEN" "HUGGINGFACE_HUB_TOKENS"
 
 # ── Setup directories ──

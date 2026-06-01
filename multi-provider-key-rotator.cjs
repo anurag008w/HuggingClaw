@@ -89,9 +89,32 @@ const DIAGNOSTICS_INTERVAL_MS = Math.max(
 );
 const EVENT_LOG_FILE = process.env.KEY_ROTATOR_EVENT_LOG_FILE || '/tmp/huggingclaw-key-rotator-events.jsonl';
 const EVENT_LOG_MAX_BYTES = Math.max(64 * 1024, parseInt(process.env.KEY_ROTATOR_EVENT_LOG_MAX_BYTES || '', 10) || 1024 * 1024);
+const INFLIGHT_TTL_MS = Math.max(
+  30_000,
+  Math.min(30 * 60_000, parseInt(process.env.KEY_INFLIGHT_TTL_MS || '', 10) || 5 * 60_000),
+);
+const REQUEST_MODEL_SNIFF_MAX_BYTES = Math.max(
+  16 * 1024,
+  Math.min(1024 * 1024, parseInt(process.env.KEY_MODEL_SNIFF_MAX_BYTES || '', 10) || 256 * 1024),
+);
 
 const USE_SUSPENDED_KEY_AS_LAST_RESORT = !/^(0|false|no|off)$/i.test(
   String(process.env.KEY_USE_SUSPENDED_AS_LAST_RESORT || 'true').trim(),
+);
+
+// Sticky mode keeps one key assigned to the same provider/model bucket until
+// that key is suspended or fails.  Gemini enables it by default because Google
+// quotas are model-scoped; each model starts from the first healthy key and only
+// advances after that key fails for that model, preventing round-robin from
+// burning 2-3 keys for one logical chat turn.
+const STICKY_UNTIL_FAILURE = !/^(0|false|no|off)$/i.test(
+  String(process.env.KEY_STICKY_UNTIL_FAILURE || 'true').trim(),
+);
+const STICKY_PROVIDER_SET = new Set(
+  String(process.env.KEY_STICKY_PROVIDERS || 'gemini')
+    .split(/[,\s]+/)
+    .map(s => s.trim().toLowerCase())
+    .filter(Boolean),
 );
 
 // Maximum ms to respect from a Retry-After header.
@@ -131,8 +154,8 @@ const PROVIDERS = [
   { name:'openai',       hostname:/(?:^|\.)api\.openai\.com$/i,               envPlural:'OPENAI_API_KEYS',           envSingular:'OPENAI_API_KEY' },
   { name:'gemini',       hostname:/(?:^|\.)(?:generativelanguage\.googleapis\.com|aiplatform\.googleapis\.com)$/i,
                                                                                envPlural:'GEMINI_API_KEYS',           envSingular:'GEMINI_API_KEY',  queryParam:true,
-    extraEnvPlural:['GOOGLE_API_KEYS', 'GOOGLE_GENERATIVE_AI_API_KEYS', 'GOOGLE_AI_API_KEYS'],
-    extraEnvSingular:['GOOGLE_API_KEY', 'GOOGLE_GENERATIVE_AI_API_KEY', 'GOOGLE_AI_API_KEY'],
+    extraEnvPlural:['GOOGLE_API_KEYS', 'GOOGLE_GENERATIVE_AI_API_KEYS', 'GOOGLE_AI_API_KEYS', 'GOOGLE_GENAI_API_KEYS'],
+    extraEnvSingular:['GOOGLE_API_KEY', 'GOOGLE_GENERATIVE_AI_API_KEY', 'GOOGLE_AI_API_KEY', 'GOOGLE_GENAI_API_KEY'],
     // Google enforces rate limits per-model per-key (RPM / TPD per model).
     // A 429 on gemini-2.5-pro must NOT blacklist the key for gemini-1.5-flash.
     perModelLimits: true },
@@ -140,7 +163,8 @@ const PROVIDERS = [
   { name:'openrouter',   hostname:/(?:^|\.)openrouter\.ai$/i,                 envPlural:'OPENROUTER_API_KEYS',       envSingular:'OPENROUTER_API_KEY' },
   { name:'kilocode',     hostname:/(?:^|\.)kilocode\.ai$/i,                   envPlural:'KILOCODE_API_KEYS',         envSingular:'KILOCODE_API_KEY' },
   { name:'opencode',     hostname:/(?:^|\.)opencode\.ai$/i,                   envPlural:'OPENCODE_API_KEYS',         envSingular:'OPENCODE_API_KEY' },
-  { name:'zai',          hostname:/(?:^|\.)(?:z\.ai|open\.bigmodel\.cn)$/i,   envPlural:'ZAI_API_KEYS',             envSingular:'ZAI_API_KEY' },
+  { name:'zai',          hostname:/(?:^|\.)(?:z\.ai|open\.bigmodel\.cn)$/i,   envPlural:'ZAI_API_KEYS',             envSingular:'ZAI_API_KEY',
+    extraEnvPlural:['ZHIPU_API_KEYS', 'BIGMODEL_API_KEYS'], extraEnvSingular:['ZHIPU_API_KEY', 'BIGMODEL_API_KEY'] },
   // FIX: kimi-coding aur moonshot ek hi hostname share karte hain (api.moonshot.cn).
   // Purani file mein dono alag entries thi — find() hamesha kimi-coding pick karta tha,
   // MOONSHOT_API_KEYS kabhi use nahi hoti. Ab merged entry: dono pools combine honge.
@@ -149,7 +173,8 @@ const PROVIDERS = [
   { name:'minimax',      hostname:/(?:^|\.)api\.minimax\.chat$/i,             envPlural:'MINIMAX_API_KEYS',          envSingular:'MINIMAX_API_KEY' },
   { name:'xiaomi',       hostname:/(?:^|\.)api\.xiaomi\.com$/i,               envPlural:'XIAOMI_API_KEYS',           envSingular:'XIAOMI_API_KEY' },
   { name:'volcengine',   hostname:/(?:^|\.)(?:ark\.cn-beijing\.volces\.com|volcengineapi\.com)$/i,
-                                                                               envPlural:'VOLCANO_ENGINE_API_KEYS',  envSingular:'VOLCANO_ENGINE_API_KEY' },
+                                                                               envPlural:'VOLCANO_ENGINE_API_KEYS',  envSingular:'VOLCANO_ENGINE_API_KEY',
+    extraEnvPlural:['VOLCENGINE_API_KEYS', 'ARK_API_KEYS'], extraEnvSingular:['VOLCENGINE_API_KEY', 'ARK_API_KEY'] },
   { name:'byteplus',     hostname:/(?:^|\.)maas-api\.ml-platform-cn-beijing\.byteplus\.com$/i,
                                                                                envPlural:'BYTEPLUS_API_KEYS',         envSingular:'BYTEPLUS_API_KEY' },
   { name:'mistral',      hostname:/(?:^|\.)api\.mistral\.ai$/i,               envPlural:'MISTRAL_API_KEYS',          envSingular:'MISTRAL_API_KEY' },
@@ -161,11 +186,19 @@ const PROVIDERS = [
   { name:'together',     hostname:/(?:^|\.)api\.together\.(?:xyz|ai)$/i,      envPlural:'TOGETHER_API_KEYS',         envSingular:'TOGETHER_API_KEY' },
   { name:'cerebras',     hostname:/(?:^|\.)api\.cerebras\.ai$/i,              envPlural:'CEREBRAS_API_KEYS',         envSingular:'CEREBRAS_API_KEY' },
   { name:'huggingface',  hostname:/(?:^|\.)(?:api-inference\.huggingface\.co|router\.huggingface\.co|huggingface\.co)$/i,
-                                                                               envPlural:'HUGGINGFACE_HUB_TOKENS',   envSingular:'HUGGINGFACE_HUB_TOKEN' },
+                                                                               envPlural:'HUGGINGFACE_HUB_TOKENS',   envSingular:'HUGGINGFACE_HUB_TOKEN',
+    extraEnvPlural:['HUGGINGFACE_API_KEYS', 'HUGGINGFACE_HUB_API_KEYS', 'HF_TOKEN_POOL'],
+    extraEnvSingular:['HUGGINGFACE_API_KEY', 'HUGGINGFACE_HUB_API_KEY', 'HF_TOKEN'] },
   { name:'venice',       hostname:/(?:^|\.)api\.venice\.ai$/i,                envPlural:'VENICE_API_KEYS',           envSingular:'VENICE_API_KEY' },
-  { name:'github-copilot',hostname:/(?:^|\.)api\.githubcopilot\.com$/i,       envPlural:'COPILOT_GITHUB_TOKENS',    envSingular:'COPILOT_GITHUB_TOKEN' },
+  { name:'github-copilot',hostname:/(?:^|\.)api\.githubcopilot\.com$/i,       envPlural:'COPILOT_GITHUB_TOKENS',    envSingular:'COPILOT_GITHUB_TOKEN',
+    extraEnvPlural:['GITHUB_COPILOT_TOKENS', 'GITHUB_COPILOT_API_KEYS'],
+    extraEnvSingular:['GITHUB_COPILOT_TOKEN', 'GITHUB_COPILOT_API_KEY'] },
   { name:'qianfan',      hostname:/(?:^|\.)(?:aip|qianfan)\.baidubce\.com$/i, envPlural:'QIANFAN_API_KEYS',         envSingular:'QIANFAN_API_KEY' },
-  { name:'modelstudio',  hostname:/(?:^|\.)dashscope\.aliyuncs\.com$/i,       envPlural:'MODELSTUDIO_API_KEYS',      envSingular:'MODELSTUDIO_API_KEY' },
+  { name:'modelstudio',  hostname:/(?:^|\.)dashscope\.aliyuncs\.com$/i,       envPlural:'MODELSTUDIO_API_KEYS',      envSingular:'MODELSTUDIO_API_KEY',
+    extraEnvPlural:['DASHSCOPE_API_KEYS', 'QWEN_API_KEYS', 'ALIBABA_CLOUD_API_KEYS'],
+    extraEnvSingular:['DASHSCOPE_API_KEY', 'QWEN_API_KEY', 'ALIBABA_CLOUD_API_KEY'] },
+  { name:'vercel-ai-gateway',hostname:/(?:^|\.)ai-gateway\.vercel\.sh$/i,     envPlural:'AI_GATEWAY_API_KEYS',       envSingular:'AI_GATEWAY_API_KEY',
+    extraEnvPlural:['VERCEL_AI_GATEWAY_API_KEYS'], extraEnvSingular:['VERCEL_AI_GATEWAY_API_KEY', 'VERCEL_OIDC_TOKEN'] },
   { name:'synthetic',    hostname:/(?:^|\.)synthetic\.local$/i,               envPlural:'SYNTHETIC_API_KEYS',        envSingular:'SYNTHETIC_API_KEY' },
 ];
 
@@ -245,6 +278,10 @@ function bodyToUtf8String(body) {
   if (Buffer.isBuffer(body)) return body.toString('utf8');
   if (body instanceof Uint8Array) return Buffer.from(body).toString('utf8');
   if (body instanceof ArrayBuffer) return Buffer.from(body).toString('utf8');
+  if (Array.isArray(body)) {
+    const parts = body.map(part => bodyToUtf8String(part));
+    return parts.every(part => part !== null) ? parts.join('') : null;
+  }
   return null;
 }
 
@@ -280,6 +317,43 @@ function getKeyExpiry(p, key, model) {
     if (mks && mks.blacklistedUntil > expiry) expiry = mks.blacklistedUntil;
   }
   return expiry;
+}
+
+function stickyBucket(model) {
+  return model || '__default__';
+}
+
+function isStickyProvider(p) {
+  return !!(STICKY_UNTIL_FAILURE && p && STICKY_PROVIDER_SET.has(String(p.name || '').toLowerCase()));
+}
+
+function rememberStickyKey(p, model, key) {
+  if (!isStickyProvider(p) || !key) return;
+  p.stickyKeys.set(stickyBucket(model), key);
+}
+
+function clearStickyKey(p, key, model) {
+  if (!p?.stickyKeys || !key) return;
+  if (model) {
+    const bucket = stickyBucket(model);
+    if (p.stickyKeys.get(bucket) === key) p.stickyKeys.delete(bucket);
+    // Also clear the ambiguous fallback bucket if this key was selected before
+    // a Gemini OpenAI-compatible request body revealed its model.  Do not clear
+    // other model buckets: Gemini quota failures are model-scoped.
+    const fallbackBucket = stickyBucket(null);
+    if (p.stickyKeys.get(fallbackBucket) === key) p.stickyKeys.delete(fallbackBucket);
+    return;
+  }
+  for (const [bucket, stickyKey] of p.stickyKeys) {
+    if (stickyKey === key) p.stickyKeys.delete(bucket);
+  }
+}
+
+function promoteStickyKeyModel(p, key, fromModel, toModel) {
+  if (!isStickyProvider(p) || !key || !toModel) return;
+  const fromBucket = stickyBucket(fromModel);
+  if (p.stickyKeys.get(fromBucket) === key) p.stickyKeys.delete(fromBucket);
+  rememberStickyKey(p, toModel, key);
 }
 
 const providerState = PROVIDERS.map(p => {
@@ -328,7 +402,7 @@ const providerState = PROVIDERS.map(p => {
   // FIX: idx tracks position in the ACTIVE (non-permanently-removed) pool.
   // We never remove keys from the array — we just skip blacklisted ones.
   // idx advances only when a key is ACTUALLY picked (no drift for skipped keys).
-  return { ...p, keys, keyState, modelKeyState, inFlight: new Map(), idx: 0 };
+  return { ...p, keys, keyState, modelKeyState, inFlight: new Map(), inFlightTimers: new Map(), idx: 0, stickyKeys: new Map() };
 });
 
 // LLM_API_KEY fallback summary
@@ -535,10 +609,33 @@ function shouldRetryMethod(method, hasReplayableBody) {
 function beginInFlight(p, key) {
   if (!p || !key) return;
   p.inFlight.set(key, (p.inFlight.get(key) || 0) + 1);
+  const timer = setTimeout(() => {
+    const timers = p.inFlightTimers?.get(key) || [];
+    const idx = timers.indexOf(timer);
+    if (idx >= 0) timers.splice(idx, 1);
+    if (timers.length) p.inFlightTimers.set(key, timers);
+    else p.inFlightTimers?.delete(key);
+    const before = p.inFlight.get(key) || 0;
+    if (before > 0) {
+      const next = before - 1;
+      if (next === 0) p.inFlight.delete(key);
+      else p.inFlight.set(key, next);
+      emitEvent('inflight_timeout', p, key, { inflightBefore: before, inflightAfter: next, ttlMs: INFLIGHT_TTL_MS });
+    }
+  }, INFLIGHT_TTL_MS);
+  timer.unref?.();
+  const timers = p.inFlightTimers?.get(key) || [];
+  timers.push(timer);
+  p.inFlightTimers?.set(key, timers);
 }
 
 function endInFlight(p, key) {
   if (!p || !key) return;
+  const timers = p.inFlightTimers?.get(key) || [];
+  const timer = timers.shift();
+  if (timer) clearTimeout(timer);
+  if (timers.length) p.inFlightTimers.set(key, timers);
+  else p.inFlightTimers?.delete(key);
   const next = Math.max(0, (p.inFlight.get(key) || 0) - 1);
   if (next === 0) p.inFlight.delete(key);
   else p.inFlight.set(key, next);
@@ -575,16 +672,34 @@ function nextKey(p, model) {
 
   const total = p.keys.length;
 
+  if (isStickyProvider(p)) {
+    const stickyKey = p.stickyKeys.get(stickyBucket(model));
+    if (stickyKey && p.keys.includes(stickyKey) && isActive(p, stickyKey, model)) {
+      const inflight = p.inFlight.get(stickyKey) || 0;
+      if (VERBOSE_PICKS) debug(`[key-rotator] ${p.name}: sticky picked ${keySlot(p, stickyKey)}${keyMask(stickyKey)}${model ? ` model=${model}` : ''} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
+      if (inflight >= MAX_INFLIGHT_PER_KEY) {
+        warn(`[key-rotator] ${p.name}: sticky key saturated, still reusing ${keySlot(p, stickyKey)}${keyMask(stickyKey)}${model ? ` model=${model}` : ''} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY} until it fails/exhausts`);
+        emitEvent('sticky_saturated_reuse', p, stickyKey, { model, inflight: inflight + 1, maxInflight: MAX_INFLIGHT_PER_KEY });
+      } else {
+        emitEvent('sticky_pick', p, stickyKey, { model, inflight: inflight + 1, maxInflight: MAX_INFLIGHT_PER_KEY });
+      }
+      return { key: stickyKey, waitMs: 0 };
+    }
+    if (stickyKey) clearStickyKey(p, stickyKey, model);
+  }
+
   let bestPick = null;
+  const startIdx = isStickyProvider(p) ? 0 : p.idx;
   for (let offset = 0; offset < total; offset++) {
-    const i   = (p.idx + offset) % total;
+    const i   = (startIdx + offset) % total;
     const key = p.keys[i];
     if (isActive(p, key, model)) {
       const inflight = p.inFlight.get(key) || 0;
       if (inflight < MAX_INFLIGHT_PER_KEY) {
         p.idx = (i + 1) % total;   // next call starts AFTER the key we just picked
-        if (VERBOSE_PICKS) debug(`[key-rotator] ${p.name}: picked ${keySlot(p, key)}${keyMask(key)}${model ? ` model=${model}` : ''} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
-        emitEvent('pick', p, key, { model, inflight: inflight + 1, maxInflight: MAX_INFLIGHT_PER_KEY });
+        rememberStickyKey(p, model, key);
+        if (VERBOSE_PICKS) debug(`[key-rotator] ${p.name}: picked ${keySlot(p, key)}${keyMask(key)}${model ? ` model=${model}` : ''}${isStickyProvider(p) ? ' (sticky until failure)' : ''} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
+        emitEvent('pick', p, key, { model, inflight: inflight + 1, maxInflight: MAX_INFLIGHT_PER_KEY, sticky: isStickyProvider(p) });
         return { key, waitMs: 0 };
       }
       if (!bestPick) bestPick = { i, key, inflight, score: Number.POSITIVE_INFINITY };
@@ -603,8 +718,9 @@ function nextKey(p, model) {
 
   if (bestPick) {
     p.idx = (bestPick.i + 1) % total;
+    rememberStickyKey(p, model, bestPick.key);
     warn(`[key-rotator] ${p.name}: all active keys saturated, reusing ${keySlot(p, bestPick.key)}${keyMask(bestPick.key)}${model ? ` model=${model}` : ''} inflight=${bestPick.inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
-    emitEvent('saturated_reuse', p, bestPick.key, { model, inflight: bestPick.inflight + 1, maxInflight: MAX_INFLIGHT_PER_KEY });
+    emitEvent('saturated_reuse', p, bestPick.key, { model, inflight: bestPick.inflight + 1, maxInflight: MAX_INFLIGHT_PER_KEY, sticky: isStickyProvider(p) });
     return { key: bestPick.key, waitMs: 0 };
   }
 
@@ -637,7 +753,8 @@ function nextKey(p, model) {
   else
     warn(`[key-rotator] ${p.name}: all ${total} key(s) suspended — using soonest-recovering key ${keySlot(p, chosenKey)}${keyMask(chosenKey)}`);
 
-  emitEvent('all_suspended_pick', p, chosenKey, { model, waitMs });
+  rememberStickyKey(p, model, chosenKey);
+  emitEvent('all_suspended_pick', p, chosenKey, { model, waitMs, sticky: isStickyProvider(p) });
   return { key: chosenKey, waitMs };
 }
 
@@ -691,6 +808,7 @@ function handleStatus(p, key, status, model, retryAfterMs) {
     ks.strikes = MAX_STRIKES;
     ks.lastFailureAt = Date.now();
     ks.blacklistedUntil = Date.now() + PERM_SUSPEND_MS;
+    clearStickyKey(p, key);
     warn(`[key-rotator] ${p.name}: ${keySlot(p, key)}${keyMask(key)} auth-failed (${status}) — suspended for ${formatHours(PERM_SUSPEND_MS)} h`);
     emitEvent('auth_failed', p, key, { status, suspendMs: PERM_SUSPEND_MS });
     return;
@@ -701,6 +819,7 @@ function handleStatus(p, key, status, model, retryAfterMs) {
     // recordFailure will scope the blacklist to the model when model is provided.
     // Pass retryAfterMs so the key blacklist respects the server's stated wait time.
     recordFailure(p, key, model, retryAfterMs);
+    clearStickyKey(p, key, model);
     warn(`[key-rotator] ${p.name}: quota/rate status=${status} on ${keySlot(p, key)}${keyMask(key)}${model ? ` model=${model}` : ''}${retryAfterMs ? ` retry-after=${Math.round(retryAfterMs/1000)}s` : ''}`);
     emitEvent('rate_limited', p, key, { status, model, retryAfterMs: retryAfterMs || 0 });
     return;
@@ -709,6 +828,7 @@ function handleStatus(p, key, status, model, retryAfterMs) {
   if (classifyRetryableFailure(status)) {
     // Transient server errors are not model-specific — penalise key globally.
     recordTransientFailure(p, key);
+    clearStickyKey(p, key);
     warn(`[key-rotator] ${p.name}: transient status=${status} on ${keySlot(p, key)}${keyMask(key)}`);
     emitEvent('transient_status', p, key, { status, model });
     return;
@@ -733,6 +853,7 @@ function handleTransportError(p, key, err) {
   const retryable = classifyRetryableFailure(undefined, code) || name === 'AbortError';
   if (retryable) {
     recordTransientFailure(p, key);
+    clearStickyKey(p, key);
     warn(`[key-rotator] ${p.name}: retryable network ${name || 'Error'}${code ? ` code=${code}` : ''} on ${keySlot(p, key)}${keyMask(key)}`);
     emitEvent('network_retryable', p, key, { name: name || 'Error', code });
   }
@@ -851,7 +972,18 @@ function startDiagnostics() {
         });
         const active    = keyStats.filter(s => s.active).length;
         const suspended = keyStats.length - active;
-        return { provider: p.name, total: keyStats.length, active, suspended, keys: keyStats };
+        const stickyBuckets = {};
+        if (p.stickyKeys?.size) {
+          for (const [bucket, stickyKey] of p.stickyKeys) stickyBuckets[bucket] = keyMask(stickyKey);
+        }
+        return {
+          provider: p.name,
+          total: keyStats.length,
+          active,
+          suspended,
+          ...(Object.keys(stickyBuckets).length ? { stickyBuckets } : {}),
+          keys: keyStats,
+        };
       });
       debug('[key-rotator] diagnostics-json', JSON.stringify({ ts: new Date().toISOString(), providers: snapshot }));
     }
@@ -874,6 +1006,98 @@ function parseRetryAfterMs(value) {
   const ts = Date.parse(raw);
   if (Number.isFinite(ts)) return Math.min(MAX_RETRY_AFTER_MS, Math.max(0, ts - Date.now()));
   return 0;
+}
+
+function chunkToBuffer(chunk) {
+  if (typeof chunk === 'string') return Buffer.from(chunk, 'utf8');
+  if (Buffer.isBuffer(chunk)) return chunk;
+  if (chunk instanceof Uint8Array) return Buffer.from(chunk);
+  if (chunk instanceof ArrayBuffer) return Buffer.from(chunk);
+  return null;
+}
+
+function createBodyModelSniffer(provider, key, getModel, setModel) {
+  if (!provider?.perModelLimits || !key || typeof setModel !== 'function') return null;
+  let total = 0;
+  const chunks = [];
+  let done = false;
+  const tryDetect = (final = false) => {
+    if (done || getModel?.()) return;
+    if (!chunks.length) return;
+    const text = Buffer.concat(chunks).toString('utf8');
+    const model = extractModelFromBody(text);
+    if (model) {
+      done = true;
+      setModel(model);
+      promoteStickyKeyModel(provider, key, null, model);
+      emitEvent('model_detected', provider, key, { model, source: 'request_body_sniff' });
+    } else if (final || total >= REQUEST_MODEL_SNIFF_MAX_BYTES) {
+      done = true;
+    }
+  };
+  return {
+    push(chunk) {
+      if (done || getModel?.()) return;
+      const buf = chunkToBuffer(chunk);
+      if (!buf) { done = true; return; }
+      if (total < REQUEST_MODEL_SNIFF_MAX_BYTES) {
+        const remain = REQUEST_MODEL_SNIFF_MAX_BYTES - total;
+        chunks.push(buf.length > remain ? buf.subarray(0, remain) : buf);
+        total += Math.min(buf.length, remain);
+        tryDetect(false);
+      } else {
+        done = true;
+      }
+    },
+    final() { tryDetect(true); },
+  };
+}
+
+function wrapBodyForModelSniffing(body, provider, key, getModel, setModel) {
+  if (!body || getModel?.() || !provider?.perModelLimits) return body;
+  const sniffer = createBodyModelSniffer(provider, key, getModel, setModel);
+  if (!sniffer) return body;
+
+  if (typeof body === 'string' || Buffer.isBuffer(body) || body instanceof Uint8Array || body instanceof ArrayBuffer || Array.isArray(body)) {
+    const text = bodyToUtf8String(body);
+    if (text) {
+      const model = extractModelFromBody(text);
+      if (model) {
+        setModel(model);
+        promoteStickyKeyModel(provider, key, null, model);
+        emitEvent('model_detected', provider, key, { model, source: 'request_body' });
+      }
+    }
+    return body;
+  }
+
+  if (typeof body[Symbol.asyncIterator] === 'function') {
+    return (async function* sniffAsyncBody() {
+      try {
+        for await (const chunk of body) {
+          sniffer.push(chunk);
+          yield chunk;
+        }
+      } finally {
+        sniffer.final();
+      }
+    })();
+  }
+
+  if (typeof body[Symbol.iterator] === 'function') {
+    return (function* sniffSyncBody() {
+      try {
+        for (const chunk of body) {
+          sniffer.push(chunk);
+          yield chunk;
+        }
+      } finally {
+        sniffer.final();
+      }
+    })();
+  }
+
+  return body;
 }
 
 function buildAttemptFetchArgs(input, init, provider, usedKey) {
@@ -1069,11 +1293,18 @@ function uSetHeader(headers, name, value) {
  * Uses a Proxy so all undici handler methods forward correctly, including any
  * added in future undici versions (onBodySent, onRequestSent, onUpgrade …).
  */
-function wrapUndiciHandler(handler, provider, key, model) {
+function wrapUndiciHandler(handler, provider, key, getModel) {
   if (!handler || typeof handler !== 'object') return handler;
   let statusCode = 0;
   let retryAfterMs = 0;
   let settled = false;
+  let statusHandled = false;
+  const currentModel = () => (typeof getModel === 'function' ? getModel() : null);
+  const handleHeadersStatus = () => {
+    if (statusHandled || !statusCode) return;
+    statusHandled = true;
+    try { handleStatus(provider, key, statusCode, currentModel(), retryAfterMs); } catch (_) {}
+  };
   const settle = (fn) => {
     if (settled) return;
     settled = true;
@@ -1086,20 +1317,25 @@ function wrapUndiciHandler(handler, provider, key, model) {
         return function (sc, headers, resume, statusMessage) {
           statusCode = sc;
           retryAfterMs = parseRetryAfterMs(uGetHeader(headers, 'retry-after'));
+          // Emit success/rate/auth as soon as response headers arrive. Some
+          // OpenClaw/undici streaming consumers do not reliably reach onComplete
+          // before the dashboard refreshes, which made real usage look like
+          // unscoped picks with zero success/rate events.
+          handleHeadersStatus();
           return target.onHeaders ? target.onHeaders.call(target, sc, headers, resume, statusMessage) : undefined;
         };
       }
       if (prop === 'onComplete') {
         return function (trailers) {
           const result = target.onComplete ? target.onComplete.call(target, trailers) : undefined;
-          settle(() => { try { handleStatus(provider, key, statusCode, model, retryAfterMs); } catch (_) {} });
+          settle(() => { handleHeadersStatus(); });
           return result;
         };
       }
       if (prop === 'onError') {
         return function (err) {
           const result = target.onError ? target.onError.call(target, err) : undefined;
-          settle(() => { try { handleTransportError(provider, key, err); } catch (_) {} });
+          settle(() => { if (!statusHandled) { try { handleTransportError(provider, key, err); } catch (_) {} } });
           return result;
         };
       }
@@ -1187,7 +1423,14 @@ function patchUndiciDispatch(proto, tag) {
             newOptions.headers = uSetHeader(options.headers || {}, 'authorization', `Bearer ${key}`);
           }
 
-          const wrappedHandler = wrapUndiciHandler(handler, usedProvider, usedKey, usedModel);
+          newOptions.body = wrapBodyForModelSniffing(
+            newOptions.body,
+            usedProvider,
+            usedKey,
+            () => usedModel,
+            (model) => { usedModel = model; },
+          );
+          const wrappedHandler = wrapUndiciHandler(handler, usedProvider, usedKey, () => usedModel);
           return origDispatch.call(this, newOptions, wrappedHandler);
         }
       }
@@ -1340,15 +1583,17 @@ function patchFetch() {
           // Instead, scan the pool directly for an untried active key.
           if (key && triedKeys.has(key) && triedKeys.size < provider.keys.length) {
             const total = provider.keys.length;
+            const startIdx = isStickyProvider(provider) ? 0 : provider.idx;
             for (let offset = 0; offset < total; offset++) {
-              const i = (provider.idx + offset) % total;
+              const i = (startIdx + offset) % total;
               const candidate = provider.keys[i];
               if (!triedKeys.has(candidate) && isActive(provider, candidate, model)) {
                 const inflight = provider.inFlight.get(candidate) || 0;
                 if (inflight < MAX_INFLIGHT_PER_KEY) {
                   provider.idx = (i + 1) % total;
                   key = candidate; waitMs = 0;
-                  emitEvent('pick_retry_fresh', provider, key, { model, attempt });
+                  rememberStickyKey(provider, model, key);
+                  emitEvent('pick_retry_fresh', provider, key, { model, attempt, sticky: isStickyProvider(provider) });
                   break;
                 }
               }
@@ -1540,6 +1785,7 @@ function patchHttpModule(mod) {
                   const bodyModel = extractModelFromBody(fullBody);
                   if (bodyModel) {
                     usedModel = bodyModel;
+                    promoteStickyKeyModel(usedProvider, usedKey, null, usedModel);
                     debug(`[key-rotator] ${usedProvider.name}: (http) model extracted from request body: ${usedModel}`);
                   }
                 } catch (_) { /* non-JSON body — leave model null */ }
@@ -1591,11 +1837,15 @@ if (hasProviderKeys) {
   patchUndici();         // covers OpenClaw gateway's bundled undici AI calls
   startDiagnostics();
 
-  debug(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:${formatHours(PERM_SUSPEND_MS)}h (cap 16h) max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} max-retry-after:${MAX_RETRY_AFTER_MS/1000}s max-key-wait:${MAX_KEY_WAIT_MS/1000}s diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'} log-level:${LOG_LEVEL} verbose-picks:${VERBOSE_PICKS ? 'on' : 'off'} suspended-last-resort:${USE_SUSPENDED_KEY_AS_LAST_RESORT ? 'on' : 'off'} per-model-providers:${providerState.filter(p => p.perModelLimits).map(p => p.name).join(',') || 'none'} model-from-body:on`);
+  debug(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:${formatHours(PERM_SUSPEND_MS)}h (cap 16h) max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} max-retry-after:${MAX_RETRY_AFTER_MS/1000}s max-key-wait:${MAX_KEY_WAIT_MS/1000}s diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'} log-level:${LOG_LEVEL} verbose-picks:${VERBOSE_PICKS ? 'on' : 'off'} suspended-last-resort:${USE_SUSPENDED_KEY_AS_LAST_RESORT ? 'on' : 'off'} per-model-providers:${providerState.filter(p => p.perModelLimits).map(p => p.name).join(',') || 'none'} model-from-body:on model-sniff-max:${REQUEST_MODEL_SNIFF_MAX_BYTES} inflight-ttl:${INFLIGHT_TTL_MS}ms sticky-until-failure:${STICKY_UNTIL_FAILURE ? 'on' : 'off'} sticky-providers:${[...STICKY_PROVIDER_SET].join(',') || 'none'}`);
   emitEvent('rotator_loaded', null, null, {
     providers: providerState.filter(p => p.keys.length).map(p => ({ name: p.name, total: p.keys.length })),
     logLevel: LOG_LEVEL,
     verbosePicks: VERBOSE_PICKS,
+    inflightTtlMs: INFLIGHT_TTL_MS,
+    modelSniffMaxBytes: REQUEST_MODEL_SNIFF_MAX_BYTES,
+    stickyUntilFailure: STICKY_UNTIL_FAILURE,
+    stickyProviders: [...STICKY_PROVIDER_SET],
   });
 } else {
   debug('[key-rotator] skipped — no provider keys configured');
