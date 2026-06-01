@@ -97,6 +97,10 @@ const REQUEST_MODEL_SNIFF_MAX_BYTES = Math.max(
   16 * 1024,
   Math.min(1024 * 1024, parseInt(process.env.KEY_MODEL_SNIFF_MAX_BYTES || '', 10) || 256 * 1024),
 );
+const ERROR_BODY_SNIFF_MAX_BYTES = Math.max(
+  4 * 1024,
+  Math.min(256 * 1024, parseInt(process.env.KEY_ERROR_BODY_SNIFF_MAX_BYTES || '', 10) || 64 * 1024),
+);
 
 const USE_SUSPENDED_KEY_AS_LAST_RESORT = !/^(0|false|no|off)$/i.test(
   String(process.env.KEY_USE_SUSPENDED_AS_LAST_RESORT || 'true').trim(),
@@ -292,6 +296,109 @@ function extractModelFromBody(body) {
     const bodyModel = JSON.parse(text)?.model;
     return normalizeModelName(bodyModel);
   } catch { return null; }
+}
+
+function normalizeErrorToken(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function parseProviderErrorInfo(text) {
+  if (!text || typeof text !== 'string') return null;
+  const info = { raw: text.slice(0, ERROR_BODY_SNIFF_MAX_BYTES) };
+  try {
+    const body = JSON.parse(text);
+    const err = body?.error || body;
+    if (err && typeof err === 'object') {
+      info.code = err.code ?? body.code;
+      info.type = err.type ?? body.type;
+      info.status = err.status ?? body.status;
+      info.reason = err.reason ?? body.reason;
+      info.message = err.message ?? body.message;
+      if (!info.reason && Array.isArray(err.errors) && err.errors[0]) info.reason = err.errors[0].reason;
+      if (!info.reason && Array.isArray(err.details)) {
+        const quota = err.details.find(d => d && (d.reason || d.violations || d.quotaMetric));
+        if (quota) info.reason = quota.reason || quota.quotaMetric || 'quota_details';
+      }
+    }
+  } catch (_) {
+    info.message = text.slice(0, 512);
+  }
+  return info;
+}
+
+async function parseResponseErrorInfo(response) {
+  if (!response || response.status < 400 || typeof response.clone !== 'function') return null;
+  try {
+    const clone = response.clone();
+    if (clone.body && typeof clone.body.getReader === 'function') {
+      const reader = clone.body.getReader();
+      const chunks = [];
+      let total = 0;
+      try {
+        while (total < ERROR_BODY_SNIFF_MAX_BYTES) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const buf = Buffer.isBuffer(value)
+            ? value
+            : value instanceof Uint8Array
+              ? Buffer.from(value)
+              : Buffer.from(String(value || ''));
+          if (!buf.length) continue;
+          const remaining = ERROR_BODY_SNIFF_MAX_BYTES - total;
+          const slice = buf.length > remaining ? buf.subarray(0, remaining) : buf;
+          chunks.push(slice);
+          total += slice.length;
+        }
+      } finally {
+        try { await reader.cancel(); } catch (_) {}
+      }
+      return parseProviderErrorInfo(Buffer.concat(chunks).toString('utf8'));
+    }
+    const text = await clone.text();
+    return parseProviderErrorInfo(text.slice(0, ERROR_BODY_SNIFF_MAX_BYTES));
+  } catch (_) {
+    return null;
+  }
+}
+
+function providerErrorFields(errorInfo) {
+  if (!errorInfo) return {};
+  return {
+    ...(errorInfo.code !== undefined ? { errorCode: String(errorInfo.code) } : {}),
+    ...(errorInfo.type ? { errorType: String(errorInfo.type) } : {}),
+    ...(errorInfo.status ? { errorStatus: String(errorInfo.status) } : {}),
+    ...(errorInfo.reason ? { errorReason: String(errorInfo.reason) } : {}),
+  };
+}
+
+function statusNeedsErrorBodyForScope(status) {
+  return status === 400 || status === 403 || status === 409 || status === 413 || status === 423 || status === 425 || status === 529;
+}
+
+function classifyProviderFailure(p, status, errorInfo) {
+  const haystack = [
+    errorInfo?.code,
+    errorInfo?.type,
+    errorInfo?.status,
+    errorInfo?.reason,
+    errorInfo?.message,
+  ].map(normalizeErrorToken).join(' ');
+
+  const looksRateOrQuota = /rate.?limit|too.?many|quota|resource.?exhaust|usage.?limit|insufficient.?quota|capacity.?exceeded|tokens?.?per|requests?.?per|rate_limit|rate.?limited|userratelimit|dailylimit|limitexceeded/.test(haystack);
+  const looksAuth = /auth|unauthori[sz]ed|invalid.?api.?key|invalid.?key|permission|forbidden|billing|credit|payment|required/.test(haystack);
+  const looksTransient = /overload|temporar|unavailable|timeout|backend|internal|server.?error|try.?again|capacity/.test(haystack);
+
+  if (status === 401) return 'auth';
+  if (status === 402) return 'rate';
+  if (status === 429) return 'rate';
+  // Google/Vertex and some Google APIs can return 403 for quota/rate conditions
+  // (rateLimitExceeded / QUOTA_EXCEEDED), while plain 403 remains auth/permission.
+  if (status === 403) return looksRateOrQuota ? 'rate' : 'auth';
+  if (looksRateOrQuota && (status === 400 || status === 409 || status === 413 || status === 423 || status === 425 || status === 529)) return 'rate';
+  if (looksTransient) return 'transient';
+  if (classifyRetryableFailure(status)) return 'transient';
+  if (looksAuth && status >= 400 && status < 500) return 'auth';
+  return 'other';
 }
 
 function isGeminiOpenAICompatPath(pathOrUrl) {
@@ -817,10 +924,13 @@ function setAuthHeader(headers, key) {
   return { authorization: val };
 }
 
-function handleStatus(p, key, status, model, retryAfterMs) {
+function handleStatus(p, key, status, model, retryAfterMs, errorInfo) {
   if (!p || !key) return;
-  if (status === 401 || status === 403) {
-    // Invalid/expired key — always a global (not model-scoped) blacklist.
+  const failureKind = classifyProviderFailure(p, status, errorInfo);
+  const errorFields = providerErrorFields(errorInfo);
+
+  if (failureKind === 'auth') {
+    // Invalid/expired/unauthorized key — always a global (not model-scoped) blacklist.
     let ks = p.keyState.get(key);
     if (!ks) { ks = makeKeyState(); p.keyState.set(key, ks); }
     ks.strikes = MAX_STRIKES;
@@ -828,27 +938,28 @@ function handleStatus(p, key, status, model, retryAfterMs) {
     ks.blacklistedUntil = Date.now() + PERM_SUSPEND_MS;
     clearStickyKey(p, key);
     warn(`[key-rotator] ${p.name}: ${keySlot(p, key)}${keyMask(key)} auth-failed (${status}) — suspended for ${formatHours(PERM_SUSPEND_MS)} h`);
-    emitEvent('auth_failed', p, key, { status, suspendMs: PERM_SUSPEND_MS });
+    emitEvent('auth_failed', p, key, { status, suspendMs: PERM_SUSPEND_MS, ...errorFields });
     return;
   }
 
-  if (status === 429 || status === 402) {
+  if (failureKind === 'rate') {
     // For perModelLimits providers (gemini): quota is per (key, model).
     // recordFailure will scope the blacklist to the model when model is provided.
     // Pass retryAfterMs so the key blacklist respects the server's stated wait time.
     recordFailure(p, key, model, retryAfterMs);
     clearStickyKey(p, key, model);
-    warn(`[key-rotator] ${p.name}: quota/rate status=${status} on ${keySlot(p, key)}${keyMask(key)}${model ? ` model=${model}` : ''}${retryAfterMs ? ` retry-after=${Math.round(retryAfterMs/1000)}s` : ''}`);
-    emitEvent('rate_limited', p, key, { status, model, retryAfterMs: retryAfterMs || 0 });
+    const reason = errorFields.errorReason || errorFields.errorStatus || errorFields.errorType || errorFields.errorCode;
+    warn(`[key-rotator] ${p.name}: quota/rate status=${status}${reason ? ` reason=${reason}` : ''} on ${keySlot(p, key)}${keyMask(key)}${model ? ` model=${model}` : ''}${retryAfterMs ? ` retry-after=${Math.round(retryAfterMs/1000)}s` : ''}`);
+    emitEvent('rate_limited', p, key, { status, model, retryAfterMs: retryAfterMs || 0, ...errorFields });
     return;
   }
 
-  if (classifyRetryableFailure(status)) {
+  if (failureKind === 'transient') {
     // Transient server errors are not model-specific — penalise key globally.
     recordTransientFailure(p, key);
     clearStickyKey(p, key);
     warn(`[key-rotator] ${p.name}: transient status=${status} on ${keySlot(p, key)}${keyMask(key)}`);
-    emitEvent('transient_status', p, key, { status, model });
+    emitEvent('transient_status', p, key, { status, model, ...errorFields });
     return;
   }
 
@@ -1317,11 +1428,32 @@ function wrapUndiciHandler(handler, provider, key, inFlightToken, getModel) {
   let retryAfterMs = 0;
   let settled = false;
   let statusHandled = false;
+  let errorBytes = 0;
+  const errorChunks = [];
   const currentModel = () => (typeof getModel === 'function' ? getModel() : null);
-  const handleHeadersStatus = () => {
+  const collectErrorBody = (chunk) => {
+    if (!statusNeedsErrorBodyForScope(statusCode) || errorBytes >= ERROR_BODY_SNIFF_MAX_BYTES) return;
+    try {
+      const buf = chunkToBuffer(chunk);
+      if (!buf?.length) return;
+      const remaining = ERROR_BODY_SNIFF_MAX_BYTES - errorBytes;
+      const slice = buf.length > remaining ? buf.subarray(0, remaining) : buf;
+      errorChunks.push(slice);
+      errorBytes += slice.length;
+    } catch (_) {}
+  };
+  const currentErrorInfo = () => {
+    if (!errorChunks.length) return null;
+    try { return parseProviderErrorInfo(Buffer.concat(errorChunks).toString('utf8')); } catch (_) { return null; }
+  };
+  const handleHeadersStatus = (force = false) => {
     if (statusHandled || !statusCode) return;
+    // Success is emitted immediately for observability. Ambiguous 4xx provider
+    // errors (notably Gemini/Google 403 quota) wait until onComplete so their
+    // JSON error body can decide model-scoped quota vs global auth suspension.
+    if (!force && statusNeedsErrorBodyForScope(statusCode)) return;
     statusHandled = true;
-    try { handleStatus(provider, key, statusCode, currentModel(), retryAfterMs); } catch (_) {}
+    try { handleStatus(provider, key, statusCode, currentModel(), retryAfterMs, currentErrorInfo()); } catch (_) {}
   };
   const settle = (fn) => {
     if (settled) return;
@@ -1335,18 +1467,20 @@ function wrapUndiciHandler(handler, provider, key, inFlightToken, getModel) {
         return function (sc, headers, resume, statusMessage) {
           statusCode = sc;
           retryAfterMs = parseRetryAfterMs(uGetHeader(headers, 'retry-after'));
-          // Emit success/rate/auth as soon as response headers arrive. Some
-          // OpenClaw/undici streaming consumers do not reliably reach onComplete
-          // before the dashboard refreshes, which made real usage look like
-          // unscoped picks with zero success/rate events.
           handleHeadersStatus();
           return target.onHeaders ? target.onHeaders.call(target, sc, headers, resume, statusMessage) : undefined;
+        };
+      }
+      if (prop === 'onData') {
+        return function (chunk) {
+          collectErrorBody(chunk);
+          return target.onData ? target.onData.call(target, chunk) : undefined;
         };
       }
       if (prop === 'onComplete') {
         return function (trailers) {
           const result = target.onComplete ? target.onComplete.call(target, trailers) : undefined;
-          settle(() => { handleHeadersStatus(); });
+          settle(() => { handleHeadersStatus(true); });
           return result;
         };
       }
@@ -1643,8 +1777,9 @@ function patchFetch() {
           // Parse Retry-After BEFORE calling handleStatus so the key blacklist
           // is set to the correct duration the server asked for.
           const retryAfterMs = parseRetryAfterMs(response.headers?.get?.('retry-after'));
+          const errorInfo = await parseResponseErrorInfo(response);
           try { endInFlight(provider, usedKey, usedInFlight); } catch (_) {}
-          try { handleStatus(provider, usedKey, response.status, model, retryAfterMs); } catch (_) {}
+          try { handleStatus(provider, usedKey, response.status, model, retryAfterMs, errorInfo); } catch (_) {}
 
           const shouldRetry = attempt < maxAttempts && classifyRetryableFailure(response.status);
           if (shouldRetry) {
@@ -1861,13 +1996,14 @@ if (hasProviderKeys) {
   patchUndici();         // covers OpenClaw gateway's bundled undici AI calls
   startDiagnostics();
 
-  debug(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:${formatHours(PERM_SUSPEND_MS)}h (cap 16h) max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} max-retry-after:${MAX_RETRY_AFTER_MS/1000}s max-key-wait:${MAX_KEY_WAIT_MS/1000}s diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'} log-level:${LOG_LEVEL} verbose-picks:${VERBOSE_PICKS ? 'on' : 'off'} suspended-last-resort:${USE_SUSPENDED_KEY_AS_LAST_RESORT ? 'on' : 'off'} per-model-providers:${providerState.filter(p => p.perModelLimits).map(p => p.name).join(',') || 'none'} model-from-body:on model-sniff-max:${REQUEST_MODEL_SNIFF_MAX_BYTES} inflight-ttl:${INFLIGHT_TTL_MS}ms sticky-until-failure:${STICKY_UNTIL_FAILURE ? 'on' : 'off'} sticky-providers:${[...STICKY_PROVIDER_SET].join(',') || 'none'}`);
+  debug(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:${formatHours(PERM_SUSPEND_MS)}h (cap 16h) max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} max-retry-after:${MAX_RETRY_AFTER_MS/1000}s max-key-wait:${MAX_KEY_WAIT_MS/1000}s diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'} log-level:${LOG_LEVEL} verbose-picks:${VERBOSE_PICKS ? 'on' : 'off'} suspended-last-resort:${USE_SUSPENDED_KEY_AS_LAST_RESORT ? 'on' : 'off'} per-model-providers:${providerState.filter(p => p.perModelLimits).map(p => p.name).join(',') || 'none'} model-from-body:on model-sniff-max:${REQUEST_MODEL_SNIFF_MAX_BYTES} error-sniff-max:${ERROR_BODY_SNIFF_MAX_BYTES} inflight-ttl:${INFLIGHT_TTL_MS}ms sticky-until-failure:${STICKY_UNTIL_FAILURE ? 'on' : 'off'} sticky-providers:${[...STICKY_PROVIDER_SET].join(',') || 'none'}`);
   emitEvent('rotator_loaded', null, null, {
     providers: providerState.filter(p => p.keys.length).map(p => ({ name: p.name, total: p.keys.length })),
     logLevel: LOG_LEVEL,
     verbosePicks: VERBOSE_PICKS,
     inflightTtlMs: INFLIGHT_TTL_MS,
     modelSniffMaxBytes: REQUEST_MODEL_SNIFF_MAX_BYTES,
+    errorBodySniffMaxBytes: ERROR_BODY_SNIFF_MAX_BYTES,
     stickyUntilFailure: STICKY_UNTIL_FAILURE,
     stickyProviders: [...STICKY_PROVIDER_SET],
   });

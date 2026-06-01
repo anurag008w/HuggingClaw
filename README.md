@@ -292,6 +292,7 @@ Optional tuning:
 - `KEY_MAX_INFLIGHT_PER_KEY` (default `3`) — soft concurrent request cap per key.
 - `KEY_INFLIGHT_TTL_MS` (default `300000`) — safety lease for in-flight counters, preventing stale undici streams from making keys look permanently saturated.
 - `KEY_MODEL_SNIFF_MAX_BYTES` (default `262144`) — max request-body bytes to inspect for model names on streaming OpenAI-compatible Gemini calls.
+- `KEY_ERROR_BODY_SNIFF_MAX_BYTES` (default `65536`) — max error-response bytes to inspect so provider quota/rate bodies such as 403 quota errors are scoped correctly instead of being treated as permanent auth failures.
 - `KEY_STICKY_UNTIL_FAILURE` (default `true`) — keep sticky providers on one key until that key fails/exhausts.
 - `KEY_STICKY_PROVIDERS` (default `gemini`) — comma-separated provider names that should use sticky key selection instead of per-request round-robin.
 - `KEY_FETCH_MAX_RETRIES` (default `0`) — optional auto-retry count for retryable failures on **GET/HEAD/OPTIONS/POST** with a different key. Default `0` means the rotator does **not** spend extra upstream attempts for a single caller request.

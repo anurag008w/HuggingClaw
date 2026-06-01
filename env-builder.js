@@ -619,6 +619,16 @@ const FIELDS = [
 {
     "g": "Plugins",
     "icon": "🔄",
+    "k": "KEY_ERROR_BODY_SNIFF_MAX_BYTES",
+    "lbl": "Provider error sniff max bytes",
+    "type": "text",
+    "ph": "65536",
+    "tag": "advanced",
+    "help": "Maximum error-response bytes inspected to distinguish quota/rate failures from auth failures. Default: 64 KiB."
+  },
+{
+    "g": "Plugins",
+    "icon": "🔄",
     "k": "KEY_STICKY_UNTIL_FAILURE",
     "lbl": "Sticky key mode — keep selected providers on one key until failure/quota exhaustion",
     "type": "toggle",
