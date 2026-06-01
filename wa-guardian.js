@@ -130,29 +130,49 @@ async function callRpc(ws, method, params, timeoutMs) {
   const ms = timeoutMs !== undefined ? timeoutMs : 10000; // default 10s for normal calls
   return new Promise((resolve, reject) => {
     const id = randomUUID();
-    const handler = (data) => {
+
+    let settled = false;
+    const cleanup = () => {
+      ws.removeListener("message", onMessage);
+      ws.removeListener("close", onClose);
+      clearTimeout(timer);
+    };
+    const finishResolve = (value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(value);
+    };
+    const finishReject = (error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+
+    const onClose = () => finishReject(new Error("RPC connection closed"));
+    const onMessage = (data) => {
       let msg;
       try { msg = JSON.parse(data.toString()); } catch { return; }
-      if (msg.id === id) {
-        ws.removeListener("message", handler);
-        if (msg.ok === false) {
-          reject(new Error(extractErrorMessage(msg)));
-          return;
-        }
-        resolve(msg);
-      }
+      if (msg.id !== id) return;
+      if (msg.ok === false) return finishReject(new Error(extractErrorMessage(msg)));
+      return finishResolve(msg);
     };
-    ws.on("message", handler);
+
+    ws.on("message", onMessage);
+    ws.once("close", onClose);
+
+    const timer = setTimeout(() => finishReject(new Error("RPC Timeout")), ms);
+    timer.unref?.();
+
     try {
       ws.send(JSON.stringify({ type: "req", id, method, params }));
     } catch (sendErr) {
-      ws.removeListener("message", handler);
-      reject(sendErr);
-      return;
+      finishReject(sendErr);
     }
-    setTimeout(() => { ws.removeListener("message", handler); reject(new Error("RPC Timeout")); }, ms);
   });
 }
+
 
 async function checkStatus() {
   if (shouldStop) return;
