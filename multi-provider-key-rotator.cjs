@@ -21,6 +21,7 @@ const http  = require('node:http');
 const https = require('node:https');
 const fs    = require('node:fs');
 const path  = require('node:path');
+const { AsyncLocalStorage } = require('node:async_hooks');
 
 const VERBOSE_PICKS = /^(1|true|yes|on)$/i.test(String(process.env.KEY_ROTATOR_VERBOSE_PICKS || '').trim());
 const RAW_LOG_LEVEL = String(process.env.KEY_ROTATOR_LOG_LEVEL || '').trim().toLowerCase();
@@ -34,6 +35,16 @@ const LOG_LEVEL = RAW_LOG_LEVEL || (
 const log  = (...a) => { if (LOG_LEVEL !== 'silent') console.error(...a); };
 const warn = (...a) => { if (LOG_LEVEL !== 'silent') console.warn(...a); };
 const debug = (...a) => { if (LOG_LEVEL === 'debug') console.error(...a); };
+
+// Prevent one logical request from being rotated multiple times when transports
+// are stacked (global fetch → undici dispatch → node:http, or nested undici
+// Agent/Pool/Client dispatches). The outermost patched layer injects the key and
+// records the result; inner patched layers must pass through without another
+// nextKey()/beginInFlight()/handler wrapper, otherwise one API call can burn 2-3
+// keys and inflate the dashboard.
+const rotatorRequestContext = new AsyncLocalStorage();
+const isInRotatorRequest = () => !!rotatorRequestContext.getStore()?.active;
+const runInRotatorRequest = (fn) => rotatorRequestContext.run({ active: true }, fn);
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -1482,16 +1493,25 @@ function wrapUndiciHandler(handler, provider, key, inFlightToken, getModel) {
       }
       if (prop === 'onComplete') {
         return function (trailers) {
-          const result = target.onComplete ? target.onComplete.call(target, trailers) : undefined;
-          settle(() => { handleHeadersStatus(true); });
-          return result;
+          try {
+            return target.onComplete ? target.onComplete.call(target, trailers) : undefined;
+          } finally {
+            // Always close out rotator accounting even if the caller's undici
+            // handler throws while consuming completion. Otherwise a successful
+            // upstream response can leak in-flight state and never emit success.
+            settle(() => { handleHeadersStatus(true); });
+          }
         };
       }
       if (prop === 'onError') {
         return function (err) {
-          const result = target.onError ? target.onError.call(target, err) : undefined;
-          settle(() => { if (!statusHandled) { try { handleTransportError(provider, key, err); } catch (_) {} } });
-          return result;
+          try {
+            return target.onError ? target.onError.call(target, err) : undefined;
+          } finally {
+            // User handlers may throw/rethrow; the rotator still owns the
+            // in-flight token and transport error classification for this key.
+            settle(() => { if (!statusHandled) { try { handleTransportError(provider, key, err); } catch (_) {} } });
+          }
         };
       }
       const v = target[prop];
@@ -1512,6 +1532,8 @@ function patchUndiciDispatch(proto, tag) {
   const origDispatch = proto.dispatch;
 
   proto.dispatch = function rotatorDispatch(options, handler) {
+    if (isInRotatorRequest()) return origDispatch.call(this, options, handler);
+
     let usedKey = null, usedProvider = null, usedModel = null, usedInFlight = null;
     try {
       // Read origin BEFORE cloudflare-proxy's dispatch wrapper rewrites it.
@@ -1586,7 +1608,7 @@ function patchUndiciDispatch(proto, tag) {
             (model) => { usedModel = model; },
           );
           const wrappedHandler = wrapUndiciHandler(handler, usedProvider, usedKey, usedInFlight, () => usedModel);
-          return origDispatch.call(this, newOptions, wrappedHandler);
+          return runInRotatorRequest(() => origDispatch.call(this, newOptions, wrappedHandler));
         }
       }
     } catch (err) {
@@ -1670,6 +1692,7 @@ function patchFetch() {
   const orig = globalThis.fetch.bind(globalThis);
 
   globalThis.fetch = async function patchedFetch(input, init = {}) {
+    if (isInRotatorRequest()) return await orig(input, init);
     const urlLike = typeof input === 'string' || input instanceof URL
       ? input
       : (input && typeof input.url === 'string' ? input.url : null);
@@ -1774,7 +1797,7 @@ function patchFetch() {
 
           const attemptArgs = buildAttemptFetchArgs(input, init, provider, usedKey);
           upstreamAttempts += 1;
-          const response = await orig(...attemptArgs);
+          const response = await runInRotatorRequest(() => orig(...attemptArgs));
           lastResponse = response;
 
           // Parse Retry-After BEFORE calling handleStatus so the key blacklist
@@ -1824,7 +1847,7 @@ function patchFetch() {
       }
       if (lastResponse) return lastResponse;
       if (lastErr) throw lastErr;
-      return await orig(input, init);
+      return await runInRotatorRequest(() => orig(input, init));
     } catch (err) {
       warn(`[key-rotator] ${provider.name}: fetch patch error:`, err?.message || err);
       throw err;
@@ -1838,6 +1861,8 @@ function patchHttpModule(mod) {
   const orig = mod.request;
 
   mod.request = function patchedRequest(...args) {
+    if (isInRotatorRequest()) return orig.apply(mod, args);
+
     let usedKey = null, usedProvider = null, usedModel = null, usedInFlight = null;
 
     try {
@@ -1907,7 +1932,7 @@ function patchHttpModule(mod) {
       }
     } catch (err) { warn('[key-rotator] http patch error:', err?.message || err); }
 
-    const req = orig.apply(mod, args);
+    const req = runInRotatorRequest(() => orig.apply(mod, args));
 
     // ── Gemini: normalise thought parts / thought_signature before sending ───
     // patchFetch handles globalThis.fetch callers.  SDKs that use node:http
