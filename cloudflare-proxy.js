@@ -452,10 +452,24 @@ if (PROXY_URL) {
       }
     };
 
+    // FIX: WeakSet guard — each unique exports object is patched at most once.
+    // Without this, the require hook fires on every cached require("undici") call
+    // and re-calls patchUndiciInstance. The _patched flag stops re-wrapping within
+    // one call, but the overhead was O(n_requires) per process boot. More critically,
+    // this was the other half of the mutual re-wrapping cycle with
+    // multi-provider-key-rotator (which uses _kRotatorPatched instead of _patched).
+    const _cfProxySeen = new WeakSet();
+    function patchUndiciOnce(exp) {
+      if (!exp || typeof exp !== "object") return;
+      if (_cfProxySeen.has(exp)) return;
+      _cfProxySeen.add(exp);
+      patchUndiciInstance(exp);
+    }
+
     // Try to require undici immediately
     try {
       const undici = require("undici");
-      patchUndiciInstance(undici);
+      patchUndiciOnce(undici);
     } catch (e) {}
 
     // Hook require() to patch any undici instance the moment it loads.
@@ -469,7 +483,7 @@ if (PROXY_URL) {
     Module.prototype.require = function (id) {
       const exports = originalRequire.apply(this, arguments);
       if (id === "undici" || UNDICI_PATH_RE.test(id)) {
-        try { patchUndiciInstance(exports); } catch (e) {}
+        try { patchUndiciOnce(exports); } catch (e) {}
       }
       return exports;
     };

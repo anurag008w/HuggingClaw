@@ -1059,6 +1059,13 @@ function patchUndiciDispatch(proto, tag) {
   };
 
   proto.dispatch._kRotatorPatched = true;
+  // FIX: Also set cloudflare-proxy's flag on rotatorDispatch so CF proxy doesn't
+  // re-wrap us on the next require() hook fire.  Without this, CF proxy sees
+  // _patched=undefined on rotatorDispatch → wraps again → rotator sees
+  // _kRotatorPatched=undefined on the new cfDispatch → wraps again → infinite
+  // mutual re-wrapping that produces hundreds of "dispatch patched" log entries
+  // on startup and builds an ever-growing call chain on every undici require.
+  proto.dispatch._patched = true;
   debug(`[key-rotator] undici (${tag}) dispatch patched`);
 }
 
@@ -1082,8 +1089,24 @@ function patchUndiciInstance(exports) {
 }
 
 function patchUndici() {
+  // FIX: WeakSet guard — track which exports objects we've already processed so
+  // that cached require() calls (Node returns the *same* object from cache) never
+  // trigger a second patch round.  This is the root-cause fix for the log spam:
+  // both cloudflare-proxy (_patched) and the rotator (_kRotatorPatched) use
+  // *different* flags on the dispatch function, so each hook sees the other's
+  // flag as missing and wraps again.  Without _seen, every call to
+  // patchUndiciInstance on a cached exports object produces a new wrapper layer
+  // and another "dispatch patched" log line — hundreds of them on startup.
+  const _seen = new WeakSet();
+  function patchOnce(exp) {
+    if (!exp || typeof exp !== 'object') return;
+    if (_seen.has(exp)) return;
+    _seen.add(exp);
+    patchUndiciInstance(exp);
+  }
+
   // 1. Patch any undici already in the module cache (e.g. Node's built-in)
-  try { patchUndiciInstance(require('undici')); } catch (_) {}
+  try { patchOnce(require('undici')); } catch (_) {}
 
   // 2. Hook require() to patch undici instances that load later, including
   //    OpenClaw's bundled copy deep inside node_modules.
@@ -1095,7 +1118,7 @@ function patchUndici() {
   Module.prototype.require = function kRotatorUndiciHook(id) {
     const exp = _prevRequire.apply(this, arguments);
     if (id === 'undici' || UNDICI_PATH_RE.test(id)) {
-      try { patchUndiciInstance(exp); } catch (_) {}
+      try { patchOnce(exp); } catch (_) {}
     }
     return exp;
   };
