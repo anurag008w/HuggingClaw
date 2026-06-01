@@ -461,7 +461,7 @@ if (PROXY_URL) {
     // and re-calls patchUndiciInstance. The _patched flag stops re-wrapping within
     // one call, but the overhead was O(n_requires) per process boot. More critically,
     // this was the other half of the mutual re-wrapping cycle with
-    // multi-provider-key-rotator (which uses _kRotatorPatched instead of _patched).
+    // provider key rotator (which uses _kRotatorPatched instead of _patched).
     const _cfProxySeen = new WeakSet();
     function patchUndiciOnce(exp) {
       if (!exp || typeof exp !== "object") return;
