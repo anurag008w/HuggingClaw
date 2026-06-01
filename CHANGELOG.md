@@ -19,7 +19,7 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
-- **NVIDIA key-rotation support** — added `nvidia-key-rotator.cjs` wiring and startup integration so deployments can rotate NVIDIA credentials similarly to other provider key-rotation flows.
+- **Multi-provider key-rotation support** — added `multi-provider-key-rotator.cjs` wiring and startup integration so deployments can rotate NVIDIA and other provider credentials through one shared rotator.
 - **Cloudflare keep-alive automation** — added/expanded `cloudflare-keepalive-setup.py` flow and startup wiring to provision keep-alive through Cloudflare Worker automation instead of the older UptimeRobot-first approach.
 - **Sync metadata marker model** — introduced a structured workspace marker `(file_count, total_size, newest_mtime, metadata_hash)` to support stronger change introspection in sync code.
 

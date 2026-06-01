@@ -86,6 +86,8 @@ BACKUP_DATASET_NAME="$(trim_var "${BACKUP_DATASET_NAME:-${BACKUP_DATASET:-huggin
 SPACE_AUTHOR_NAME="$(trim_var "${SPACE_AUTHOR_NAME:-}")"
 SPACE_HOST="$(trim_var "${SPACE_HOST:-}")"
 OPENCLAW_APP_DIR="/home/node/.openclaw/openclaw-app"
+IFRAME_FIX_PRELOAD="/home/node/app/iframe-fix.cjs"
+KEY_ROTATOR_PRELOAD="/home/node/app/multi-provider-key-rotator.cjs"
 OPENCLAW_RUNTIME_VERSION=""
 OPENCLAW_FILE_LOG_LEVEL_CONFIGURED=false
 OPENCLAW_CONSOLE_LOG_LEVEL_CONFIGURED=false
@@ -425,7 +427,7 @@ promote_first_pool_key "AI_GATEWAY_API_KEY" "AI_GATEWAY_API_KEYS"
 
 # kimi-coding uses Moonshot AI endpoint (api.moonshot.cn).
 # If KIMI_API_KEY is set but MOONSHOT_API_KEY is not, mirror it so the
-# multi-provider-key-rotator (which matches on api.moonshot.cn) injects it.
+# provider key rotator (which matches on api.moonshot.cn) injects it.
 if [ -z "${MOONSHOT_API_KEY:-}" ] && [ -n "${KIMI_API_KEY:-}" ]; then
   export MOONSHOT_API_KEY="$KIMI_API_KEY"
 fi
@@ -642,7 +644,7 @@ _DEFAULT_GITHUB_COPILOT_MODELS="github-copilot/gpt-5,github-copilot/gpt-4.1,gith
 INJECTED_MODELS_PROVIDERS='{}'
 # Tracks providers configured with a key pool (GEMINI_API_KEYS etc.).
 # These providers must NOT have a static apiKey in the OpenClaw config —
-# the multi-provider-key-rotator injects the correct rotated key per-request.
+# the provider key rotator injects the correct rotated key per-request.
 # On restore, any stale apiKey saved from a previous single-key run is cleared.
 POOL_API_KEY_PROVIDERS='[]'
 inject_provider_models_from_env() {
@@ -1231,7 +1233,7 @@ if [ -f "$EXISTING_CONFIG" ]; then
        end
      | if (($poolApiKeyProviders | length) > 0) then
          # BUG FIX: Pool providers must NOT have a static apiKey in the OpenClaw config.
-         # The multi-provider-key-rotator injects the correct rotated key per-request.
+         # The provider key rotator injects the correct rotated key per-request.
          # If a previous single-key run saved an apiKey for this provider, clear it now
          # so OpenClaw does not keep using that one key and ignoring the rotation pool.
          reduce $poolApiKeyProviders[] as $prov (.;
@@ -1304,8 +1306,10 @@ fi
 chmod 600 "$EXISTING_CONFIG"
 
 # ── Enable Gateway Preload Fixes ──
-# This preload script keeps iframe embedding working on HF Spaces.
-export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--require /home/node/app/iframe-fix.cjs --require /home/node/app/multi-provider-key-rotator.cjs"
+# These preload scripts keep iframe embedding working on HF Spaces and enable
+# provider key rotation for gateway traffic. Keep paths centralized so future
+# rotator renames do not leave stale NODE_OPTIONS references behind.
+export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--require ${IFRAME_FIX_PRELOAD} --require ${KEY_ROTATOR_PRELOAD}"
 
 # ── Startup Summary ──
 echo ""
@@ -1457,7 +1461,7 @@ warmup_browser() {
 export LLM_MODEL="$LLM_MODEL"
 
 # ── Ensure key-rotator uses the correct HF token for huggingface.co calls ──
-# NODE_OPTIONS preloads multi-provider-key-rotator.cjs into health-server.js.
+# NODE_OPTIONS preloads the provider key rotator into health-server.js.
 # The rotator patches https.request and injects HUGGINGFACE_HUB_TOKEN (or
 # falls back to LLM_API_KEY) for any call to huggingface.co — including the
 # privacy-detection API call in detectSpacePrivacy(). If HUGGINGFACE_HUB_TOKEN
@@ -2170,15 +2174,13 @@ hc_clean_node_options_for_openclaw_maintenance() {
   # hooks patch fetch/undici globally and can redirect package downloads through
   # Cloudflare or emit rotator startup logs into installer output.
   local cleaned=" ${NODE_OPTIONS:-} "
-  cleaned="${cleaned//--require \/opt\/cloudflare-proxy.js / }"
-  cleaned="${cleaned//--require=\/opt\/cloudflare-proxy.js / }"
-  cleaned="${cleaned//-r \/opt\/cloudflare-proxy.js / }"
-  cleaned="${cleaned//--require \/home\/node\/app\/iframe-fix.cjs / }"
-  cleaned="${cleaned//--require=\/home\/node\/app\/iframe-fix.cjs / }"
-  cleaned="${cleaned//-r \/home\/node\/app\/iframe-fix.cjs / }"
-  cleaned="${cleaned//--require \/home\/node\/app\/multi-provider-key-rotator.cjs / }"
-  cleaned="${cleaned//--require=\/home\/node\/app\/multi-provider-key-rotator.cjs / }"
-  cleaned="${cleaned//-r \/home\/node\/app\/multi-provider-key-rotator.cjs / }"
+  local preload pattern
+  for preload in "/opt/cloudflare-proxy.js" "$IFRAME_FIX_PRELOAD" "$KEY_ROTATOR_PRELOAD"; do
+    [ -n "$preload" ] || continue
+    pattern="--require ${preload} "; cleaned="${cleaned//$pattern/ }"
+    pattern="--require=${preload} "; cleaned="${cleaned//$pattern/ }"
+    pattern="-r ${preload} "; cleaned="${cleaned//$pattern/ }"
+  done
   # Normalize whitespace after removing known preload pairs.
   printf '%s' "$cleaned" | tr -s ' ' | sed 's/^ //;s/ $//'
 }
