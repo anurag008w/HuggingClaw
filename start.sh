@@ -63,6 +63,33 @@ PYBUNDLE
 
 load_env_bundle
 
+# Run package-manager and OpenClaw maintenance commands without HuggingClaw's
+# gateway preloads. NODE_OPTIONS is inherited by child Node/npm processes; if the
+# rotator preload stays enabled there, npm registry downloads and plugin
+# dependency installs can be instrumented, spam logs, or inherit provider auth in
+# surprising ways. User installs are maintenance traffic, not LLM gateway calls.
+hc_clean_node_options_value() {
+  local cleaned=" ${1:-} "
+  local preload pattern
+  for preload in "/opt/cloudflare-proxy.js" "${IFRAME_FIX_PRELOAD:-}" "${KEY_ROTATOR_PRELOAD:-}"; do
+    [ -n "$preload" ] || continue
+    pattern="--require ${preload} "; cleaned="${cleaned//$pattern/ }"
+    pattern="--require=${preload} "; cleaned="${cleaned//$pattern/ }"
+    pattern="-r ${preload} "; cleaned="${cleaned//$pattern/ }"
+  done
+  printf '%s' "$cleaned" | tr -s ' ' | sed 's/^ //;s/ $//'
+}
+
+hc_env_without_gateway_preloads() {
+  local cleaned_node_options
+  cleaned_node_options="$(hc_clean_node_options_value "${NODE_OPTIONS:-}")"
+  if [ -n "$cleaned_node_options" ]; then
+    env NODE_OPTIONS="$cleaned_node_options" "$@"
+  else
+    env -u NODE_OPTIONS "$@"
+  fi
+}
+
 # Normalize core env values so accidental surrounding spaces in HF Variables
 # do not block updates or cause stale comparisons/merges.
 LLM_MODEL="$(trim_var "${LLM_MODEL:-}")"
@@ -571,6 +598,18 @@ CONFIG_JSON=$(jq \
    | .logging.consoleLevel = $consoleLevel
    | .logging.consoleStyle = $consoleStyle' <<<"$CONFIG_JSON")
 
+# Security: provider API keys and HF owner tokens come from runtime env/Space
+# secrets and must not be persisted into /home/node/.openclaw/openclaw.json.
+# The rotator/env provider discovery injects credentials at request time. A
+# legacy opt-in exists only for users who explicitly accept writing secrets to
+# the synced config file.
+OPENCLAW_CONFIG_SECRETS_ALLOWED=false
+if [[ "${HUGGINGCLAW_ALLOW_CONFIG_SECRETS:-}" =~ ^(1|true|yes|on)$ ]]; then
+  OPENCLAW_CONFIG_SECRETS_ALLOWED=true
+  echo "Warning: HUGGINGCLAW_ALLOW_CONFIG_SECRETS is enabled; provider apiKey values may be written to openclaw.json."
+fi
+ENV_API_KEY_PROVIDERS='[]'
+
 # Optional: dynamic custom OpenAI-compatible provider registration
 CUSTOM_PROVIDER_NAME="${CUSTOM_PROVIDER_NAME:-}"
 CUSTOM_BASE_URL="${CUSTOM_BASE_URL:-}"
@@ -610,6 +649,10 @@ if [ -n "$CUSTOM_PROVIDER_NAME" ] || [ -n "$CUSTOM_BASE_URL" ] || [ -n "$CUSTOM_
 
   if [ "$CUSTOM_PROVIDER_OK" = "true" ]; then
     echo "Registering custom provider: $CUSTOM_PROVIDER_NAME -> $CUSTOM_BASE_URL_NORMALIZED"
+    if [ "$OPENCLAW_CONFIG_SECRETS_ALLOWED" != "true" ] && [ -n "$CUSTOM_API_KEY" ]; then
+      echo "Warning: custom provider apiKey was not written to openclaw.json; set HUGGINGCLAW_ALLOW_CONFIG_SECRETS=true to opt into legacy persistence."
+    fi
+
     CONFIG_JSON=$(jq \
       --arg provider "$CUSTOM_PROVIDER_NAME" \
       --arg baseUrl "$CUSTOM_BASE_URL_NORMALIZED" \
@@ -619,10 +662,10 @@ if [ -n "$CUSTOM_PROVIDER_NAME" ] || [ -n "$CUSTOM_BASE_URL" ] || [ -n "$CUSTOM_
       --arg modelName "$CUSTOM_MODEL_NAME" \
       --argjson contextWindow "$CUSTOM_CONTEXT_WINDOW" \
       --argjson maxTokens "$CUSTOM_MAX_TOKENS" \
+      --argjson allowSecrets "$OPENCLAW_CONFIG_SECRETS_ALLOWED" \
       '.models.mode = "merge" |
-       .models.providers[$provider] = {
+       .models.providers[$provider] = ({
          "baseUrl": $baseUrl,
-         "apiKey": $apiKey,
          "api": $apiType,
          "models": [{
            "id": $modelId,
@@ -630,7 +673,13 @@ if [ -n "$CUSTOM_PROVIDER_NAME" ] || [ -n "$CUSTOM_BASE_URL" ] || [ -n "$CUSTOM_
            "contextWindow": $contextWindow,
            "maxTokens": $maxTokens
          }]
-       }' <<<"$CONFIG_JSON")
+       } + (if $allowSecrets and $apiKey != "" then {"apiKey": $apiKey} else {} end))' <<<"$CONFIG_JSON")
+
+    if [ "$OPENCLAW_CONFIG_SECRETS_ALLOWED" != "true" ] && [ -n "$CUSTOM_API_KEY" ]; then
+      ENV_API_KEY_PROVIDERS=$(jq \
+        --arg provider "$CUSTOM_PROVIDER_NAME" \
+        '. + [$provider] | unique' <<<"$ENV_API_KEY_PROVIDERS")
+    fi
 
     if [[ "$LLM_MODEL" != "$CUSTOM_PROVIDER_NAME/"* ]]; then
       echo "Warning: custom provider registered, but LLM_MODEL='$LLM_MODEL' does not start with '$CUSTOM_PROVIDER_NAME/'."
@@ -669,11 +718,9 @@ _DEFAULT_HUGGINGFACE_MODELS="huggingface/deepseek-ai/DeepSeek-R1,huggingface/moo
 _DEFAULT_GITHUB_COPILOT_MODELS="github-copilot/gpt-5,github-copilot/gpt-4.1,github-copilot/gpt-4.1-mini"
 
 INJECTED_MODELS_PROVIDERS='{}'
-# Tracks providers configured with a key pool (GEMINI_API_KEYS etc.).
-# These providers must NOT have a static apiKey in the OpenClaw config —
-# the provider key rotator injects the correct rotated key per-request.
-# On restore, any stale apiKey saved from a previous single-key run is cleared.
-POOL_API_KEY_PROVIDERS='[]'
+# Tracks providers configured from runtime env/Space secrets. These providers
+# must not persist static apiKey values in openclaw.json; credentials stay in env
+# and the key rotator/provider discovery injects them per request.
 inject_provider_models_from_env() {
   local provider="$1"
   local models_env="$2"
@@ -711,10 +758,11 @@ inject_provider_models_from_env() {
     | sed 's/_GITHUB_TOKEN$//')_BASE_URL
   local resolved_base_url="${!base_url_env_name:-$default_base_url}"
 
-  # Only inject apiKey when NOT using a pool (pool rotation is handled by OpenClaw
-  # reading the pool env var directly; injecting a static key would bypass rotation).
+  # Do not persist env/Space secrets into openclaw.json. The rotator and
+  # provider env discovery use the runtime env vars directly. Legacy config
+  # secret persistence requires an explicit opt-in.
   local inject_api_key=""
-  if [ -z "$pool_keys" ] && [ -n "$single_key" ]; then
+  if [ "$OPENCLAW_CONFIG_SECRETS_ALLOWED" = "true" ] && [ -z "$pool_keys" ] && [ -n "$single_key" ]; then
     inject_api_key="$single_key"
   fi
 
@@ -759,9 +807,9 @@ inject_provider_models_from_env() {
         map(normalize_provider_model)
         | map({id: ., name: .})
         | unique_by(.id)')
-  # Build provider patch: always inject models; conditionally inject apiKey, baseUrl, api.
-  # Existing saved config wins on merge (see config-patch jq below), so this only fills
-  # in missing fields — it never overwrites what the user already configured manually.
+  # Build provider patch: always inject models/base URL/API metadata. apiKey is
+  # included only when the user explicitly opts into config secret persistence.
+  # Existing saved config is sanitized later for env-managed providers.
   CONFIG_JSON=$(jq \
     --arg provider "$provider" \
     --argjson models "$models_json" \
@@ -782,11 +830,11 @@ inject_provider_models_from_env() {
     --argjson models "$models_json" \
     '.[$provider] = ((.[$provider] // {}) + {models: $models})' <<<"$INJECTED_MODELS_PROVIDERS")
 
-  # Track providers using key-pool so restored config's stale apiKey can be cleared.
-  if [ -n "$pool_keys" ]; then
-    POOL_API_KEY_PROVIDERS=$(jq \
+  # Track env-configured providers so restored config's stale apiKey can be cleared.
+  if [ "$OPENCLAW_CONFIG_SECRETS_ALLOWED" != "true" ] && { [ -n "$single_key" ] || [ -n "$pool_keys" ]; }; then
+    ENV_API_KEY_PROVIDERS=$(jq \
       --arg provider "$provider" \
-      '. + [$provider] | unique' <<<"$POOL_API_KEY_PROVIDERS")
+      '. + [$provider] | unique' <<<"$ENV_API_KEY_PROVIDERS")
   fi
 }
 
@@ -1204,13 +1252,14 @@ if [ -f "$EXISTING_CONFIG" ]; then
     --arg consoleStyle "$OPENCLAW_CONSOLE_LOG_STYLE" \
     --argjson desired "$CONFIG_JSON" \
     --argjson injectedModelsProviders "$INJECTED_MODELS_PROVIDERS" \
-    --argjson poolApiKeyProviders "$POOL_API_KEY_PROVIDERS" \
+    --argjson envApiKeyProviders "$ENV_API_KEY_PROVIDERS" \
     --argjson fileLogConfigured "$OPENCLAW_FILE_LOG_LEVEL_CONFIGURED" \
     --argjson consoleLogConfigured "$OPENCLAW_CONSOLE_LOG_LEVEL_CONFIGURED" \
     --argjson consoleStyleConfigured "$OPENCLAW_CONSOLE_LOG_STYLE_CONFIGURED" \
     --argjson whatsappEnabled "$WHATSAPP_CONFIG_ENABLED" \
     --argjson telegramConfigured "$TELEGRAM_CONFIG_ENABLED" \
     --argjson browserEnabled "$BROWSER_SHOULD_ENABLE" \
+    --argjson allowSecrets "$OPENCLAW_CONFIG_SECRETS_ALLOWED" \
     '(.channels.whatsapp // {}) as $existingWhatsapp
      | (.channels.telegram // {}) as $existingTelegram
      | .gateway.auth.token = $token
@@ -1253,18 +1302,18 @@ if [ -f "$EXISTING_CONFIG" ]; then
      | if (($desired.models.providers // {} | length) > 0) then
          reduce ($desired.models.providers // {} | to_entries)[] as $pe (.;
            # Propagate custom/new providers from desired config that are absent in existing.
-           # For known providers that already exist, merge in baseUrl/apiKey/api from env.
-           # ENV WINS over existing config: if an env var supplies a value it always takes
-           # effect (e.g. rotating an API key in HF Secrets is immediately reflected).
-           # If the env var is unset/empty the existing config value is preserved.
+           # For known providers that already exist, merge in baseUrl/api metadata from env.
+           # apiKey is merged only under explicit legacy opt-in; otherwise env/Space
+           # secrets stay in process env and are stripped below for env-managed providers.
            if .models.providers[$pe.key] == null then
              .models.providers[$pe.key] = $pe.value
            else
              .models.providers[$pe.key] = (
                (.models.providers[$pe.key] // {})
                * (
-                   {"baseUrl": $pe.value.baseUrl, "apiKey": $pe.value.apiKey, "api": $pe.value.api}
-                   | with_entries(select(.value != null and .value != ""))
+                   ({"baseUrl": $pe.value.baseUrl, "api": $pe.value.api}
+                    + (if $allowSecrets then {"apiKey": $pe.value.apiKey} else {} end)
+                    | with_entries(select(.value != null and .value != "")))
                  )
              )
            end
@@ -1272,12 +1321,10 @@ if [ -f "$EXISTING_CONFIG" ]; then
        else
          .
        end
-     | if (($poolApiKeyProviders | length) > 0) then
-         # BUG FIX: Pool providers must NOT have a static apiKey in the OpenClaw config.
-         # The provider key rotator injects the correct rotated key per-request.
-         # If a previous single-key run saved an apiKey for this provider, clear it now
-         # so OpenClaw does not keep using that one key and ignoring the rotation pool.
-         reduce $poolApiKeyProviders[] as $prov (.;
+     | if (($envApiKeyProviders | length) > 0) then
+         # Env/Space secrets must not be persisted in openclaw.json. If a
+         # previous boot wrote apiKey for an env-managed provider, clear it now.
+         reduce $envApiKeyProviders[] as $prov (.;
            if .models.providers[$prov] != null then
              del(.models.providers[$prov].apiKey)
            else . end
@@ -1602,7 +1649,7 @@ start_jupyter_once() {
   
   # Use explicit Python to avoid PATH issues; set memory-friendly limits
   export PYTHONPATH=""
-  python3 -m jupyterlab \
+  hc_env_without_gateway_preloads python3 -m jupyterlab \
       --ip 127.0.0.1 \
       --port "$JUPYTER_PORT" \
       --no-browser \
@@ -2026,7 +2073,7 @@ hc_run_startup_command() {
 
   echo "[startup:${source_label}] $command_text"
   set +e
-  HUGGINGCLAW_CAPTURE_DISABLE=1 bash -lc "$command_text"
+  HUGGINGCLAW_CAPTURE_DISABLE=1 hc_env_without_gateway_preloads bash -lc "$command_text"
   local rc=$?
   set -e
   if [ "$rc" -eq 0 ]; then
@@ -2058,7 +2105,7 @@ hc_run_startup_script() {
 
   echo "[startup:${source_label}] running script (${script_file})"
   set +e
-  bash "$script_file"
+  hc_env_without_gateway_preloads bash "$script_file"
   local rc=$?
   set -e
   rm -f "$script_file"
@@ -2180,7 +2227,7 @@ if [ -n "${HUGGINGCLAW_PIP_PACKAGES:-}" ]; then
   echo "Installing Python packages from HUGGINGCLAW_PIP_PACKAGES..."
   _HC_PIP_NORM=$(printf '%s' "$HUGGINGCLAW_PIP_PACKAGES" | tr ',\n\r' '   ' | tr -s ' ')
   read -r -a HC_PIP_PACKAGES <<< "$_HC_PIP_NORM"
-  if python3 -m pip install --user --break-system-packages "${HC_PIP_PACKAGES[@]}"; then
+  if hc_env_without_gateway_preloads python3 -m pip install --user --break-system-packages "${HC_PIP_PACKAGES[@]}"; then
     echo "HUGGINGCLAW_PIP_PACKAGES install complete."
   else
     HC_STARTUP_FAILURES=$((HC_STARTUP_FAILURES + 1))
@@ -2191,7 +2238,7 @@ if [ -n "${HUGGINGCLAW_NPM_PACKAGES:-}" ]; then
   echo "Installing global npm packages from HUGGINGCLAW_NPM_PACKAGES..."
   _HC_NPM_NORM=$(printf '%s' "$HUGGINGCLAW_NPM_PACKAGES" | tr ',\n\r' '   ' | tr -s ' ')
   read -r -a HC_NPM_PACKAGES <<< "$_HC_NPM_NORM"
-  if npm install -g "${HC_NPM_PACKAGES[@]}"; then
+  if hc_env_without_gateway_preloads npm install -g "${HC_NPM_PACKAGES[@]}"; then
     echo "HUGGINGCLAW_NPM_PACKAGES install complete."
   else
     HC_STARTUP_FAILURES=$((HC_STARTUP_FAILURES + 1))
@@ -2202,7 +2249,7 @@ if [ -n "${HUGGINGCLAW_OPENCLAW_PLUGINS:-}" ]; then
   echo "Installing OpenClaw plugins from HUGGINGCLAW_OPENCLAW_PLUGINS..."
   _HC_PLUGINS_NORM=$(printf '%s' "$HUGGINGCLAW_OPENCLAW_PLUGINS" | tr ',\n\r' '   ' | tr -s ' ')
   read -r -a HC_OPENCLAW_PLUGINS <<< "$_HC_PLUGINS_NORM"
-  if openclaw plugins install "${HC_OPENCLAW_PLUGINS[@]}"; then
+  if hc_env_without_gateway_preloads openclaw plugins install "${HC_OPENCLAW_PLUGINS[@]}"; then
     echo "HUGGINGCLAW_OPENCLAW_PLUGINS install complete."
   else
     HC_STARTUP_FAILURES=$((HC_STARTUP_FAILURES + 1))
@@ -2262,16 +2309,7 @@ hc_clean_node_options_for_openclaw_maintenance() {
   # traffic. Keep it isolated from HuggingClaw's gateway preloads because those
   # hooks patch fetch/undici globally and can redirect package downloads through
   # Cloudflare or emit rotator startup logs into installer output.
-  local cleaned=" ${NODE_OPTIONS:-} "
-  local preload pattern
-  for preload in "/opt/cloudflare-proxy.js" "$IFRAME_FIX_PRELOAD" "$KEY_ROTATOR_PRELOAD"; do
-    [ -n "$preload" ] || continue
-    pattern="--require ${preload} "; cleaned="${cleaned//$pattern/ }"
-    pattern="--require=${preload} "; cleaned="${cleaned//$pattern/ }"
-    pattern="-r ${preload} "; cleaned="${cleaned//$pattern/ }"
-  done
-  # Normalize whitespace after removing known preload pairs.
-  printf '%s' "$cleaned" | tr -s ' ' | sed 's/^ //;s/ $//'
+  hc_clean_node_options_value "${NODE_OPTIONS:-}"
 }
 
 hc_openclaw_maintenance() {
