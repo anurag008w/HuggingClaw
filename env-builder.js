@@ -141,8 +141,12 @@ const MODEL_CATALOGS = {
     ],
     "NVIDIA": [
       "nvidia/nemotron-3-super-120b-a12b",
-      "nvidia/nemotron-4-340b-instruct",
-      "nvidia/llama-3.1-nemotron-70b-instruct",
+      "nvidia/deepseek-ai/deepseek-v4-flash",
+      "nvidia/qwen/qwen3-coder-480b-a35b-instruct",
+      "nvidia/moonshotai/kimi-k2.6",
+      "nvidia/minimaxai/minimax-m2.7",
+      "nvidia/openai/gpt-oss-120b",
+      "nvidia/z-ai/glm-5.1",
       "nvidia/stepfun-ai/step-3.7-flash"
     ],
     "KiloCode": [
@@ -376,9 +380,13 @@ const MODEL_CATALOGS = {
   ],
   "NVIDIA_MODELS": [
     "nvidia/nemotron-3-super-120b-a12b",
-    "nvidia/nemotron-4-340b-instruct",
-    "nvidia/llama-3.1-nemotron-70b-instruct",
-    "nvidia/stepfun-ai/step-3.7-flash"
+    "deepseek-ai/deepseek-v4-flash",
+    "qwen/qwen3-coder-480b-a35b-instruct",
+    "moonshotai/kimi-k2.6",
+    "minimaxai/minimax-m2.7",
+    "openai/gpt-oss-120b",
+    "z-ai/glm-5.1",
+    "stepfun-ai/step-3.7-flash"
   ],
   "KILOCODE_MODELS": [
     "kilocode/anthropic/claude-opus-4.7",

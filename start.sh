@@ -357,12 +357,12 @@ case "$LLM_PROVIDER" in
   mistral-*|codestral-*|devstral-*|voxtral-*)
     export MISTRAL_API_KEY="$LLM_API_KEY"
     echo "Note: bare Mistral model '$LLM_MODEL' detected; mapped LLM_API_KEY → MISTRAL_API_KEY. Use 'mistral/${LLM_MODEL}' prefix to be explicit." ;;
-  moonshotai|meta-llama|deepseek-ai|MiniMaxAI|minimax-ai|Qwen|zai-org|mistralai|google)
+  moonshotai|meta-llama|deepseek-ai|minimaxai|MiniMaxAI|minimax-ai|Qwen|zai-org|mistralai|google)
     echo "Warning: LLM_MODEL='$LLM_MODEL' uses sub-provider prefix '$LLM_PROVIDER'. This is a router-namespaced model (Together/OpenRouter). Mapping LLM_API_KEY → TOGETHER_API_KEY. If using OpenRouter, also set OPENROUTER_API_KEY as a separate secret."
     export TOGETHER_API_KEY="${TOGETHER_API_KEY:-$LLM_API_KEY}" ;;
   # ── Fallback: Anthropic (default) ──
   *)
-    echo "Warning: Unknown provider prefix '$LLM_PROVIDER' in LLM_MODEL='$LLM_MODEL'. Defaulting to ANTHROPIC_API_KEY. If using a router-namespaced model (e.g. moonshotai/Kimi-K2.6), set TOGETHER_API_KEY or OPENROUTER_API_KEY as a separate secret."
+    echo "Warning: Unknown provider prefix '$LLM_PROVIDER' in LLM_MODEL='$LLM_MODEL'. Defaulting to ANTHROPIC_API_KEY. If using a router-namespaced model (e.g. moonshotai/kimi-k2.6), set TOGETHER_API_KEY or OPENROUTER_API_KEY as a separate secret."
     export ANTHROPIC_API_KEY="$LLM_API_KEY"
     ;;
 esac
@@ -657,7 +657,7 @@ _DEFAULT_XAI_MODELS="xai/grok-4.20,xai/grok-4.3,xai/grok-4.1,xai/grok-latest,xai
 _DEFAULT_COHERE_MODELS="cohere/command-a,cohere/command-a-03-2025,cohere/command-a-reasoning-08-2025,cohere/command-r-plus-08-2024"
 _DEFAULT_TOGETHER_MODELS="together/moonshotai/Kimi-K2.6,together/deepseek-ai/DeepSeek-V4-Pro,together/Qwen/Qwen3-235B-A22B-Instruct-2507-tput,together/meta-llama/Llama-3.3-70B-Instruct-Turbo"
 _DEFAULT_CEREBRAS_MODELS="cerebras/zai-glm-4.7,cerebras/gpt-oss-120b,cerebras/deepseek-r1,cerebras/qwen3-32b"
-_DEFAULT_NVIDIA_MODELS="nvidia/nemotron-3-super-120b-a12b,nvidia/nemotron-4-340b-instruct,nvidia/llama-3.1-nemotron-70b-instruct,nvidia/stepfun-ai/step-3.7-flash"
+_DEFAULT_NVIDIA_MODELS="nvidia/nemotron-3-super-120b-a12b,deepseek-ai/deepseek-v4-flash,qwen/qwen3-coder-480b-a35b-instruct,moonshotai/kimi-k2.6,minimaxai/minimax-m2.7,openai/gpt-oss-120b,z-ai/glm-5.1,stepfun-ai/step-3.7-flash"
 _DEFAULT_KILOCODE_MODELS="kilocode/kilo/auto,kilocode/anthropic/claude-opus-4.7,kilocode/openai/gpt-5.4,kilocode/google/gemini-2.5-pro"
 _DEFAULT_MOONSHOT_MODELS="moonshot/kimi-k2.6,moonshot/kimi-k2.6-thinking,moonshot/kimi-k2-thinking"
 _DEFAULT_MINIMAX_MODELS="minimax/MiniMax-M2.7,minimax/minimax-m1.5"
@@ -725,26 +725,40 @@ inject_provider_models_from_env() {
     | awk 'NF' \
     | jq -R . \
     | jq -s --arg provider "$provider" '
-        map(
-          if contains("/") then
-            # Fix cross-prefix: strip only the first "/" segment (the foreign provider
-            # prefix) and reapply the correct one. Using `last` was a bug for 3-part IDs:
-            # e.g. "openai/gpt-oss-120b" injected into "groq" would become
-            #      "groq/gpt-oss-120b" instead of "groq/openai/gpt-oss-120b".
-            # Examples:
-            #   "google/gemini-2.5-pro"        → "google-vertex/gemini-2.5-pro"
-            #   "openai/gpt-oss-120b"          → "groq/openai/gpt-oss-120b"
-            #   "moonshotai/kimi-k2.6"         → "nvidia/moonshotai/kimi-k2.6"
-            if startswith($provider + "/") then .
-            else ($provider + "/" + (split("/") | .[1:] | join("/")))
+        def strip_outer_provider:
+          (split("/") | .[1:] | join("/"));
+        def normalize_provider_model:
+          # OpenClaw stores provider-local model ids inside
+          # models.providers.<provider>.models[].id. The user-facing model ref
+          # is composed later as <provider>/<id>. Most providers use ids like
+          # "gpt-5.4", so "openai/gpt-5.4" becomes "gpt-5.4" here.
+          # NVIDIA is special because some valid NVIDIA API ids themselves
+          # start with "nvidia/" (for example nvidia/nemotron-...). Keep those
+          # single-prefix ids intact, but strip an outer OpenClaw provider prefix
+          # from full refs like "nvidia/deepseek-ai/..." or legacy
+          # "nvidia/nvidia/nemotron-..." so the provider sends the exact NVIDIA
+          # documented model id to integrate.api.nvidia.com.
+          if $provider == "nvidia" then
+            if startswith("nvidia/nvidia/")
+               or startswith("nvidia/deepseek-ai/")
+               or startswith("nvidia/qwen/")
+               or startswith("nvidia/moonshotai/")
+               or startswith("nvidia/minimaxai/")
+               or startswith("nvidia/openai/")
+               or startswith("nvidia/z-ai/")
+               or startswith("nvidia/stepfun-ai/") then
+              strip_outer_provider
+            else
+              .
             end
+          elif startswith($provider + "/") then
+            strip_outer_provider
           else
-            ($provider + "/" + .)
-          end
-        )
+            .
+          end;
+        map(normalize_provider_model)
         | map({id: ., name: .})
         | unique_by(.id)')
-
   # Build provider patch: always inject models; conditionally inject apiKey, baseUrl, api.
   # Existing saved config wins on merge (see config-patch jq below), so this only fills
   # in missing fields — it never overwrites what the user already configured manually.
