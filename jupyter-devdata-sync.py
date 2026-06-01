@@ -300,7 +300,6 @@ def sync_loop(api, rid: str):
                 repo_type="dataset",
                 token=HF_TOKEN,
                 commit_message=f"DevData sync {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
-                ignore_patterns=[".git/*", ".git"],
             )
             print(f"DevData synced to {rid}")
             # BUG FIX #6: Prune files deleted locally so they don't reappear on restore.
