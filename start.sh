@@ -43,8 +43,9 @@ try:
         if str(key) in {"HUGGINGCLAW_ENV_BUNDLE", "ENV_BUNDLE"}:
             continue
         if str(key) == "OPENCLAW_VERSION":
-            print("Warning: OPENCLAW_VERSION from env bundle is ignored (build-time only; set HF Variable and rebuild).", file=sys.stderr)
-            continue
+            # Runtime upgrades are now supported via OPENCLAW_RUNTIME_UPGRADE=true.
+            # Still allow the value to be exported so start.sh can act on it.
+            pass
         if os.environ.get(str(key), ""):
             continue
         if value is None or isinstance(value, (dict, list)):
@@ -171,9 +172,53 @@ if [ -f "$OPENCLAW_APP_DIR/package.json" ]; then
   OPENCLAW_RUNTIME_VERSION=$(node -p "require('$OPENCLAW_APP_DIR/package.json').version" 2>/dev/null || true)
 fi
 
+# ── Runtime OpenClaw upgrade ──
+# If OPENCLAW_VERSION is set (via HF Variable, Secret, or env bundle) and
+# differs from what is baked in the image, upgrade openclaw at container start.
+# This means users NO LONGER need to rebuild the image to change the version —
+# just set OPENCLAW_VERSION=1.2.3 (or "latest") in their HF Space Variables/
+# Secrets or in the env-builder, and the new version is installed on next boot.
+#
+# Set OPENCLAW_RUNTIME_UPGRADE=false to opt out of this behaviour.
+_do_runtime_upgrade=false
+_requested_ver="$(trim_var "${OPENCLAW_VERSION:-latest}")"
+
+if [ "${OPENCLAW_RUNTIME_UPGRADE:-true}" = "true" ]; then
+  if [ "$_requested_ver" = "latest" ]; then
+    # Always attempt an upgrade to latest so containers stay current.
+    _do_runtime_upgrade=true
+  elif [ "$_requested_ver" != "$OPENCLAW_RUNTIME_VERSION" ]; then
+    # A specific version was requested and it differs from what's installed.
+    _do_runtime_upgrade=true
+  fi
+fi
+
+if [ "$_do_runtime_upgrade" = "true" ]; then
+  echo "OpenClaw : upgrading to openclaw@${_requested_ver} (bundled: ${OPENCLAW_RUNTIME_VERSION:-unknown})..."
+  _upgrade_pkg="openclaw"
+  [ "$_requested_ver" != "latest" ] && _upgrade_pkg="openclaw@${_requested_ver}"
+
+  # npm install -g respects NPM_CONFIG_PREFIX which is set later in start.sh,
+  # so use the user-writable prefix explicitly to avoid needing sudo.
+  _npm_prefix="${NPM_CONFIG_PREFIX:-/home/node/.local}"
+  if NPM_CONFIG_PREFIX="$_npm_prefix" npm install -g "$_upgrade_pkg" --prefer-online 2>/tmp/openclaw-upgrade.log; then
+    # Re-read version from the installed package under the explicit prefix
+    _new_ver=$(node -p "require('${_npm_prefix}/lib/node_modules/openclaw/package.json').version" 2>/dev/null || true)
+    # PATH already has /home/node/.local/bin before /usr/local/bin (set in
+    # Dockerfile ENV), so the newly installed binary is picked up automatically
+    # by 'command openclaw' without needing to update /usr/local/bin/openclaw.
+    echo "OpenClaw : upgraded to ${_new_ver:-${_requested_ver}} ✓"
+    OPENCLAW_RUNTIME_VERSION="${_new_ver:-$OPENCLAW_RUNTIME_VERSION}"
+  else
+    echo "Warning: openclaw runtime upgrade to '${_requested_ver}' failed (bundled version will be used):" >&2
+    tail -5 /tmp/openclaw-upgrade.log >&2
+  fi
+fi
+unset _do_runtime_upgrade _requested_ver _upgrade_pkg _new_ver _npm_prefix
+
 if [ -n "$OPENCLAW_RUNTIME_VERSION" ]; then
   OPENCLAW_DISPLAY_VERSION="$OPENCLAW_RUNTIME_VERSION"
-  if [ "$OPENCLAW_VERSION" != "$OPENCLAW_RUNTIME_VERSION" ]; then
+  if [ "$OPENCLAW_VERSION" != "latest" ] && [ "$OPENCLAW_VERSION" != "$OPENCLAW_RUNTIME_VERSION" ]; then
     OPENCLAW_DISPLAY_VERSION="$OPENCLAW_RUNTIME_VERSION (tag: $OPENCLAW_VERSION)"
   fi
 else
@@ -517,6 +562,8 @@ inject_provider_models_from_env() {
   local key_env_single="$3"
   local key_env_pool="$4"
   local default_models_env="${5:-}"          # Optional 5th arg: fallback default models var name
+  local default_base_url="${6:-}"            # Optional 6th arg: hardcoded default base URL
+  local api_type="${7:-}"                    # Optional 7th arg: API type (e.g. openai-completions)
   local models_csv="${!models_env:-}"
   local single_key="${!key_env_single:-}"
   local pool_keys="${!key_env_pool:-}"
@@ -534,6 +581,23 @@ inject_provider_models_from_env() {
   # Still nothing to inject
   if [ -z "$models_csv" ]; then
     return 0
+  fi
+
+  # Resolve base URL: runtime env var (<KEY_ENV>_BASE_URL) overrides hardcoded default.
+  # e.g. NVIDIA_API_KEY → NVIDIA_BASE_URL; HUGGINGFACE_HUB_TOKEN → HUGGINGFACE_HUB_TOKEN_BASE_URL
+  # Use a cleaner derived name: strip _API_KEY/_API_KEYS suffix → add _BASE_URL.
+  local base_url_env_name
+  base_url_env_name=$(printf '%s' "$key_env_single" \
+    | sed 's/_API_KEY$//' \
+    | sed 's/_HUB_TOKEN$//' \
+    | sed 's/_GITHUB_TOKEN$//')_BASE_URL
+  local resolved_base_url="${!base_url_env_name:-$default_base_url}"
+
+  # Only inject apiKey when NOT using a pool (pool rotation is handled by OpenClaw
+  # reading the pool env var directly; injecting a static key would bypass rotation).
+  local inject_api_key=""
+  if [ -z "$pool_keys" ] && [ -n "$single_key" ]; then
+    inject_api_key="$single_key"
   fi
 
   local models_json
@@ -563,11 +627,23 @@ inject_provider_models_from_env() {
         | map({id: ., name: .})
         | unique_by(.id)')
 
+  # Build provider patch: always inject models; conditionally inject apiKey, baseUrl, api.
+  # Existing saved config wins on merge (see config-patch jq below), so this only fills
+  # in missing fields — it never overwrites what the user already configured manually.
   CONFIG_JSON=$(jq \
     --arg provider "$provider" \
     --argjson models "$models_json" \
+    --arg apiKey "$inject_api_key" \
+    --arg baseUrl "$resolved_base_url" \
+    --arg apiType "$api_type" \
     '.models.mode = "merge"
-     | .models.providers[$provider] = ((.models.providers[$provider] // {}) + {models: $models})' <<<"$CONFIG_JSON")
+     | .models.providers[$provider] = (
+         (.models.providers[$provider] // {})
+         + (if $apiKey  != "" then {apiKey:  $apiKey}  else {} end)
+         + (if $baseUrl != "" then {baseUrl: $baseUrl} else {} end)
+         + (if $apiType != "" then {api:     $apiType} else {} end)
+         + {models: $models}
+       )' <<<"$CONFIG_JSON")
 
   INJECTED_MODELS_PROVIDERS=$(jq \
     --arg provider "$provider" \
@@ -609,29 +685,29 @@ inject_provider_models_from_env "zai" "ZAI_MODELS" "ZAI_API_KEY" "ZAI_API_KEYS" 
 inject_provider_models_from_env "z-ai" "ZAI_MODELS" "ZAI_API_KEY" "ZAI_API_KEYS" "_DEFAULT_ZAI_MODELS"
 inject_provider_models_from_env "z.ai" "ZAI_MODELS" "ZAI_API_KEY" "ZAI_API_KEYS" "_DEFAULT_ZAI_MODELS"
 inject_provider_models_from_env "zhipu" "ZAI_MODELS" "ZAI_API_KEY" "ZAI_API_KEYS" "_DEFAULT_ZAI_MODELS"
-inject_provider_models_from_env "moonshot" "MOONSHOT_MODELS" "MOONSHOT_API_KEY" "MOONSHOT_API_KEYS" "_DEFAULT_MOONSHOT_MODELS"
+inject_provider_models_from_env "moonshot" "MOONSHOT_MODELS" "MOONSHOT_API_KEY" "MOONSHOT_API_KEYS" "_DEFAULT_MOONSHOT_MODELS" "https://api.moonshot.cn/v1" "openai-completions"
 inject_provider_models_from_env "kimi-coding" "KIMI_MODELS" "KIMI_API_KEY" "KIMI_API_KEYS"
 inject_provider_models_from_env "minimax" "MINIMAX_MODELS" "MINIMAX_API_KEY" "MINIMAX_API_KEYS" "_DEFAULT_MINIMAX_MODELS"
 inject_provider_models_from_env "modelstudio" "MODELSTUDIO_MODELS" "MODELSTUDIO_API_KEY" "MODELSTUDIO_API_KEYS" "_DEFAULT_MODELSTUDIO_MODELS"
 inject_provider_models_from_env "qwen" "MODELSTUDIO_MODELS" "MODELSTUDIO_API_KEY" "MODELSTUDIO_API_KEYS" "_DEFAULT_MODELSTUDIO_MODELS"
-inject_provider_models_from_env "xiaomi" "XIAOMI_MODELS" "XIAOMI_API_KEY" "XIAOMI_API_KEYS"
-inject_provider_models_from_env "volcengine" "VOLCANO_ENGINE_MODELS" "VOLCANO_ENGINE_API_KEY" "VOLCANO_ENGINE_API_KEYS"
-inject_provider_models_from_env "volcengine-plan" "VOLCANO_ENGINE_MODELS" "VOLCANO_ENGINE_API_KEY" "VOLCANO_ENGINE_API_KEYS"
-inject_provider_models_from_env "byteplus" "BYTEPLUS_MODELS" "BYTEPLUS_API_KEY" "BYTEPLUS_API_KEYS"
-inject_provider_models_from_env "byteplus-plan" "BYTEPLUS_MODELS" "BYTEPLUS_API_KEY" "BYTEPLUS_API_KEYS"
-inject_provider_models_from_env "qianfan" "QIANFAN_MODELS" "QIANFAN_API_KEY" "QIANFAN_API_KEYS"
+inject_provider_models_from_env "xiaomi" "XIAOMI_MODELS" "XIAOMI_API_KEY" "XIAOMI_API_KEYS" "" "https://api.mimoai.xiaomi.com/v1" "openai-completions"
+inject_provider_models_from_env "volcengine" "VOLCANO_ENGINE_MODELS" "VOLCANO_ENGINE_API_KEY" "VOLCANO_ENGINE_API_KEYS" "" "https://ark.cn-beijing.volces.com/api/v3" "openai-completions"
+inject_provider_models_from_env "volcengine-plan" "VOLCANO_ENGINE_MODELS" "VOLCANO_ENGINE_API_KEY" "VOLCANO_ENGINE_API_KEYS" "" "https://ark.cn-beijing.volces.com/api/v3" "openai-completions"
+inject_provider_models_from_env "byteplus" "BYTEPLUS_MODELS" "BYTEPLUS_API_KEY" "BYTEPLUS_API_KEYS" "" "https://ark.ap-southeast.bytepluses.com/api/v3" "openai-completions"
+inject_provider_models_from_env "byteplus-plan" "BYTEPLUS_MODELS" "BYTEPLUS_API_KEY" "BYTEPLUS_API_KEYS" "" "https://ark.ap-southeast.bytepluses.com/api/v3" "openai-completions"
+inject_provider_models_from_env "qianfan" "QIANFAN_MODELS" "QIANFAN_API_KEY" "QIANFAN_API_KEYS" "" "https://qianfan.baidubce.com/v2" "openai-completions"
 inject_provider_models_from_env "groq" "GROQ_MODELS" "GROQ_API_KEY" "GROQ_API_KEYS" "_DEFAULT_GROQ_MODELS"
 inject_provider_models_from_env "mistral" "MISTRAL_MODELS" "MISTRAL_API_KEY" "MISTRAL_API_KEYS" "_DEFAULT_MISTRAL_MODELS"
 inject_provider_models_from_env "mistralai" "MISTRAL_MODELS" "MISTRAL_API_KEY" "MISTRAL_API_KEYS" "_DEFAULT_MISTRAL_MODELS"
 inject_provider_models_from_env "xai" "XAI_MODELS" "XAI_API_KEY" "XAI_API_KEYS" "_DEFAULT_XAI_MODELS"
 inject_provider_models_from_env "x-ai" "XAI_MODELS" "XAI_API_KEY" "XAI_API_KEYS" "_DEFAULT_XAI_MODELS"
-inject_provider_models_from_env "nvidia" "NVIDIA_MODELS" "NVIDIA_API_KEY" "NVIDIA_API_KEYS" "_DEFAULT_NVIDIA_MODELS"
-inject_provider_models_from_env "cohere" "COHERE_MODELS" "COHERE_API_KEY" "COHERE_API_KEYS" "_DEFAULT_COHERE_MODELS"
-inject_provider_models_from_env "together" "TOGETHER_MODELS" "TOGETHER_API_KEY" "TOGETHER_API_KEYS" "_DEFAULT_TOGETHER_MODELS"
+inject_provider_models_from_env "nvidia" "NVIDIA_MODELS" "NVIDIA_API_KEY" "NVIDIA_API_KEYS" "_DEFAULT_NVIDIA_MODELS" "https://integrate.api.nvidia.com/v1" "openai-completions"
+inject_provider_models_from_env "cohere" "COHERE_MODELS" "COHERE_API_KEY" "COHERE_API_KEYS" "_DEFAULT_COHERE_MODELS" "https://api.cohere.ai/compatibility/v1" "openai-completions"
+inject_provider_models_from_env "together" "TOGETHER_MODELS" "TOGETHER_API_KEY" "TOGETHER_API_KEYS" "_DEFAULT_TOGETHER_MODELS" "https://api.together.xyz/v1" "openai-completions"
 inject_provider_models_from_env "cerebras" "CEREBRAS_MODELS" "CEREBRAS_API_KEY" "CEREBRAS_API_KEYS" "_DEFAULT_CEREBRAS_MODELS"
-inject_provider_models_from_env "huggingface" "HUGGINGFACE_MODELS" "HUGGINGFACE_HUB_TOKEN" "HUGGINGFACE_HUB_TOKENS" "_DEFAULT_HUGGINGFACE_MODELS"
-inject_provider_models_from_env "venice" "VENICE_MODELS" "VENICE_API_KEY" "VENICE_API_KEYS" "_DEFAULT_VENICE_MODELS"
-inject_provider_models_from_env "synthetic" "SYNTHETIC_MODELS" "SYNTHETIC_API_KEY" "SYNTHETIC_API_KEYS"
+inject_provider_models_from_env "huggingface" "HUGGINGFACE_MODELS" "HUGGINGFACE_HUB_TOKEN" "HUGGINGFACE_HUB_TOKENS" "_DEFAULT_HUGGINGFACE_MODELS" "https://api-inference.huggingface.co/v1" "openai-completions"
+inject_provider_models_from_env "venice" "VENICE_MODELS" "VENICE_API_KEY" "VENICE_API_KEYS" "_DEFAULT_VENICE_MODELS" "https://api.venice.ai/api/v1" "openai-completions"
+inject_provider_models_from_env "synthetic" "SYNTHETIC_MODELS" "SYNTHETIC_API_KEY" "SYNTHETIC_API_KEYS" "" "https://api.synthetic.ai/v1" "openai-completions"
 inject_provider_models_from_env "github-copilot" "GITHUB_COPILOT_MODELS" "COPILOT_GITHUB_TOKEN" "COPILOT_GITHUB_TOKENS" "_DEFAULT_GITHUB_COPILOT_MODELS"
 
 # Browser configuration (managed local Chromium in HF/Docker)
@@ -645,7 +721,13 @@ fi
 ensure_chromium_for_browser_plugin() {
   # Enforce Chromium availability when browser plugin is explicitly enabled.
   [ "$BROWSER_PLUGIN_MODE" = "enabled" ] || return 0
-  for candidate in /usr/lib/chromium/chromium /usr/bin/chromium /usr/bin/chromium-browser; do
+  for candidate in \
+      /usr/lib/chromium/chromium \
+      /usr/bin/chromium \
+      /usr/bin/chromium-browser \
+      /usr/bin/google-chrome \
+      /usr/bin/google-chrome-stable \
+      /snap/bin/chromium; do
     [ -x "$candidate" ] && return 0
   done
   if [ "$HAS_FILE_CMD" != "true" ]; then
@@ -680,6 +762,8 @@ for candidate in \
     /usr/lib/chromium-browser/chromium-browser \
     /usr/bin/chromium \
     /usr/bin/chromium-browser \
+    /usr/bin/google-chrome \
+    /usr/bin/google-chrome-stable \
     /snap/bin/chromium; do
   if [ -x "$candidate" ]; then
     if [ "$HAS_FILE_CMD" = "true" ]; then
@@ -756,6 +840,10 @@ CONFIG_JSON=$(jq \
       else . end)' <<<"$CONFIG_JSON")
 
 if [ "$BROWSER_SHOULD_ENABLE" = "true" ]; then
+  # NOTE: do NOT add executablePath, localLaunchTimeoutMs, or localCdpReadyTimeoutMs
+  # here — those are protected keys managed internally by OpenClaw and will be
+  # rejected/ignored if set from the outside config (intentionally removed in
+  # commit "Avoid protected browser config keys in generated OpenClaw config").
   CONFIG_JSON=$(jq \
     '.browser = {
        "enabled": true,
@@ -770,14 +858,20 @@ if [ "$BROWSER_SHOULD_ENABLE" = "true" ]; then
          "--disable-dev-shm-usage",
          "--disable-gpu",
          "--remote-debugging-address=127.0.0.1",
-         "--disable-features=UseDBus,MediaRouter",
+         "--remote-allow-origins=*",
+         "--disable-features=UseDBus,MediaRouter,VizDisplayCompositor,BlinkGenPropertyTrees",
+         "--disable-dbus",
+         "--disable-background-media-suspend",
          "--password-store=basic",
          "--no-first-run",
          "--disable-background-networking",
          "--disable-sync",
          "--disable-translate",
          "--disable-notifications",
-         "--disable-speech-api"
+         "--disable-speech-api",
+         "--disable-extensions",
+         "--mute-audio",
+         "--metrics-recording-only"
        ]
      }
      | .agents.defaults.sandbox.browser.allowHostControl = true' <<<"$CONFIG_JSON")
@@ -1171,16 +1265,25 @@ warmup_browser() {
   BROWSER_WARMED_UP=true
 
   (
-    sleep 8
+    # Give the gateway more time to finish its own startup before we poke it.
+    sleep 12
 
     local attempt
-    for attempt in 1 2 3 4 5 6; do
+    for attempt in 1 2 3 4 5 6 7 8; do
+      # FIX: probe the gateway HTTP port first — if the gateway isn't fully up
+      # yet, openclaw-browser returns "GatewayClientRequestError: http_unreachable
+      # / invalid onRequestStart" because the CDP proxy isn't ready.
+      if ! (echo > /dev/tcp/127.0.0.1/${GATEWAY_PORT}) 2>/dev/null; then
+        sleep 5
+        continue
+      fi
+
       if openclaw browser --browser-profile openclaw start >/dev/null 2>&1; then
         openclaw browser --browser-profile openclaw open about:blank >/dev/null 2>&1 || true
         echo "Managed browser ready."
         return 0
       fi
-      sleep 5
+      sleep 8
     done
 
     echo "Warning: managed browser warm-up did not complete; first browser action may need a retry."
@@ -1973,14 +2076,39 @@ if [ -d "$PLUGIN_SKILLS_DIR" ]; then
 fi
 
 # ── Start D-Bus session (once, before gateway loop) ──
+# Chromium logs "Failed to connect to socket /run/dbus/system_bus_socket" when
+# the system D-Bus is absent (HF Spaces containers).  We suppress the noise by:
+#   1. Starting a private session bus (dbus-launch) so Chrome has something to
+#      connect to for session-scoped calls.
+#   2. Pointing DBUS_SYSTEM_BUS_ADDRESS at the same session bus so Chrome's
+#      system-bus probes also succeed without a real systemd-dbus daemon.
+#   3. Falling back to "disabled:" on minimal images without dbus-launch; the
+#      Chrome --disable-dbus / --disable-features=UseDBus flags then silence the
+#      remaining warnings that come from Chromium itself.
 if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
-  if command -v dbus-launch >/dev/null 2>&1; then
+  if command -v dbus-daemon >/dev/null 2>&1; then
+    _DBUS_SOCKET="/tmp/dbus-hc-$$.sock"
+    _DBUS_PID_FILE="/tmp/dbus-hc-$$.pid"
+    dbus-daemon --session \
+        --address="unix:path=${_DBUS_SOCKET}" \
+        --print-address=1 \
+        --fork \
+        --print-pid=3 \
+        3>"${_DBUS_PID_FILE}" \
+        >"${_DBUS_SOCKET}.addr" 2>/dev/null || true
+    if [ -s "${_DBUS_SOCKET}.addr" ]; then
+      export DBUS_SESSION_BUS_ADDRESS="$(cat "${_DBUS_SOCKET}.addr")"
+    fi
+    unset _DBUS_SOCKET _DBUS_PID_FILE
+  elif command -v dbus-launch >/dev/null 2>&1; then
     eval "$(dbus-launch --sh-syntax 2>/dev/null)" || true
     export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-disabled:}"
   else
     export DBUS_SESSION_BUS_ADDRESS="disabled:"
   fi
 fi
+# Route system-bus probes to session bus so Chrome stops printing socket errors.
+export DBUS_SYSTEM_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-disabled:}"
 
 while true; do
   # Check health-server process - restart if died unexpectedly
