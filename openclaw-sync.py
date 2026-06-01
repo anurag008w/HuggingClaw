@@ -28,7 +28,7 @@ os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 # upload_large_folder workers (logger.warning level).
 os.environ.setdefault("HF_HUB_VERBOSITY", "error")
 
-from huggingface_hub import HfApi, snapshot_download, upload_folder
+from huggingface_hub import CommitOperationDelete, HfApi, snapshot_download, upload_folder
 from huggingface_hub.errors import HfHubHTTPError, RepositoryNotFoundError
 
 # Belt-and-suspenders: also raise the level after import in case the env var
@@ -66,6 +66,10 @@ EXCLUDED_SYNC_DIRS = {
     ".turbo", ".parcel-cache", "target", ".gradle", ".mvn",
 }
 MAX_FILE_SIZE_BYTES = int(os.environ.get("SYNC_MAX_FILE_BYTES", str(50 * 1024 * 1024)))
+# Max stale files to delete per commit. Large single-commit deletions can
+# exceed the HF API payload limit and fail silently (caught as a warning).
+# 50 is conservative; each extra commit is cheap for delete-only operations.
+PRUNE_BATCH_SIZE = int(os.environ.get("SYNC_PRUNE_BATCH_SIZE", "50"))
 
 STATE_DIR = WORKSPACE / "huggingclaw-state"
 OPENCLAW_STATE_BACKUP_DIR = STATE_DIR / "openclaw"
@@ -85,6 +89,9 @@ STOP_EVENT = threading.Event()
 _REPO_ID_CACHE: str | None = None
 _SESSIONS_FILE_DIGEST_CACHE: dict[str, tuple[int, int, int, str]] = {}
 WorkspaceMarker: TypeAlias = tuple[int, int, int, str]
+# Set True when prune fails so the next sync pass bypasses the fingerprint
+# early-exit and retries the prune even if no local files changed.
+_prune_needed: bool = False
 
 
 def write_status(status: str, message: str) -> None:
@@ -434,6 +441,13 @@ def prune_remote_deleted_files(
     snapshot_dir: Path,
     skip_prefixes: set[str] | None = None,
 ) -> None:
+    """Delete files that exist on the remote dataset but no longer exist locally.
+
+    Uses create_commit directly (instead of delete_files) to avoid a redundant
+    list_repo_files call inside the HF SDK, and batches deletions into chunks of
+    PRUNE_BATCH_SIZE to prevent hitting the HF API payload limit when many files
+    are pruned at once.
+    """
     if HF_API is None:
         return
     skip_prefixes = skip_prefixes or set()
@@ -444,19 +458,32 @@ def prune_remote_deleted_files(
         if path.is_file()
     }
 
-    remote_files = HF_API.list_repo_files(repo_id=repo_id, repo_type="dataset")
+    remote_files = list(HF_API.list_repo_files(repo_id=repo_id, repo_type="dataset"))
     stale_files = [
         path for path in remote_files
         if path not in local_files and path not in {".gitattributes"}
         and not any(path == prefix or path.startswith(prefix + "/") for prefix in skip_prefixes)
     ]
-    if stale_files:
-        HF_API.delete_files(
-            delete_patterns=stale_files,
+    if not stale_files:
+        return
+
+    total = len(stale_files)
+    num_batches = (total + PRUNE_BATCH_SIZE - 1) // PRUNE_BATCH_SIZE
+    for batch_idx in range(num_batches):
+        batch = stale_files[batch_idx * PRUNE_BATCH_SIZE:(batch_idx + 1) * PRUNE_BATCH_SIZE]
+        batch_label = f"{batch_idx + 1}/{num_batches}" if num_batches > 1 else ""
+        msg = f"Prune {len(batch)} stale file(s) after workspace sync"
+        if batch_label:
+            msg += f" (batch {batch_label})"
+        operations = [CommitOperationDelete(path_in_repo=path) for path in batch]
+        HF_API.create_commit(
             repo_id=repo_id,
             repo_type="dataset",
-            commit_message="Prune stale files after workspace sync",
+            operations=operations,
+            commit_message=msg,
         )
+        if num_batches > 1:
+            print(f"Pruned batch {batch_label}: {len(batch)} file(s)")
 
 
 def restore_workspace() -> bool:
@@ -466,6 +493,10 @@ def restore_workspace() -> bool:
 
     repo_id = resolve_backup_namespace()
     write_status("restoring", f"Restoring workspace from {repo_id}")
+
+    # Staging path for atomic restore (same filesystem as WORKSPACE so rename is atomic).
+    staging = WORKSPACE.parent / ".workspace-restore-staging"
+    old_workspace = WORKSPACE.parent / ".workspace-restore-old"
 
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -481,23 +512,36 @@ def restore_workspace() -> bool:
                 write_status("fresh", "Backup dataset is empty. Starting fresh.")
                 return True
 
-            WORKSPACE.mkdir(parents=True, exist_ok=True)
-            for child in list(WORKSPACE.iterdir()):
-                if child.name == ".git":
-                    continue
-                if child.is_dir():
-                    shutil.rmtree(child, ignore_errors=True)
-                else:
-                    child.unlink(missing_ok=True)
+            # Build the restored workspace in a staging dir without touching the
+            # live workspace.  Only swap once staging is fully written so a copy
+            # failure mid-way can never leave the workspace in a partial state.
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
+            staging.mkdir(parents=True, exist_ok=True)
 
             for child in tmp_path.iterdir():
                 if child.name == ".git":
                     continue
-                destination = WORKSPACE / child.name
+                destination = staging / child.name
                 if child.is_dir():
                     shutil.copytree(child, destination)
                 else:
                     shutil.copy2(child, destination)
+
+            # Preserve any .git directory from the live workspace into staging
+            # so git history isn't destroyed by a restore.
+            git_dir = WORKSPACE / ".git"
+            if git_dir.exists() and not (staging / ".git").exists():
+                shutil.copytree(git_dir, staging / ".git")
+
+        # Atomic swap: rename current workspace aside, promote staging.
+        # Both paths live under WORKSPACE.parent so rename() stays on-filesystem.
+        if old_workspace.exists():
+            shutil.rmtree(old_workspace, ignore_errors=True)
+        WORKSPACE.mkdir(parents=True, exist_ok=True)
+        WORKSPACE.rename(old_workspace)
+        staging.rename(WORKSPACE)
+        shutil.rmtree(old_workspace, ignore_errors=True)
 
         restore_embedded_state()
         write_status("restored", f"Restored workspace from {repo_id}")
@@ -516,6 +560,23 @@ def restore_workspace() -> bool:
         write_status("error", f"Restore failed: {exc}")
         print(f"Restore failed: {exc}", file=sys.stderr)
         return False
+    finally:
+        # Best-effort cleanup of staging on any failure path.
+        # If the rename swap already moved staging → WORKSPACE, staging no longer
+        # exists here so the rmtree is a no-op.
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        # If the swap half-completed (old_workspace exists but WORKSPACE missing),
+        # roll back so the container doesn't boot with an absent workspace.
+        if old_workspace.exists():
+            if not WORKSPACE.exists():
+                try:
+                    old_workspace.rename(WORKSPACE)
+                    print("Warning: restore swap failed; rolled back to previous workspace.")
+                except Exception:
+                    pass  # best-effort; next restart will retry restore
+            else:
+                shutil.rmtree(old_workspace, ignore_errors=True)
 
 
 def _sync_once_unlocked(
@@ -526,15 +587,17 @@ def _sync_once_unlocked(
         write_status("disabled", "HF_TOKEN is not configured.")
         return (last_fingerprint or "", last_marker or (0, 0, 0, ""))
 
+    global _prune_needed
+
     had_snapshot_copy_failures = snapshot_state_into_workspace()
     repo_id = ensure_repo_exists()
     current_marker = metadata_marker(WORKSPACE)
-    if last_marker is not None and current_marker == last_marker:
+    if last_marker is not None and current_marker == last_marker and not _prune_needed:
         write_status("synced", "No workspace changes detected.")
         return (last_fingerprint or "", current_marker)
 
     current_fingerprint = fingerprint_dir(WORKSPACE)
-    if last_fingerprint is not None and current_fingerprint == last_fingerprint:
+    if last_fingerprint is not None and current_fingerprint == last_fingerprint and not _prune_needed:
         write_status("synced", "No workspace changes detected.")
         return (last_fingerprint, current_marker)
 
@@ -569,14 +632,20 @@ def _sync_once_unlocked(
                 "Warning: state snapshot had copy failures; pruning stale files "
                 "except huggingclaw-state/openclaw."
             )
+        had_prune_failure = False
         try:
             prune_remote_deleted_files(repo_id, snapshot_dir, skip_prefixes=skip_prune_prefixes)
         except Exception as prune_exc:
             print(f"Warning: could not prune stale remote files: {prune_exc}")
+            had_prune_failure = True
     finally:
         shutil.rmtree(snapshot_dir, ignore_errors=True)
 
-    write_status("success", f"Uploaded workspace to {repo_id}")
+    _prune_needed = had_prune_failure
+    if had_prune_failure:
+        write_status("success", f"Uploaded workspace to {repo_id}; prune warnings — will retry next pass")
+    else:
+        write_status("success", f"Uploaded workspace to {repo_id}")
     return (current_fingerprint, current_marker)
 
 
