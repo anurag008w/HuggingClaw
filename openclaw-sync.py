@@ -52,6 +52,8 @@ CONFIG_SETTLE_SECONDS = max(
 )
 SESSIONS_MIN_SYNC_GAP = int(os.environ.get("SESSIONS_MIN_SYNC_GAP", "30"))
 SYNC_LOCK_TIMEOUT = max(1.0, float(os.environ.get("SYNC_LOCK_TIMEOUT", "20")))
+SYNC_UPLOAD_TIMEOUT = max(0.0, float(os.environ.get("SYNC_UPLOAD_TIMEOUT", "180")))
+SYNC_UPLOAD_STRATEGY = os.environ.get("SYNC_UPLOAD_STRATEGY", "folder").strip().lower() or "folder"
 HF_TOKEN = os.environ.get("HF_TOKEN", "").strip()
 HF_USERNAME = os.environ.get("HF_USERNAME", "").strip()
 SPACE_AUTHOR_NAME = os.environ.get("SPACE_AUTHOR_NAME", "").strip()
@@ -112,8 +114,8 @@ RESET_MARKER = WORKSPACE / ".reset_credentials"
 HF_API = HfApi(token=HF_TOKEN) if HF_TOKEN else None
 STOP_EVENT = threading.Event()
 _REPO_ID_CACHE: str | None = None
-_SESSIONS_FILE_DIGEST_CACHE: dict[str, tuple[int, int, int, str]] = {}
 WorkspaceMarker: TypeAlias = tuple[int, int, int, str]
+FileMarker: TypeAlias = tuple[int, int, int, int, str]
 # Set True when prune fails so the next sync pass bypasses the fingerprint
 # early-exit and retries the prune even if no local files changed.
 _prune_needed: bool = False
@@ -131,6 +133,10 @@ INTERNAL_TEMP_WORKSPACE_PREFIXES: tuple[tuple[str, ...], ...] = (
     ("huggingclaw-state", "openclaw", ".workspace-restore-old"),
     ("huggingclaw-state", "openclaw", ".openclaw-staging"),
 )
+
+
+class SyncUploadTimeoutError(TimeoutError):
+    pass
 
 
 def write_status(status: str, message: str) -> None:
@@ -648,16 +654,28 @@ def _should_exclude(rel_posix: str, path: Path) -> bool:
     return False
 
 
-def file_marker(path: Path) -> tuple[int, int, int]:
+def file_marker(path: Path) -> FileMarker:
     try:
         stat = path.stat()
     except OSError:
-        return (0, 0, 0)
+        return (0, 0, 0, 0, "")
 
     if not path.is_file():
-        return (0, 0, 0)
+        return (0, 0, 0, 0, "")
 
-    return (1, int(stat.st_size), int(stat.st_mtime_ns))
+    digest = ""
+    try:
+        hasher = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                hasher.update(chunk)
+        digest = hasher.hexdigest()
+    except OSError:
+        # If the file is being rewritten, include ctime/mtime/size and let the
+        # next watch loop re-read it.  Never pretend the marker is unchanged.
+        digest = f"unreadable:{time.monotonic_ns()}"
+
+    return (1, int(stat.st_size), int(stat.st_mtime_ns), int(stat.st_ctime_ns), digest)
 
 
 def metadata_marker(root: Path) -> WorkspaceMarker:
@@ -751,6 +769,64 @@ def create_snapshot_dir(source_root: Path) -> Path:
                 f"Snapshot changed while copying {rel_posix}; retrying next sync pass."
             )
     return staging_root
+
+
+def _run_with_timeout(seconds: float, label: str, func):
+    """Run *func* with a SIGALRM watchdog so hung HF calls release the sync lock."""
+    if seconds <= 0 or not hasattr(signal, "SIGALRM"):
+        return func()
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    try:
+        previous_timer = signal.setitimer(signal.ITIMER_REAL, 0)
+    except Exception:
+        previous_timer = (0.0, 0.0)
+
+    def _timeout_handler(_sig, _frame):
+        raise SyncUploadTimeoutError(f"{label} timed out after {seconds:.0f}s")
+
+    signal.signal(signal.SIGALRM, _timeout_handler)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        return func()
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer and previous_timer[0] > 0:
+            signal.setitimer(signal.ITIMER_REAL, previous_timer[0], previous_timer[1])
+
+
+def upload_snapshot(repo_id: str, snapshot_dir: Path) -> None:
+    strategy = SYNC_UPLOAD_STRATEGY.replace("-", "_")
+    timeout_label = "no timeout" if SYNC_UPLOAD_TIMEOUT <= 0 else f"{SYNC_UPLOAD_TIMEOUT:.0f}s timeout"
+    if strategy not in {"folder", "upload_folder", "large_folder"}:
+        print(f"Warning: unknown SYNC_UPLOAD_STRATEGY={SYNC_UPLOAD_STRATEGY!r}; using upload_folder.")
+        strategy = "folder"
+
+    def _upload() -> None:
+        if strategy == "large_folder":
+            try:
+                HF_API.upload_large_folder(
+                    repo_id=repo_id,
+                    repo_type="dataset",
+                    folder_path=str(snapshot_dir),
+                    num_workers=2,
+                    print_report=False,
+                )
+                return
+            except AttributeError:
+                print("Warning: upload_large_folder unavailable; falling back to upload_folder.")
+
+        upload_folder(
+            folder_path=str(snapshot_dir),
+            repo_id=repo_id,
+            repo_type="dataset",
+            token=HF_TOKEN,
+            commit_message=f"HuggingClaw sync {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
+        )
+
+    print(f"Workspace upload: strategy={strategy}, {timeout_label}")
+    _run_with_timeout(SYNC_UPLOAD_TIMEOUT, "Workspace upload", _upload)
 
 
 def prune_remote_deleted_files(
@@ -954,25 +1030,11 @@ def _sync_once_unlocked(
         write_status("synced", "No workspace changes detected.")
         return (last_fingerprint, current_marker)
 
-    write_status("syncing", f"Uploading workspace to {repo_id}")
+    upload_timeout_label = "no timeout" if SYNC_UPLOAD_TIMEOUT <= 0 else f"timeout {SYNC_UPLOAD_TIMEOUT:.0f}s"
+    write_status("syncing", f"Uploading workspace to {repo_id} ({SYNC_UPLOAD_STRATEGY}, {upload_timeout_label})")
     snapshot_dir = create_snapshot_dir(WORKSPACE)
     try:
-        try:
-            HF_API.upload_large_folder(
-                repo_id=repo_id,
-                repo_type="dataset",
-                folder_path=str(snapshot_dir),
-                num_workers=2,
-                print_report=False,
-            )
-        except AttributeError:
-            upload_folder(
-                folder_path=str(snapshot_dir),
-                repo_id=repo_id,
-                repo_type="dataset",
-                token=HF_TOKEN,
-                commit_message=f"HuggingClaw sync {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
-            )
+        upload_snapshot(repo_id, snapshot_dir)
         skip_prune_prefixes: set[str] = set()
         if had_snapshot_copy_failures:
             # BUG FIX: the old code added "huggingclaw-state/openclaw" to
@@ -1068,9 +1130,6 @@ def sessions_marker() -> tuple[int, int, int, str]:
     newest_mtime = 0
     metadata_hasher = hashlib.sha256()
 
-    global _SESSIONS_FILE_DIGEST_CACHE
-    next_cache: dict[str, tuple[int, int, int, str]] = {}
-
     for profile_dir in sorted(SESSIONS_ROOT.iterdir()):
         if not profile_dir.is_dir():
             continue
@@ -1091,7 +1150,6 @@ def sessions_marker() -> tuple[int, int, int, str]:
             size = int(stat.st_size)
             mtime_ns = int(stat.st_mtime_ns)
             ctime_ns = int(stat.st_ctime_ns)
-            cache_key = f"{profile_dir.name}\0{rel}"
             digest.update(rel.encode("utf-8"))
             digest.update(b"\0")
             digest.update(str(size).encode("ascii"))
@@ -1100,24 +1158,17 @@ def sessions_marker() -> tuple[int, int, int, str]:
             digest.update(b"\0")
             digest.update(str(ctime_ns).encode("ascii"))
             digest.update(b"\0")
-            cached = _SESSIONS_FILE_DIGEST_CACHE.get(cache_key)
-            if (
-                cached is not None
-                and cached[0] == size
-                and cached[1] == mtime_ns
-                and cached[2] == ctime_ns
-            ):
-                file_digest = cached[3]
-            else:
-                file_hasher = hashlib.sha256()
-                try:
-                    with path.open("rb") as handle:
-                        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                            file_hasher.update(chunk)
-                except (FileNotFoundError, IsADirectoryError, NotADirectoryError):
-                    continue
-                file_digest = file_hasher.hexdigest()
-            next_cache[cache_key] = (size, mtime_ns, ctime_ns, file_digest)
+            # Sessions are the most important live data.  Hash every scan
+            # instead of trusting size/mtime/ctime caches so same-size rewrites
+            # and very small edits are never missed by the sessions trigger.
+            file_hasher = hashlib.sha256()
+            try:
+                with path.open("rb") as handle:
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                        file_hasher.update(chunk)
+            except (FileNotFoundError, IsADirectoryError, NotADirectoryError):
+                continue
+            file_digest = file_hasher.hexdigest()
             digest.update(file_digest.encode("ascii"))
             digest.update(b"\0")
 
@@ -1129,11 +1180,10 @@ def sessions_marker() -> tuple[int, int, int, str]:
         metadata_hasher.update(digest.hexdigest().encode("ascii"))
         metadata_hasher.update(b"\0")
 
-    _SESSIONS_FILE_DIGEST_CACHE = next_cache
     return (file_count, total_size, newest_mtime, metadata_hasher.hexdigest())
 
 
-def wait_for_config_settle(config_marker: tuple[int, int, int]) -> tuple[str, tuple[int, int, int]]:
+def wait_for_config_settle(config_marker: FileMarker) -> tuple[str, FileMarker]:
     stable_since = time.monotonic()
     current_marker = config_marker
 
@@ -1156,9 +1206,9 @@ def wait_for_config_settle(config_marker: tuple[int, int, int]) -> tuple[str, tu
 
 
 def wait_for_sync_trigger(
-    config_marker: tuple[int, int, int],
+    config_marker: FileMarker,
     last_sessions_sync_time: float = 0.0,
-) -> tuple[str, tuple[int, int, int]]:
+) -> tuple[str, FileMarker]:
     deadline = time.monotonic() + max(0, INTERVAL)
     # BUG FIX: also watch sessions directory so new/updated sessions
     # trigger an immediate sync instead of waiting the full interval.

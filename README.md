@@ -189,6 +189,8 @@ HuggingClaw automatically syncs your workspace (chats, settings, sessions) to a 
 | `OPENCLAW_CONFIG_SETTLE_SECONDS` | `3` | How long `openclaw.json` must stay valid and unchanged before syncing |
 | `SESSIONS_MIN_SYNC_GAP` | `30` | Minimum seconds between session-triggered immediate syncs |
 | `SYNC_LOCK_TIMEOUT` | `20` | Max seconds one-off syncs wait for another sync lock before failing clearly |
+| `SYNC_UPLOAD_TIMEOUT` | `180` | Max seconds one HF upload call can stay active before failing and retrying next pass; set `0` to disable |
+| `SYNC_UPLOAD_STRATEGY` | `folder` | Upload method: `folder` for normal commit uploads, `large_folder` for HF resumable large-folder uploader |
 | `SYNC_SETTLED_TIMEOUT` | `120` | Shutdown/restart settled-sync upload budget; set `0` to disable the outer timeout |
 | `SYNC_FINAL_TIMEOUT` | `120` | Shutdown/restart final catch-up sync upload budget; set `0` to disable the outer timeout |
 | `SYNC_ONE_SHOT_LOCK_TIMEOUT` | `5` | Short lock wait for shutdown/restart one-shot syncs after the background loop is stopped |
