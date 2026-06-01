@@ -3,16 +3,16 @@ const MODEL_CATALOGS = {
     "Anthropic": [
       "claude-opus-4-7",
       "claude-opus-4-6",
-      "claude-opus-4-5",
-      "claude-opus-4-1",
-      "claude-sonnet-4-7",
       "claude-sonnet-4-6",
-      "claude-sonnet-4-5",
       "claude-haiku-4-5",
       "claude-haiku-4-5-20251001",
-      "claude-haiku-3-5"
+      "claude-opus-4-0",
+      "claude-sonnet-4-0",
+      "claude-3-7-sonnet-latest",
+      "claude-3-5-haiku-latest"
     ],
     "OpenAI": [
+      "gpt-5.5",
       "gpt-5.4-pro",
       "gpt-5.4",
       "gpt-5.4-mini",
@@ -21,10 +21,15 @@ const MODEL_CATALOGS = {
       "gpt-5",
       "gpt-4.1",
       "gpt-4.1-mini",
+      "gpt-4.1-nano",
       "gpt-4o",
-      "gpt-4o-mini",
       "o3",
-      "o4-mini"
+      "o3-mini",
+      "gpt-5.5-2026-04-23",
+      "gpt-5.4-2026-03-05",
+      "gpt-5.4-chat-latest",
+      "gpt-5.5-chat-latest",
+      "chatgpt-4o-latest"
     ],
     "Gemini": [
       "gemini-3.5-flash",
@@ -32,22 +37,29 @@ const MODEL_CATALOGS = {
       "gemini-3.1-flash-lite",
       "gemini-2.5-pro",
       "gemini-2.5-flash",
+      "gemini-2.5-flash-lite",
       "gemini-flash-latest",
-      "gemini-pro-latest"
+      "gemini-pro-latest",
+      "gemini-3.5-flash-latest",
+      "gemini-2.5-pro-latest",
+      "gemini-2.5-flash-latest"
     ],
     "DeepSeek": [
       "deepseek-v4-pro",
       "deepseek-v4-flash",
-      "deepseek-v3.2",
-      "deepseek-chat",
-      "deepseek-reasoner",
       "deepseek-r1",
-      "deepseek-r1-0528"
+      "deepseek-r1-0528",
+      "deepseek-chat",
+      "deepseek-reasoner"
     ],
     "xAI": [
+      "grok-4.20",
       "grok-4.3",
       "grok-4.1",
-      "grok-4"
+      "grok-latest",
+      "grok-4.3-latest",
+      "grok-4.20-latest",
+      "grok-build-0.1"
     ],
     "Groq": [
       "groq/compound",
@@ -57,6 +69,7 @@ const MODEL_CATALOGS = {
       "moonshotai/kimi-k2-instruct-0905",
       "groq/llama-3.3-70b-versatile",
       "qwen/qwen3-32b",
+      "meta-llama/llama-4-scout-17b-16e-instruct",
       "groq/mixtral-8x7b-32768"
     ],
     "Mistral": [
@@ -68,7 +81,10 @@ const MODEL_CATALOGS = {
       "mistral/devstral-2",
       "mistral/ocr-3-premier",
       "mistral/voxtral-mini-transcribe-realtime",
-      "mistral/codestral-latest"
+      "mistral/codestral-latest",
+      "mistral/mistral-latest",
+      "mistral/open-mistral-nemo",
+      "mistral/open-codestral-mamba"
     ],
     "Cohere": [
       "command-a",
@@ -77,7 +93,6 @@ const MODEL_CATALOGS = {
       "command-a-reasoning-08-2025",
       "command-a-vision-07-2025",
       "command-r7b-12-2024",
-      "command-r-08-2024",
       "command-r-plus-08-2024"
     ],
     "OpenRouter": [
@@ -90,9 +105,10 @@ const MODEL_CATALOGS = {
       "openai/gpt-4.1",
       "openai/gpt-4o",
       "openai/gpt-5.1",
+      "google/gemini-3.5-flash",
       "google/gemini-3.1-pro-preview",
       "google/gemini-2.5-pro",
-      "deepseek/deepseek-v3.2",
+      "deepseek/deepseek-v4-pro",
       "deepseek/deepseek-r1",
       "moonshotai/kimi-k2.6",
       "qwen/qwen3-32b",
@@ -199,7 +215,7 @@ const MODEL_CATALOGS = {
     "GitHub Copilot": [
       "github-copilot/gpt-5",
       "github-copilot/gpt-4.1",
-      "github-copilot/gpt-4o"
+      "github-copilot/gpt-4.1-mini"
     ],
     "ZAI": [
       "zai/glm-5",
@@ -218,6 +234,7 @@ const MODEL_CATALOGS = {
     ]
   },
   "OPENAI_MODELS": [
+    "gpt-5.5",
     "gpt-5.4-pro",
     "gpt-5.4",
     "gpt-5.4-mini",
@@ -226,40 +243,55 @@ const MODEL_CATALOGS = {
     "gpt-5",
     "gpt-4.1",
     "gpt-4.1-mini",
+    "gpt-4.1-nano",
     "gpt-4o",
-    "gpt-4o-mini",
     "o3",
-    "o4-mini"
+    "o3-mini",
+    "gpt-5.4-chat-latest",
+    "gpt-5.5-chat-latest",
+    "chatgpt-4o-latest"
   ],
   "ANTHROPIC_MODELS": [
     "anthropic/claude-opus-4-7",
     "anthropic/claude-opus-4-6",
-    "anthropic/claude-opus-4-5",
     "anthropic/claude-sonnet-4-6",
-    "anthropic/claude-sonnet-4-5",
-    "anthropic/claude-haiku-4-5"
+    "anthropic/claude-haiku-4-5",
+    "anthropic/claude-opus-4-0",
+    "anthropic/claude-sonnet-4-0",
+    "anthropic/claude-3-7-sonnet-latest",
+    "anthropic/claude-3-5-haiku-latest"
   ],
   "GEMINI_MODELS": [
     "google/gemini-3.5-flash",
     "google/gemini-3.1-pro-preview",
     "google/gemini-3.1-flash-lite",
     "google/gemini-2.5-pro",
-    "google/gemini-2.5-flash"
+    "google/gemini-2.5-flash",
+    "google/gemini-2.5-flash-lite",
+    "google/gemini-flash-latest",
+    "google/gemini-pro-latest",
+    "google/gemini-3.5-flash-latest",
+    "google/gemini-2.5-pro-latest",
+    "google/gemini-2.5-flash-latest"
   ],
   "VERTEX_MODELS": [
     "google-vertex/gemini-3.5-flash",
     "google-vertex/gemini-3.1-pro-preview",
     "google-vertex/gemini-2.5-pro",
-    "google-vertex/gemini-2.5-flash"
+    "google-vertex/gemini-2.5-flash",
+    "google-vertex/gemini-2.5-flash-lite",
+    "google-vertex/gemini-flash-latest",
+    "google-vertex/gemini-pro-latest",
+    "google-vertex/gemini-2.5-pro-latest",
+    "google-vertex/gemini-2.5-flash-latest"
   ],
   "DEEPSEEK_MODELS": [
     "deepseek/deepseek-v4-pro",
     "deepseek/deepseek-v4-flash",
-    "deepseek/deepseek-v3.2",
-    "deepseek/deepseek-chat",
-    "deepseek/deepseek-reasoner",
     "deepseek/deepseek-r1",
-    "deepseek/deepseek-r1-0528"
+    "deepseek/deepseek-r1-0528",
+    "deepseek/deepseek-chat",
+    "deepseek/deepseek-reasoner"
   ],
   "OPENROUTER_MODELS": [
     "openrouter/free",
@@ -271,9 +303,10 @@ const MODEL_CATALOGS = {
     "openrouter/openai/gpt-4.1",
     "openrouter/openai/gpt-4o",
     "openrouter/openai/gpt-5.1",
+    "openrouter/google/gemini-3.5-flash",
     "openrouter/google/gemini-3.1-pro-preview",
     "openrouter/google/gemini-2.5-pro",
-    "openrouter/deepseek/deepseek-v3.2",
+    "openrouter/deepseek/deepseek-v4-pro",
     "openrouter/deepseek/deepseek-r1",
     "openrouter/moonshotai/kimi-k2.6",
     "openrouter/qwen/qwen3-32b"
@@ -285,6 +318,7 @@ const MODEL_CATALOGS = {
     "openai/gpt-oss-20b",
     "moonshotai/kimi-k2-instruct-0905",
     "groq/llama-3.3-70b-versatile",
+    "meta-llama/llama-4-scout-17b-16e-instruct",
     "qwen/qwen3-32b",
     "groq/mixtral-8x7b-32768"
   ],
@@ -297,12 +331,19 @@ const MODEL_CATALOGS = {
     "mistral/devstral-2",
     "mistral/ocr-3-premier",
     "mistral/voxtral-mini-transcribe-realtime",
-    "mistral/codestral-latest"
+    "mistral/codestral-latest",
+    "mistral/mistral-latest",
+    "mistral/open-mistral-nemo",
+    "mistral/open-codestral-mamba"
   ],
   "XAI_MODELS": [
+    "grok-4.20",
     "grok-4.3",
     "grok-4.1",
-    "grok-4"
+    "grok-latest",
+    "grok-4.3-latest",
+    "grok-4.20-latest",
+    "grok-build-0.1"
   ],
   "COHERE_MODELS": [
     "command-a",
@@ -311,7 +352,6 @@ const MODEL_CATALOGS = {
     "command-a-reasoning-08-2025",
     "command-a-vision-07-2025",
     "command-r7b-12-2024",
-    "command-r-08-2024",
     "command-r-plus-08-2024"
   ],
   "TOGETHER_MODELS": [
@@ -406,11 +446,22 @@ const MODEL_CATALOGS = {
   "GITHUB_COPILOT_MODELS": [
     "github-copilot/gpt-5",
     "github-copilot/gpt-4.1",
-    "github-copilot/gpt-4o"
+    "github-copilot/gpt-4.1-mini"
   ],
-  "AI_GATEWAY_MODELS": [],
-  "VENICE_MODELS": [],
-  "SYNTHETIC_MODELS": []
+  "AI_GATEWAY_MODELS": [
+    "openai/gpt-5.4",
+    "anthropic/claude-sonnet-4-6",
+    "google/gemini-2.5-pro"
+  ],
+  "VENICE_MODELS": [
+    "venice/gpt-5",
+    "venice/llama-3.3-70b",
+    "venice/deepseek-r1"
+  ],
+  "SYNTHETIC_MODELS": [
+    "synthetic/gpt-5",
+    "synthetic/claude-sonnet-4-6"
+  ]
 };
 
 const FIELDS = [
