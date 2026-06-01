@@ -13,13 +13,18 @@
  *   KEY_BLACKLIST_COOLDOWN_MS   base backoff ms        (default 60 000)
  *   KEY_MAX_STRIKES             failures before perm   (default 3)
  *   LLM_API_KEY_FALLBACK_ENABLED true/false            (default true)
+ *   KEY_ROTATOR_LOG_LEVEL      info/debug/silent       (default info)
+ *   KEY_ROTATOR_VERBOSE_PICKS  true/false              (default false)
  */
 
 const http  = require('node:http');
 const https = require('node:https');
 
-const log  = (...a) => console.error(...a);
-const warn = (...a) => console.warn(...a);
+const LOG_LEVEL = String(process.env.KEY_ROTATOR_LOG_LEVEL || 'info').trim().toLowerCase();
+const VERBOSE_PICKS = /^(1|true|yes|on)$/i.test(String(process.env.KEY_ROTATOR_VERBOSE_PICKS || '').trim());
+const log  = (...a) => { if (LOG_LEVEL !== 'silent') console.error(...a); };
+const warn = (...a) => { if (LOG_LEVEL !== 'silent') console.warn(...a); };
+const debug = (...a) => { if (LOG_LEVEL === 'debug') console.error(...a); };
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -175,7 +180,7 @@ function isActive(p, key) {
   if (ks.blacklistedUntil === 0) return true;    // not blacklisted
   if (Date.now() >= ks.blacklistedUntil) {
     ks.blacklistedUntil = 0;                     // expired → back in pool
-    log(`[key-rotator] ${p.name}: ...${key.slice(-6)} back in pool`);
+    debug(`[key-rotator] ${p.name}: ...${key.slice(-6)} back in pool`);
     return true;
   }
   return false;
@@ -209,10 +214,25 @@ function recordFailure(p, key) {
     const jitter = 1 + ((Math.random() * 2 - 1) * (COOLDOWN_JITTER_PCT / 100));
     cooldown = Math.max(1000, Math.round(cooldown * jitter));
     const secs = Math.round(cooldown / 1000);
-    log(`[key-rotator] ${p.name}: ...${key.slice(-6)} strike ${ks.strikes}/${MAX_STRIKES} — backoff ${secs}s`);
+    debug(`[key-rotator] ${p.name}: ...${key.slice(-6)} strike ${ks.strikes}/${MAX_STRIKES} — backoff ${secs}s`);
   }
 
   ks.blacklistedUntil = Date.now() + cooldown;
+}
+
+/**
+ * Called on transient retryable failures (non-quota/rate):
+ * applies short cooldown without incrementing strikes.
+ */
+function recordTransientFailure(p, key) {
+  let ks = p.keyState.get(key);
+  if (!ks) { ks = makeKeyState(); p.keyState.set(key, ks); }
+  ks.lastFailureAt = Date.now();
+  const jitter = 1 + ((Math.random() * 2 - 1) * (COOLDOWN_JITTER_PCT / 100));
+  const cooldown = Math.max(1000, Math.round(BASE_COOLDOWN_MS * jitter));
+  ks.blacklistedUntil = Math.max(ks.blacklistedUntil || 0, Date.now() + cooldown);
+  const secs = Math.round(cooldown / 1000);
+  debug(`[key-rotator] ${p.name}: ...${key.slice(-6)} transient backoff ${secs}s (strikes unchanged)`);
 }
 
 /**
@@ -223,12 +243,12 @@ function recordSuccess(p, key) {
   if (ks && ks.strikes > 0) {
     ks.strikes = 0;
     ks.lastFailureAt = 0;
-    log(`[key-rotator] ${p.name}: ...${key.slice(-6)} recovered — strikes reset`);
+    debug(`[key-rotator] ${p.name}: ...${key.slice(-6)} recovered — strikes reset`);
   }
 }
 
 function classifyRetryableFailure(status, errCode) {
-  const retryableStatus = new Set([408, 425, 429, 500, 502, 503, 504, 529, 402]);
+  const retryableStatus = new Set([402, 408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524, 529]);
   const retryableErrorCodes = new Set([
     'ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ENOTFOUND',
     'ECONNREFUSED', 'EPIPE',
@@ -280,7 +300,7 @@ function nextKey(p) {
       const inflight = p.inFlight.get(key) || 0;
       if (inflight < MAX_INFLIGHT_PER_KEY) {
         p.idx = (i + 1) % total;   // next call starts AFTER the key we just picked
-        log(`[key-rotator] ${p.name}: picked ...${key.slice(-6)} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
+        if (VERBOSE_PICKS) debug(`[key-rotator] ${p.name}: picked ...${key.slice(-6)} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
         return key;
       }
       if (!bestPick) bestPick = { i, key, inflight, score: Number.POSITIVE_INFINITY };
@@ -353,10 +373,20 @@ function handleStatus(p, key, status) {
     warn(`[key-rotator] ${p.name}: ...${key.slice(-6)} auth-failed (${status}) — suspended for ${formatHours(PERM_SUSPEND_MS)} h`);
     return;
   }
-  if (classifyRetryableFailure(status)) {
+
+  if (status === 429 || status === 402) {
     recordFailure(p, key);
-    warn(`[key-rotator] ${p.name}: retryable status=${status} on ...${key.slice(-6)}`);
-  } else if (status >= 200 && status < 400) {
+    warn(`[key-rotator] ${p.name}: quota/rate status=${status} on ...${key.slice(-6)}`);
+    return;
+  }
+
+  if (classifyRetryableFailure(status)) {
+    recordTransientFailure(p, key);
+    warn(`[key-rotator] ${p.name}: transient status=${status} on ...${key.slice(-6)}`);
+    return;
+  }
+
+  if (status >= 200 && status < 400) {
     recordSuccess(p, key);
   }
 }
@@ -364,9 +394,11 @@ function handleStatus(p, key, status) {
 function handleTransportError(p, key, err) {
   if (!p || !key) return;
   const code = err?.code ? String(err.code).toUpperCase() : '';
-  if (classifyRetryableFailure(undefined, code)) {
+  const name = String(err?.name || '');
+  const retryable = classifyRetryableFailure(undefined, code) || name === 'AbortError';
+  if (retryable) {
     recordFailure(p, key);
-    warn(`[key-rotator] ${p.name}: retryable network code=${code} on ...${key.slice(-6)}`);
+    warn(`[key-rotator] ${p.name}: retryable network ${name || 'Error'}${code ? ` code=${code}` : ''} on ...${key.slice(-6)}`);
   }
 }
 
@@ -428,7 +460,8 @@ function patchFetch() {
       const baseRequest = new Request(input, init);
       const method = String(baseRequest.method || 'GET').toUpperCase();
       const replaySafe = method === 'GET' || method === 'HEAD' || method === 'OPTIONS';
-      const maxAttempts = replaySafe ? 1 + FETCH_MAX_RETRIES : 1;
+      const retryEligible = replaySafe || method === 'POST';
+      const maxAttempts = retryEligible ? 1 + FETCH_MAX_RETRIES : 1;
       const triedKeys = new Set();
       let lastErr = null;
       let lastResponse = null;
@@ -478,7 +511,7 @@ function patchFetch() {
               10_000,
               Math.max(retryAfterMs, FETCH_RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1)),
             );
-            warn(`[key-rotator] ${provider.name}: fetch retry ${attempt}/${maxAttempts - 1} after status=${response.status}`);
+            warn(`[key-rotator] ${provider.name}: fetch retry ${attempt}/${maxAttempts - 1} after status=${response.status} method=${method}`);
             await sleep(backoffMs);
             continue;
           }
@@ -488,10 +521,11 @@ function patchFetch() {
           try { handleTransportError(provider, usedKey, err); } catch (_) {}
           try { endInFlight(provider, usedKey); } catch (_) {}
           const code = err?.code ? String(err.code).toUpperCase() : '';
-          const shouldRetry = attempt < maxAttempts && classifyRetryableFailure(undefined, code);
+          const isAbort = String(err?.name || '') === 'AbortError';
+          const shouldRetry = attempt < maxAttempts && (classifyRetryableFailure(undefined, code) || isAbort);
           if (shouldRetry) {
             const backoffMs = Math.min(10_000, FETCH_RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1));
-            warn(`[key-rotator] ${provider.name}: fetch retry ${attempt}/${maxAttempts - 1} after network code=${code || 'unknown'}`);
+            warn(`[key-rotator] ${provider.name}: fetch retry ${attempt}/${maxAttempts - 1} after network ${isAbort ? 'AbortError' : `code=${code || 'unknown'}`} method=${method}`);
             await sleep(backoffMs);
             continue;
           }
@@ -578,4 +612,4 @@ patchHttpModule(http);
 patchHttpModule(https);
 startDiagnostics();
 
-log(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:${formatHours(PERM_SUSPEND_MS)}h (cap 16h) max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'}`);
+log(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:${formatHours(PERM_SUSPEND_MS)}h (cap 16h) max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'} log-level:${LOG_LEVEL} verbose-picks:${VERBOSE_PICKS ? 'on' : 'off'}`);
