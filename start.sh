@@ -377,13 +377,26 @@ promote_first_pool_key() {
   [ -n "$pool_val" ] || return 0
 
   local first
-  first=$(printf '%s' "$pool_val" | tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | awk 'NF{print; exit}')
+  first=$(printf '%s' "$pool_val" | tr ',\r' '\n\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | awk 'NF{print; exit}')
   [ -n "$first" ] || return 0
   export "${singular_var}=$first"
 }
 
 promote_first_pool_key "ANTHROPIC_API_KEY" "ANTHROPIC_API_KEYS"
 promote_first_pool_key "OPENAI_API_KEY" "OPENAI_API_KEYS"
+# Accept common Google/Gemini aliases used by SDK docs and existing Spaces, then
+# normalize them into GEMINI_* so OpenClaw config and the key rotator agree.
+for _HC_GOOGLE_POOL_ALIAS in GOOGLE_API_KEYS GOOGLE_GENERATIVE_AI_API_KEYS GOOGLE_AI_API_KEYS; do
+  if [ -z "${GEMINI_API_KEYS:-}" ] && [ -n "${!_HC_GOOGLE_POOL_ALIAS:-}" ]; then
+    export GEMINI_API_KEYS="${!_HC_GOOGLE_POOL_ALIAS}"
+  fi
+done
+for _HC_GOOGLE_KEY_ALIAS in GOOGLE_API_KEY GOOGLE_GENERATIVE_AI_API_KEY GOOGLE_AI_API_KEY; do
+  if [ -z "${GEMINI_API_KEY:-}" ] && [ -n "${!_HC_GOOGLE_KEY_ALIAS:-}" ]; then
+    export GEMINI_API_KEY="${!_HC_GOOGLE_KEY_ALIAS}"
+  fi
+done
+unset _HC_GOOGLE_POOL_ALIAS _HC_GOOGLE_KEY_ALIAS
 promote_first_pool_key "GEMINI_API_KEY" "GEMINI_API_KEYS"
 promote_first_pool_key "DEEPSEEK_API_KEY" "DEEPSEEK_API_KEYS"
 promote_first_pool_key "OPENROUTER_API_KEY" "OPENROUTER_API_KEYS"
@@ -2151,6 +2164,53 @@ if [ -s "$STARTUP_FILE" ]; then
   hc_run_startup_script "workspace/startup.sh" "$(cat "$STARTUP_FILE")" || true
   echo "Workspace startup script complete."
 fi
+hc_clean_node_options_for_openclaw_maintenance() {
+  # OpenClaw plugin install/inspect/update is a maintenance path, not gateway
+  # traffic. Keep it isolated from HuggingClaw's gateway preloads because those
+  # hooks patch fetch/undici globally and can redirect package downloads through
+  # Cloudflare or emit rotator startup logs into installer output.
+  local cleaned=" ${NODE_OPTIONS:-} "
+  cleaned="${cleaned//--require \/opt\/cloudflare-proxy.js / }"
+  cleaned="${cleaned//--require=\/opt\/cloudflare-proxy.js / }"
+  cleaned="${cleaned//-r \/opt\/cloudflare-proxy.js / }"
+  cleaned="${cleaned//--require \/home\/node\/app\/iframe-fix.cjs / }"
+  cleaned="${cleaned//--require=\/home\/node\/app\/iframe-fix.cjs / }"
+  cleaned="${cleaned//-r \/home\/node\/app\/iframe-fix.cjs / }"
+  cleaned="${cleaned//--require \/home\/node\/app\/multi-provider-key-rotator.cjs / }"
+  cleaned="${cleaned//--require=\/home\/node\/app\/multi-provider-key-rotator.cjs / }"
+  cleaned="${cleaned//-r \/home\/node\/app\/multi-provider-key-rotator.cjs / }"
+  # Normalize whitespace after removing known preload pairs.
+  printf '%s' "$cleaned" | tr -s ' ' | sed 's/^ //;s/ $//'
+}
+
+hc_openclaw_maintenance() {
+  local cleaned_node_options
+  cleaned_node_options="$(hc_clean_node_options_for_openclaw_maintenance)"
+  if [ -n "$cleaned_node_options" ]; then
+    if [ -n "${OPENCLAW_CONFIG_PATH:-}" ]; then
+      env NODE_OPTIONS="$cleaned_node_options" OPENCLAW_CONFIG_PATH="$OPENCLAW_CONFIG_PATH" openclaw "$@"
+    else
+      env NODE_OPTIONS="$cleaned_node_options" openclaw "$@"
+    fi
+  else
+    if [ -n "${OPENCLAW_CONFIG_PATH:-}" ]; then
+      env -u NODE_OPTIONS OPENCLAW_CONFIG_PATH="$OPENCLAW_CONFIG_PATH" openclaw "$@"
+    else
+      env -u NODE_OPTIONS openclaw "$@"
+    fi
+  fi
+}
+
+hc_openclaw_maintenance_with_optional_config() {
+  local config_path="${1:-}"
+  shift || true
+  if [ -n "$config_path" ] && [ -f "$config_path" ]; then
+    OPENCLAW_CONFIG_PATH="$config_path" hc_openclaw_maintenance "$@"
+  else
+    hc_openclaw_maintenance "$@"
+  fi
+}
+
 whatsapp_plugin_runtime_ok() {
   # Check both the bare and scoped install paths that OpenClaw uses across
   # stable/beta releases.  The scoped path (@openclaw/whatsapp) is used when
@@ -2177,7 +2237,7 @@ whatsapp_plugin_runtime_ok() {
   # missing dist files → crash loop.
   if command -v openclaw >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     local inspect_json
-    inspect_json=$(openclaw plugins inspect whatsapp --runtime --json 2>/dev/null) || true
+    inspect_json=$(hc_openclaw_maintenance plugins inspect whatsapp --runtime --json 2>/dev/null) || true
     if [ -n "$inspect_json" ]; then
       local root_dir
       root_dir=$(printf '%s' "$inspect_json" \
@@ -2239,27 +2299,22 @@ install_whatsapp_plugin_runtime() {
     fi
   fi
 
-  local install_env=()
-  if [ -n "$install_config" ] && [ -f "$install_config" ]; then
-    install_env=(env OPENCLAW_CONFIG_PATH="$install_config")
-  fi
-
   # Official WhatsApp docs: stable/beta uses the external @openclaw/whatsapp
   # plugin, preferring ClawHub and using the bare npm package only as fallback.
   # Do not pin versions here; OpenClaw's plugin installer/update logic tracks
   # the correct release/beta tag for the active OpenClaw channel.
   local installed_ok=false
-  if "${install_env[@]}" openclaw plugins install "clawhub:@openclaw/whatsapp" >> /tmp/openclaw-whatsapp-plugin-install.log 2>&1; then
+  if hc_openclaw_maintenance_with_optional_config "$install_config" plugins install "clawhub:@openclaw/whatsapp" >> /tmp/openclaw-whatsapp-plugin-install.log 2>&1; then
     installed_ok=true
-  elif "${install_env[@]}" openclaw plugins install "@openclaw/whatsapp" >> /tmp/openclaw-whatsapp-plugin-install.log 2>&1; then
+  elif hc_openclaw_maintenance_with_optional_config "$install_config" plugins install "@openclaw/whatsapp" >> /tmp/openclaw-whatsapp-plugin-install.log 2>&1; then
     installed_ok=true
   else
     # If an install record already exists but its payload is broken/missing,
     # OpenClaw's documented path is update/repair rather than blind reinstall.
     echo "WhatsApp plugin install did not complete; trying OpenClaw plugin update for an existing broken install..." >> /tmp/openclaw-whatsapp-plugin-install.log
-    if "${install_env[@]}" openclaw plugins update whatsapp >> /tmp/openclaw-whatsapp-plugin-install.log 2>&1; then
+    if hc_openclaw_maintenance_with_optional_config "$install_config" plugins update whatsapp >> /tmp/openclaw-whatsapp-plugin-install.log 2>&1; then
       installed_ok=true
-    elif "${install_env[@]}" openclaw plugins update @openclaw/whatsapp >> /tmp/openclaw-whatsapp-plugin-install.log 2>&1; then
+    elif hc_openclaw_maintenance_with_optional_config "$install_config" plugins update @openclaw/whatsapp >> /tmp/openclaw-whatsapp-plugin-install.log 2>&1; then
       installed_ok=true
     fi
   fi

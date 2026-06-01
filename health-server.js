@@ -41,6 +41,7 @@ const TELEGRAM_WEBHOOK_URL = (process.env.TELEGRAM_WEBHOOK_URL || "").trim();
 const TELEGRAM_ENABLED = !!process.env.TELEGRAM_BOT_TOKEN;
 const WHATSAPP_ENABLED = isTrue(process.env.WHATSAPP_ENABLED);
 const WHATSAPP_STATUS_FILE = "/tmp/huggingclaw-wa-status.json";
+const KEY_ROTATOR_EVENT_LOG_FILE = process.env.KEY_ROTATOR_EVENT_LOG_FILE || "/tmp/huggingclaw-key-rotator-events.jsonl";
 const HF_BACKUP_ENABLED = !!process.env.HF_TOKEN;
 const SYNC_INTERVAL = (process.env.SYNC_INTERVAL || "180").trim() || "180";
 const BACKUP_DATASET_NAME = (process.env.BACKUP_DATASET_NAME || process.env.BACKUP_DATASET || "huggingclaw-backup").trim() || "huggingclaw-backup";
@@ -327,6 +328,13 @@ function requireAuth(req, res) {
   return false;
 }
 
+function requireJsonAuth(req, res) {
+  if (isAuthorized(req)) return true;
+  res.writeHead(401, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+  res.end(JSON.stringify({ error: "unauthorized", message: "GATEWAY_TOKEN required" }));
+  return false;
+}
+
 function readBody(req) {
   return new Promise((resolve) => {
     let body = "";
@@ -427,7 +435,7 @@ function renderDashboard(data) {
     .subtitle{margin-top:12px;color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.14em;font-weight:800}
     .btn-row{display:flex;gap:12px;margin:24px 0 20px}
     .hero-action{display:flex;flex:1;min-height:46px;align-items:center;justify-content:center;border-radius:8px;background:#fff;color:#000;text-decoration:none;font-weight:850;font-size:.98rem;transition:opacity .15s}
-    .hero-action:hover{opacity:.9}.hero-action.terminal{background:#1e1e2e;color:#cdd6f4;border:1px solid #45475a}.hero-action.env{background:#312e81;color:#eef2ff;border:1px solid #6366f1}
+    .hero-action:hover{opacity:.9}.hero-action.terminal{background:#1e1e2e;color:#cdd6f4;border:1px solid #45475a}.hero-action.env{background:#312e81;color:#eef2ff;border:1px solid #6366f1}.hero-action.keys{background:#0f766e;color:#ecfeff;border:1px solid #2dd4bf}
     .overview{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-bottom:10px}
     .tile{border:1px solid var(--line);background:var(--panel);border-radius:11px;padding:18px;min-height:124px;display:flex;flex-direction:column;gap:10px}
     .tile.ok{border-color:rgba(34,197,94,.22)}.tile.warn{border-color:rgba(245,197,66,.24)}.tile.off{border-color:rgba(251,113,133,.28)}
@@ -451,6 +459,7 @@ function renderDashboard(data) {
     <a class="hero-action" data-space-link="app" href="${APP_BASE}/">Open Control UI →</a>
     ${JUPYTER_ENABLED ? `<a class="hero-action terminal" data-space-link="terminal" href="${JUPYTER_BASE}/">💻 Open Terminal →</a>` : ""}
     <a class="hero-action env" data-space-link="env-builder" href="/env-builder">⚙️ Env Builder →</a>
+    <a class="hero-action keys" data-space-link="key-rotator" href="/key-rotator">🔑 Key Rotator →</a>
   </div>
   <section class="overview">${tilesHtml}</section>
   <footer>Built by <a href="https://github.com/somratpro" target="_blank" rel="noopener noreferrer" style="color:inherit;text-decoration:none">@somratpro</a>${JUPYTER_ENABLED ? " · Terminal by JupyterLab" : ""} · Contributions by <a href="https://github.com/anurag008w" target="_blank" rel="noopener noreferrer" style="color:inherit;text-decoration:none">@anurag008w</a></footer>
@@ -566,6 +575,102 @@ function renderEnvBuilder() {
     return fs.readFileSync(require("path").join(__dirname, "env-builder.html"), "utf8");
   } catch (exc) {
     return `<!doctype html><title>Env Builder unavailable</title><pre>${escapeHtml(exc.message)}</pre>`;
+  }
+}
+
+function renderKeyRotatorManager() {
+  try {
+    return fs.readFileSync(require("path").join(__dirname, "key-rotator-manager.html"), "utf8");
+  } catch (exc) {
+    return `<!doctype html><title>Key Rotator unavailable</title><pre>${escapeHtml(exc.message)}</pre>`;
+  }
+}
+
+function splitKeyPool(value) {
+  return String(value || "").split(/[\n\r,]+/).map((s) => s.trim()).filter(Boolean);
+}
+
+function maskApiKey(value) {
+  const key = String(value || "");
+  return key.length > 12 ? `${key.slice(0, 4)}...${key.slice(-6)}` : "***";
+}
+
+function providerKeySummary() {
+  const providers = [
+    { name: "gemini", env: ["GEMINI_API_KEYS", "GEMINI_API_KEY"], aliases: ["GOOGLE_API_KEYS", "GOOGLE_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEYS", "GOOGLE_GENERATIVE_AI_API_KEY", "GOOGLE_AI_API_KEYS", "GOOGLE_AI_API_KEY"] },
+    { name: "openai", env: ["OPENAI_API_KEYS", "OPENAI_API_KEY"] },
+    { name: "anthropic", env: ["ANTHROPIC_API_KEYS", "ANTHROPIC_API_KEY"] },
+    { name: "openrouter", env: ["OPENROUTER_API_KEYS", "OPENROUTER_API_KEY"] },
+    { name: "groq", env: ["GROQ_API_KEYS", "GROQ_API_KEY"] },
+    { name: "mistral", env: ["MISTRAL_API_KEYS", "MISTRAL_API_KEY"] },
+    { name: "xai", env: ["XAI_API_KEYS", "XAI_API_KEY"] },
+    { name: "nvidia", env: ["NVIDIA_API_KEYS", "NVIDIA_API_KEY"] },
+    { name: "cohere", env: ["COHERE_API_KEYS", "COHERE_API_KEY"] },
+    { name: "together", env: ["TOGETHER_API_KEYS", "TOGETHER_API_KEY"] },
+    { name: "cerebras", env: ["CEREBRAS_API_KEYS", "CEREBRAS_API_KEY"] },
+    { name: "huggingface", env: ["HUGGINGFACE_HUB_TOKENS", "HUGGINGFACE_HUB_TOKEN"] },
+    { name: "deepseek", env: ["DEEPSEEK_API_KEYS", "DEEPSEEK_API_KEY"] },
+    { name: "kilocode", env: ["KILOCODE_API_KEYS", "KILOCODE_API_KEY"] },
+    { name: "opencode", env: ["OPENCODE_API_KEYS", "OPENCODE_API_KEY"] },
+    { name: "zai", env: ["ZAI_API_KEYS", "ZAI_API_KEY"] },
+    { name: "kimi-moonshot", env: ["KIMI_API_KEYS", "KIMI_API_KEY", "MOONSHOT_API_KEYS", "MOONSHOT_API_KEY"] },
+    { name: "minimax", env: ["MINIMAX_API_KEYS", "MINIMAX_API_KEY"] },
+    { name: "modelstudio/qwen", env: ["MODELSTUDIO_API_KEYS", "MODELSTUDIO_API_KEY"] },
+    { name: "xiaomi", env: ["XIAOMI_API_KEYS", "XIAOMI_API_KEY"] },
+    { name: "volcengine", env: ["VOLCANO_ENGINE_API_KEYS", "VOLCANO_ENGINE_API_KEY"] },
+    { name: "byteplus", env: ["BYTEPLUS_API_KEYS", "BYTEPLUS_API_KEY"] },
+    { name: "qianfan", env: ["QIANFAN_API_KEYS", "QIANFAN_API_KEY"] },
+    { name: "venice", env: ["VENICE_API_KEYS", "VENICE_API_KEY"] },
+    { name: "github-copilot", env: ["COPILOT_GITHUB_TOKENS", "COPILOT_GITHUB_TOKEN"] },
+    { name: "synthetic", env: ["SYNTHETIC_API_KEYS", "SYNTHETIC_API_KEY"] },
+  ];
+  return providers.map((p) => {
+    const names = [...p.env, ...(p.aliases || [])];
+    const keys = [];
+    const seen = new Set();
+    const used = [];
+    for (const name of names) {
+      const vals = splitKeyPool(process.env[name]);
+      if (vals.length) used.push(name);
+      for (const val of vals) if (!seen.has(val)) { seen.add(val); keys.push(val); }
+    }
+    return {
+      name: p.name,
+      total: keys.length,
+      env: used.slice(0, 2).join(", "),
+      aliases: used.length > 2 ? `${used.length - 2} more envs` : "",
+      keys: keys.map((key, idx) => ({ slot: idx + 1, total: keys.length, key: maskApiKey(key) })),
+    };
+  }).filter((p) => p.total > 0);
+}
+function keyRotatorEventLogStatus() {
+  try {
+    const stat = fs.statSync(KEY_ROTATOR_EVENT_LOG_FILE);
+    return { exists: true, size: stat.size, updatedAt: stat.mtime.toISOString() };
+  } catch {
+    return { exists: false, size: 0, updatedAt: null };
+  }
+}
+
+function readKeyRotatorEvents(limit = 500) {
+  let fd = null;
+  try {
+    if (!fs.existsSync(KEY_ROTATOR_EVENT_LOG_FILE)) return [];
+    const maxBytes = 1024 * 1024;
+    const stat = fs.statSync(KEY_ROTATOR_EVENT_LOG_FILE);
+    fd = fs.openSync(KEY_ROTATOR_EVENT_LOG_FILE, "r");
+    const size = Math.min(stat.size, maxBytes);
+    const buf = Buffer.alloc(size);
+    fs.readSync(fd, buf, 0, size, Math.max(0, stat.size - size));
+    return buf.toString("utf8").split("\n").filter(Boolean).slice(-limit).map((line) => {
+      try { return JSON.parse(line); } catch { return null; }
+    }).filter(Boolean);
+  } catch {
+    return [];
+  } finally {
+    if (fd !== null) {
+      try { fs.closeSync(fd); } catch {}
+    }
   }
 }
 
@@ -793,6 +898,29 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(404, { "Content-Type": "text/plain" });
       return res.end(`env-builder.js not found: ${exc.message}`);
     }
+  }
+
+  if (pathname === "/key-rotator" || pathname === "/key-rotator/") {
+    if (isDirectHfSpaceRequest) {
+      res.writeHead(200, { "Content-Type": "text/html", "Cache-Control": "no-store" });
+      return res.end(renderPrivateRedirect(HF_SPACE_URL));
+    }
+    if (!requireAuth(req, res)) return;
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+    return res.end(renderKeyRotatorManager());
+  }
+
+  if (pathname === "/api/key-rotator/logs") {
+    if (!requireJsonAuth(req, res)) return;
+    const parsed = parseRequestUrl(req.url);
+    const limit = Math.max(1, Math.min(2000, Number.parseInt(parsed.searchParams.get("limit") || "500", 10) || 500));
+    res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+    return res.end(JSON.stringify({
+      file: KEY_ROTATOR_EVENT_LOG_FILE,
+      log: keyRotatorEventLogStatus(),
+      providers: providerKeySummary(),
+      events: readKeyRotatorEvents(limit),
+    }));
   }
 
   if (pathname === "/" || pathname === "/dashboard") {
