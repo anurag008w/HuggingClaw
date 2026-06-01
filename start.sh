@@ -124,6 +124,15 @@ if [ -n "${SPACE_HOST:-}" ]; then
   ACP_PLUGIN_MODE="${ACP_PLUGIN_MODE:-disabled}"
   # HF Spaces does not benefit from Bonjour discovery, and the retries add noise.
   export OPENCLAW_DISABLE_BONJOUR="${OPENCLAW_DISABLE_BONJOUR:-1}"
+  # HF Spaces IPv6 routing is unreliable and causes ECONNRESET on outbound
+  # WebSocket connections (WhatsApp, Telegram, etc.) which triggers gateway
+  # channel restarts and floods logs with "ws closed before connect" (1006)
+  # errors. Force IPv4 globally for ALL channels on this Space.
+  # Previously this was only set inside the Telegram block — meaning
+  # WhatsApp-only deployments never got this fix and suffered ECONNRESET drops.
+  export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--dns-result-order=ipv4first"
+  export OPENCLAW_WHATSAPP_DISABLE_AUTO_SELECT_FAMILY="${OPENCLAW_WHATSAPP_DISABLE_AUTO_SELECT_FAMILY:-1}"
+  export OPENCLAW_WHATSAPP_DNS_RESULT_ORDER="${OPENCLAW_WHATSAPP_DNS_RESULT_ORDER:-ipv4first}"
 else
   OPENCLAW_CONSOLE_LOG_LEVEL="${OPENCLAW_CONSOLE_LOG_LEVEL:-info}"
   OPENCLAW_FILE_LOG_LEVEL="${OPENCLAW_FILE_LOG_LEVEL:-info}"
@@ -454,20 +463,54 @@ fi
 #   NVIDIA_MODELS=model1,model2
 #   OPENAI_MODELS=gpt-4o-mini,gpt-4.1
 # This helps when provider auto-discovery does not populate models reliably.
+# Default catalogs (used when *_MODELS env is not set but key IS configured).
+# These let multi-key pool users see models without having to also set *_MODELS.
+_DEFAULT_ANTHROPIC_MODELS="anthropic/claude-opus-4-6,anthropic/claude-sonnet-4-6,anthropic/claude-haiku-4-5"
+_DEFAULT_OPENAI_MODELS="openai/gpt-5.5,openai/gpt-5.4-mini,openai/gpt-4o,openai/gpt-4o-mini"
+_DEFAULT_GEMINI_MODELS="google/gemini-3.1-pro-preview,google/gemini-3.1-flash-preview,google/gemini-2.5-pro,google/gemini-2.5-flash,google/gemini-2.0-flash"
+_DEFAULT_VERTEX_MODELS="google-vertex/gemini-2.5-pro,google-vertex/gemini-2.5-flash,google-vertex/gemini-2.0-flash"
+_DEFAULT_DEEPSEEK_MODELS="deepseek/deepseek-v4-pro,deepseek/deepseek-v4-flash,deepseek/deepseek-chat,deepseek/deepseek-reasoner"
+_DEFAULT_OPENROUTER_MODELS="openrouter/auto,openrouter/anthropic/claude-opus-4-6,openrouter/openai/gpt-4o,openrouter/google/gemini-2.5-pro"
+_DEFAULT_GROQ_MODELS="groq/compound-beta,groq/moonshotai/kimi-k2-5,groq/deepseek-r1-distill-llama-70b"
+_DEFAULT_MISTRAL_MODELS="mistral/mistral-large-latest,mistral/codestral-latest,mistral/mistral-small-latest"
+_DEFAULT_XAI_MODELS="xai/grok-4.3,xai/grok-3,xai/grok-3-mini"
+_DEFAULT_COHERE_MODELS="cohere/command-r-plus,cohere/command-r"
+_DEFAULT_TOGETHER_MODELS="together/moonshotai/Kimi-K2.5,together/deepseek-ai/DeepSeek-V3.2,together/meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
+_DEFAULT_CEREBRAS_MODELS="cerebras/zai-glm-4.7,cerebras/llama-4-scout-17b-16e-instruct"
+_DEFAULT_NVIDIA_MODELS="nvidia/nemotron-3-super-120b-a12b,nvidia/moonshotai/kimi-k2.5"
+_DEFAULT_KILOCODE_MODELS="kilocode/kilo/auto"
+_DEFAULT_MOONSHOT_MODELS="moonshot/kimi-k2.6,moonshot/kimi-k2.5,moonshot/kimi-k2-thinking"
+_DEFAULT_MINIMAX_MODELS="minimax/MiniMax-M2.7,minimax/MiniMax-M2.5"
+_DEFAULT_ZAI_MODELS="zai/glm-5.1,zai/glm-4.7"
+_DEFAULT_MODELSTUDIO_MODELS="modelstudio/qwen3-max,modelstudio/qwen3-coder,modelstudio/qwen3-32b"
+_DEFAULT_VENICE_MODELS="venice/llama-3.3-70b"
+_DEFAULT_OPENCODE_MODELS="opencode/claude-opus-4-6,opencode/claude-sonnet-4-6"
+_DEFAULT_HUGGINGFACE_MODELS="huggingface/deepseek-ai/DeepSeek-R1,huggingface/meta-llama/Llama-4-Scout-17B-16E-Instruct"
+_DEFAULT_GITHUB_COPILOT_MODELS="github-copilot/gpt-5,github-copilot/gpt-4.1,github-copilot/gpt-4o"
+
 INJECTED_MODELS_PROVIDERS='{}'
 inject_provider_models_from_env() {
   local provider="$1"
   local models_env="$2"
   local key_env_single="$3"
   local key_env_pool="$4"
+  local default_models_env="${5:-}"          # Optional 5th arg: fallback default models var name
   local models_csv="${!models_env:-}"
   local single_key="${!key_env_single:-}"
   local pool_keys="${!key_env_pool:-}"
 
-  # Only inject when both:
-  # 1) provider has at least one configured key
-  # 2) explicit model list env is provided
-  if [ -z "$models_csv" ] || { [ -z "$single_key" ] && [ -z "$pool_keys" ]; }; then
+  # Need at least one configured key
+  if [ -z "$single_key" ] && [ -z "$pool_keys" ]; then
+    return 0
+  fi
+
+  # If no explicit model list but a default var was provided, fall back to it
+  if [ -z "$models_csv" ] && [ -n "$default_models_env" ]; then
+    models_csv="${!default_models_env:-}"
+  fi
+
+  # Still nothing to inject
+  if [ -z "$models_csv" ]; then
     return 0
   fi
 
@@ -478,7 +521,18 @@ inject_provider_models_from_env() {
     | awk 'NF' \
     | jq -R . \
     | jq -s --arg provider "$provider" '
-        map(if contains("/") then . else ($provider + "/" + .) end)
+        map(
+          if contains("/") then
+            # Fix cross-prefix: strip any foreign provider prefix, reapply correct one.
+            # e.g. "google/gemini-2.5-pro" injected into "google-vertex" becomes
+            #      "google-vertex/gemini-2.5-pro"
+            if startswith($provider + "/") then .
+            else ($provider + "/" + (split("/") | last))
+            end
+          else
+            ($provider + "/" + .)
+          end
+        )
         | map({id: ., name: .})
         | unique_by(.id)')
 
@@ -494,45 +548,64 @@ inject_provider_models_from_env() {
     '.[$provider] = ((.[$provider] // {}) + {models: $models})' <<<"$INJECTED_MODELS_PROVIDERS")
 }
 
+# ── Google Vertex AI credentials setup ──
+# Vertex AI uses GCP project + location, NOT a simple Gemini API key.
+# Set GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_LOCATION, and optionally
+# GOOGLE_APPLICATION_CREDENTIALS_JSON (base64-encoded service account JSON).
+if [ -n "${GOOGLE_APPLICATION_CREDENTIALS_JSON:-}" ]; then
+  _VERTEX_CREDS_FILE="/tmp/gcp-service-account.json"
+  printf '%s' "$GOOGLE_APPLICATION_CREDENTIALS_JSON" | base64 -d > "$_VERTEX_CREDS_FILE" 2>/dev/null \
+    || printf '%s' "$GOOGLE_APPLICATION_CREDENTIALS_JSON" > "$_VERTEX_CREDS_FILE"
+  export GOOGLE_APPLICATION_CREDENTIALS="$_VERTEX_CREDS_FILE"
+  echo "Note: GOOGLE_APPLICATION_CREDENTIALS written from GOOGLE_APPLICATION_CREDENTIALS_JSON"
+fi
+[ -n "${GOOGLE_CLOUD_PROJECT:-}" ]  && export GOOGLE_CLOUD_PROJECT
+[ -n "${GOOGLE_CLOUD_LOCATION:-}" ] && export GOOGLE_CLOUD_LOCATION
+
 # Built-in provider model envs (optional)
-inject_provider_models_from_env "anthropic" "ANTHROPIC_MODELS" "ANTHROPIC_API_KEY" "ANTHROPIC_API_KEYS"
-inject_provider_models_from_env "openai" "OPENAI_MODELS" "OPENAI_API_KEY" "OPENAI_API_KEYS"
-inject_provider_models_from_env "openai-codex" "OPENAI_MODELS" "OPENAI_API_KEY" "OPENAI_API_KEYS"
-inject_provider_models_from_env "google" "GEMINI_MODELS" "GEMINI_API_KEY" "GEMINI_API_KEYS"
-inject_provider_models_from_env "google-vertex" "GEMINI_MODELS" "GEMINI_API_KEY" "GEMINI_API_KEYS"
-inject_provider_models_from_env "deepseek" "DEEPSEEK_MODELS" "DEEPSEEK_API_KEY" "DEEPSEEK_API_KEYS"
-inject_provider_models_from_env "openrouter" "OPENROUTER_MODELS" "OPENROUTER_API_KEY" "OPENROUTER_API_KEYS"
-inject_provider_models_from_env "kilocode" "KILOCODE_MODELS" "KILOCODE_API_KEY" "KILOCODE_API_KEYS"
-inject_provider_models_from_env "opencode" "OPENCODE_MODELS" "OPENCODE_API_KEY" "OPENCODE_API_KEYS"
-inject_provider_models_from_env "opencode-go" "OPENCODE_MODELS" "OPENCODE_API_KEY" "OPENCODE_API_KEYS"
-inject_provider_models_from_env "zai" "ZAI_MODELS" "ZAI_API_KEY" "ZAI_API_KEYS"
-inject_provider_models_from_env "z-ai" "ZAI_MODELS" "ZAI_API_KEY" "ZAI_API_KEYS"
-inject_provider_models_from_env "z.ai" "ZAI_MODELS" "ZAI_API_KEY" "ZAI_API_KEYS"
-inject_provider_models_from_env "zhipu" "ZAI_MODELS" "ZAI_API_KEY" "ZAI_API_KEYS"
-inject_provider_models_from_env "moonshot" "MOONSHOT_MODELS" "MOONSHOT_API_KEY" "MOONSHOT_API_KEYS"
+inject_provider_models_from_env "anthropic" "ANTHROPIC_MODELS" "ANTHROPIC_API_KEY" "ANTHROPIC_API_KEYS" "_DEFAULT_ANTHROPIC_MODELS"
+inject_provider_models_from_env "openai" "OPENAI_MODELS" "OPENAI_API_KEY" "OPENAI_API_KEYS" "_DEFAULT_OPENAI_MODELS"
+inject_provider_models_from_env "openai-codex" "OPENAI_MODELS" "OPENAI_API_KEY" "OPENAI_API_KEYS" "_DEFAULT_OPENAI_MODELS"
+inject_provider_models_from_env "google" "GEMINI_MODELS" "GEMINI_API_KEY" "GEMINI_API_KEYS" "_DEFAULT_GEMINI_MODELS"
+# google-vertex: uses VERTEX_MODELS (with google-vertex/ prefix) separately from GEMINI_MODELS.
+# The "key" check uses GOOGLE_CLOUD_PROJECT so it only injects when Vertex is actually configured.
+# google-vertex: inject when GOOGLE_CLOUD_PROJECT is configured.
+# Pool key uses a dummy var (_VERTEX_POOL_UNUSED) so that only GOOGLE_CLOUD_PROJECT
+# gates injection — Vertex uses GCP project auth, not Gemini API key rotation.
+inject_provider_models_from_env "google-vertex" "VERTEX_MODELS" "GOOGLE_CLOUD_PROJECT" "_VERTEX_POOL_UNUSED" "_DEFAULT_VERTEX_MODELS"
+inject_provider_models_from_env "deepseek" "DEEPSEEK_MODELS" "DEEPSEEK_API_KEY" "DEEPSEEK_API_KEYS" "_DEFAULT_DEEPSEEK_MODELS"
+inject_provider_models_from_env "openrouter" "OPENROUTER_MODELS" "OPENROUTER_API_KEY" "OPENROUTER_API_KEYS" "_DEFAULT_OPENROUTER_MODELS"
+inject_provider_models_from_env "kilocode" "KILOCODE_MODELS" "KILOCODE_API_KEY" "KILOCODE_API_KEYS" "_DEFAULT_KILOCODE_MODELS"
+inject_provider_models_from_env "opencode" "OPENCODE_MODELS" "OPENCODE_API_KEY" "OPENCODE_API_KEYS" "_DEFAULT_OPENCODE_MODELS"
+inject_provider_models_from_env "opencode-go" "OPENCODE_MODELS" "OPENCODE_API_KEY" "OPENCODE_API_KEYS" "_DEFAULT_OPENCODE_MODELS"
+inject_provider_models_from_env "zai" "ZAI_MODELS" "ZAI_API_KEY" "ZAI_API_KEYS" "_DEFAULT_ZAI_MODELS"
+inject_provider_models_from_env "z-ai" "ZAI_MODELS" "ZAI_API_KEY" "ZAI_API_KEYS" "_DEFAULT_ZAI_MODELS"
+inject_provider_models_from_env "z.ai" "ZAI_MODELS" "ZAI_API_KEY" "ZAI_API_KEYS" "_DEFAULT_ZAI_MODELS"
+inject_provider_models_from_env "zhipu" "ZAI_MODELS" "ZAI_API_KEY" "ZAI_API_KEYS" "_DEFAULT_ZAI_MODELS"
+inject_provider_models_from_env "moonshot" "MOONSHOT_MODELS" "MOONSHOT_API_KEY" "MOONSHOT_API_KEYS" "_DEFAULT_MOONSHOT_MODELS"
 inject_provider_models_from_env "kimi-coding" "KIMI_MODELS" "KIMI_API_KEY" "KIMI_API_KEYS"
-inject_provider_models_from_env "minimax" "MINIMAX_MODELS" "MINIMAX_API_KEY" "MINIMAX_API_KEYS"
-inject_provider_models_from_env "modelstudio" "MODELSTUDIO_MODELS" "MODELSTUDIO_API_KEY" "MODELSTUDIO_API_KEYS"
-inject_provider_models_from_env "qwen" "MODELSTUDIO_MODELS" "MODELSTUDIO_API_KEY" "MODELSTUDIO_API_KEYS"
+inject_provider_models_from_env "minimax" "MINIMAX_MODELS" "MINIMAX_API_KEY" "MINIMAX_API_KEYS" "_DEFAULT_MINIMAX_MODELS"
+inject_provider_models_from_env "modelstudio" "MODELSTUDIO_MODELS" "MODELSTUDIO_API_KEY" "MODELSTUDIO_API_KEYS" "_DEFAULT_MODELSTUDIO_MODELS"
+inject_provider_models_from_env "qwen" "MODELSTUDIO_MODELS" "MODELSTUDIO_API_KEY" "MODELSTUDIO_API_KEYS" "_DEFAULT_MODELSTUDIO_MODELS"
 inject_provider_models_from_env "xiaomi" "XIAOMI_MODELS" "XIAOMI_API_KEY" "XIAOMI_API_KEYS"
 inject_provider_models_from_env "volcengine" "VOLCANO_ENGINE_MODELS" "VOLCANO_ENGINE_API_KEY" "VOLCANO_ENGINE_API_KEYS"
 inject_provider_models_from_env "volcengine-plan" "VOLCANO_ENGINE_MODELS" "VOLCANO_ENGINE_API_KEY" "VOLCANO_ENGINE_API_KEYS"
 inject_provider_models_from_env "byteplus" "BYTEPLUS_MODELS" "BYTEPLUS_API_KEY" "BYTEPLUS_API_KEYS"
 inject_provider_models_from_env "byteplus-plan" "BYTEPLUS_MODELS" "BYTEPLUS_API_KEY" "BYTEPLUS_API_KEYS"
 inject_provider_models_from_env "qianfan" "QIANFAN_MODELS" "QIANFAN_API_KEY" "QIANFAN_API_KEYS"
-inject_provider_models_from_env "groq" "GROQ_MODELS" "GROQ_API_KEY" "GROQ_API_KEYS"
-inject_provider_models_from_env "mistral" "MISTRAL_MODELS" "MISTRAL_API_KEY" "MISTRAL_API_KEYS"
-inject_provider_models_from_env "mistralai" "MISTRAL_MODELS" "MISTRAL_API_KEY" "MISTRAL_API_KEYS"
-inject_provider_models_from_env "xai" "XAI_MODELS" "XAI_API_KEY" "XAI_API_KEYS"
-inject_provider_models_from_env "x-ai" "XAI_MODELS" "XAI_API_KEY" "XAI_API_KEYS"
-inject_provider_models_from_env "nvidia" "NVIDIA_MODELS" "NVIDIA_API_KEY" "NVIDIA_API_KEYS"
-inject_provider_models_from_env "cohere" "COHERE_MODELS" "COHERE_API_KEY" "COHERE_API_KEYS"
-inject_provider_models_from_env "together" "TOGETHER_MODELS" "TOGETHER_API_KEY" "TOGETHER_API_KEYS"
-inject_provider_models_from_env "cerebras" "CEREBRAS_MODELS" "CEREBRAS_API_KEY" "CEREBRAS_API_KEYS"
-inject_provider_models_from_env "huggingface" "HUGGINGFACE_MODELS" "HUGGINGFACE_HUB_TOKEN" "HUGGINGFACE_HUB_TOKENS"
-inject_provider_models_from_env "venice" "VENICE_MODELS" "VENICE_API_KEY" "VENICE_API_KEYS"
+inject_provider_models_from_env "groq" "GROQ_MODELS" "GROQ_API_KEY" "GROQ_API_KEYS" "_DEFAULT_GROQ_MODELS"
+inject_provider_models_from_env "mistral" "MISTRAL_MODELS" "MISTRAL_API_KEY" "MISTRAL_API_KEYS" "_DEFAULT_MISTRAL_MODELS"
+inject_provider_models_from_env "mistralai" "MISTRAL_MODELS" "MISTRAL_API_KEY" "MISTRAL_API_KEYS" "_DEFAULT_MISTRAL_MODELS"
+inject_provider_models_from_env "xai" "XAI_MODELS" "XAI_API_KEY" "XAI_API_KEYS" "_DEFAULT_XAI_MODELS"
+inject_provider_models_from_env "x-ai" "XAI_MODELS" "XAI_API_KEY" "XAI_API_KEYS" "_DEFAULT_XAI_MODELS"
+inject_provider_models_from_env "nvidia" "NVIDIA_MODELS" "NVIDIA_API_KEY" "NVIDIA_API_KEYS" "_DEFAULT_NVIDIA_MODELS"
+inject_provider_models_from_env "cohere" "COHERE_MODELS" "COHERE_API_KEY" "COHERE_API_KEYS" "_DEFAULT_COHERE_MODELS"
+inject_provider_models_from_env "together" "TOGETHER_MODELS" "TOGETHER_API_KEY" "TOGETHER_API_KEYS" "_DEFAULT_TOGETHER_MODELS"
+inject_provider_models_from_env "cerebras" "CEREBRAS_MODELS" "CEREBRAS_API_KEY" "CEREBRAS_API_KEYS" "_DEFAULT_CEREBRAS_MODELS"
+inject_provider_models_from_env "huggingface" "HUGGINGFACE_MODELS" "HUGGINGFACE_HUB_TOKEN" "HUGGINGFACE_HUB_TOKENS" "_DEFAULT_HUGGINGFACE_MODELS"
+inject_provider_models_from_env "venice" "VENICE_MODELS" "VENICE_API_KEY" "VENICE_API_KEYS" "_DEFAULT_VENICE_MODELS"
 inject_provider_models_from_env "synthetic" "SYNTHETIC_MODELS" "SYNTHETIC_API_KEY" "SYNTHETIC_API_KEYS"
-inject_provider_models_from_env "github-copilot" "GITHUB_COPILOT_MODELS" "COPILOT_GITHUB_TOKEN" "COPILOT_GITHUB_TOKENS"
+inject_provider_models_from_env "github-copilot" "GITHUB_COPILOT_MODELS" "COPILOT_GITHUB_TOKEN" "COPILOT_GITHUB_TOKENS" "_DEFAULT_GITHUB_COPILOT_MODELS"
 
 # Browser configuration (managed local Chromium in HF/Docker)
 BROWSER_EXECUTABLE_PATH=""
@@ -740,8 +813,8 @@ if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
   
   export OPENCLAW_TELEGRAM_DISABLE_AUTO_SELECT_FAMILY=1
   export OPENCLAW_TELEGRAM_DNS_RESULT_ORDER=ipv4first
-  # Force ipv4 for Telegram specifically as HF IPv6 often times out
-  export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--dns-result-order=ipv4first"
+  # Note: --dns-result-order=ipv4first is now set globally for all HF Space
+  # channels in the SPACE_HOST block above; no need to set NODE_OPTIONS here.
   
   CONFIG_JSON=$(echo "$CONFIG_JSON" | jq --arg token "$CLEAN_TG_TOKEN" --arg proxy_url "$TELEGRAM_API_ROOT" '
     .channels.telegram.enabled = true
@@ -839,10 +912,27 @@ if [ -f "$EXISTING_CONFIG" ]; then
     --argjson whatsappConfigured "$WHATSAPP_ENABLED_CONFIGURED" \
     --argjson whatsappEnabled "$WHATSAPP_CONFIG_ENABLED" \
     --argjson telegramConfigured "$TELEGRAM_CONFIG_ENABLED" \
+    --argjson browserEnabled "$BROWSER_SHOULD_ENABLE" \
     '(.channels.whatsapp // {}) as $existingWhatsapp
+     | (.channels.telegram // {}) as $existingTelegram
      | .gateway.auth.token = $token
      | .agents.defaults.model = $model
      | .gateway.port = ($desired.gateway.port // .gateway.port)
+     | .gateway.controlUi.dangerouslyDisableDeviceAuth = true
+     | (if ($desired.gateway.controlUi.allowedOrigins // [] | length) > 0 then
+          .gateway.controlUi.allowedOrigins = (
+            ((.gateway.controlUi.allowedOrigins // []) + ($desired.gateway.controlUi.allowedOrigins // []))
+            | unique
+          )
+        else . end)
+     | (if ($desired.gateway.auth.mode // "") != "" then
+          .gateway.auth.mode = $desired.gateway.auth.mode
+          | .gateway.auth.password = ($desired.gateway.auth.password // "")
+        else . end)
+     | .gateway.trustedProxies = (
+         ((.gateway.trustedProxies // []) + ($desired.gateway.trustedProxies // []))
+         | unique
+       )
      | if $fileLogConfigured then .logging.level = $fileLevel else . end
      | if $consoleLogConfigured then .logging.consoleLevel = $consoleLevel else . end
      | if $consoleStyleConfigured then .logging.consoleStyle = $consoleStyle else . end
@@ -856,10 +946,33 @@ if [ -f "$EXISTING_CONFIG" ]; then
        else
          .
        end
+     | if (($desired.models.providers // {} | length) > 0) then
+         reduce ($desired.models.providers // {} | to_entries)[] as $pe (.;
+           # Propagate custom/new providers from desired config that are absent in existing.
+           # For known providers that already exist, only merge in baseUrl/apiKey/api when missing.
+           if .models.providers[$pe.key] == null then
+             .models.providers[$pe.key] = $pe.value
+           else
+             .models.providers[$pe.key] = (
+               {"baseUrl": $pe.value.baseUrl, "apiKey": $pe.value.apiKey, "api": $pe.value.api}
+               | with_entries(select(.value != null and .value != ""))
+             ) * (.models.providers[$pe.key] // {})
+           end
+         )
+       else
+         .
+       end
      | .channels = ((.channels // {}) * ($desired.channels // {}))
      | .plugins.allow = (((.plugins.allow // []) + ($desired.plugins.allow // [])) | unique)
      | .plugins.deny = (((.plugins.deny // []) + ($desired.plugins.deny // [])) | unique)
      | .plugins.entries = ((.plugins.entries // {}) * ($desired.plugins.entries // {}))
+     | del(.plugins.entries.acpx)
+     | (if $browserEnabled then
+          .browser = ($desired.browser // .browser)
+        else
+          .browser.enabled = false
+          | .plugins.entries.browser.enabled = false
+        end)
      | if $whatsappEnabled then
          ($desired.channels.whatsapp // {"dmPolicy": "pairing"}) as $desiredWhatsapp
          | .plugins.entries.whatsapp.enabled = true
@@ -873,8 +986,13 @@ if [ -f "$EXISTING_CONFIG" ]; then
          .
        end
      | if $telegramConfigured then
-         .channels.telegram = (($desired.channels.telegram // {}) * (.channels.telegram // {}))
-         | .channels.telegram.botToken = $desired.channels.telegram.botToken
+         # Merge: existing * desired → desired (env-driven) wins for runtime fields
+         # (apiRoot from CLOUDFLARE_PROXY_URL, commands.native, timeoutSeconds, retry).
+         # Then re-apply user-editable fields from saved $existingTelegram so UI
+         # customizations (dmPolicy, allowFrom) survive across reboots.
+         .channels.telegram = ($existingTelegram * ($desired.channels.telegram // {}))
+         | (if ($existingTelegram | has("dmPolicy"))  then .channels.telegram.dmPolicy  = $existingTelegram.dmPolicy  else . end)
+         | (if ($existingTelegram | has("allowFrom")) then .channels.telegram.allowFrom = $existingTelegram.allowFrom else . end)
        else
          del(.channels.telegram)
          | .plugins.entries.telegram.enabled = false
@@ -1790,6 +1908,25 @@ start_guardian_once() {
   echo "WhatsApp Guardian started (PID: $GUARDIAN_PID)"
 }
 
+# ── Clean up stale plugin-skills entries that are not generated symlinks ──
+# OpenClaw generates plugin-skills entries as symlinks. If a real directory
+# exists (e.g. from a previous failed install or manual placement), OpenClaw
+# logs "plugin skill entry is not a generated symlink" on every poll cycle.
+# Remove any non-symlink entries so they are regenerated cleanly on startup.
+PLUGIN_SKILLS_DIR="/home/node/.openclaw/plugin-skills"
+if [ -d "$PLUGIN_SKILLS_DIR" ]; then
+  for _ps_entry in "$PLUGIN_SKILLS_DIR"/*/; do
+    _ps_entry="${_ps_entry%/}"
+    [ -e "$_ps_entry" ] || continue
+    if [ ! -L "$_ps_entry" ]; then
+      _ps_name="$(basename "$_ps_entry")"
+      echo "Removing stale plugin-skills entry '$_ps_name' (not a generated symlink; will be regenerated by OpenClaw)..."
+      rm -rf "$_ps_entry"
+    fi
+  done
+  unset _ps_entry _ps_name
+fi
+
 # ── Start D-Bus session (once, before gateway loop) ──
 if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
   if command -v dbus-launch >/dev/null 2>&1; then
@@ -1844,9 +1981,14 @@ while true; do
   GATEWAY_PID=$!
 
   # Poll for the gateway to start listening on ${GATEWAY_PORT}. OpenClaw can take 20-30s
-  # on cold start (plugin install + auto-restore). Bail out early if the
-  # pipeline died.
-  GATEWAY_READY_TIMEOUT="${GATEWAY_READY_TIMEOUT:-90}"
+  # on cold start (plugin install + auto-restore). On HF Spaces the bootstrap-context
+  # stage alone can exceed 300 s on a cold start, so default to 300 s there and
+  # 90 s elsewhere. Bail out early if the pipeline died.
+  if [ -n "${SPACE_HOST:-}" ]; then
+    GATEWAY_READY_TIMEOUT="${GATEWAY_READY_TIMEOUT:-300}"
+  else
+    GATEWAY_READY_TIMEOUT="${GATEWAY_READY_TIMEOUT:-90}"
+  fi
   ready=false
   for ((i=0; i<GATEWAY_READY_TIMEOUT; i++)); do
     if (echo > /dev/tcp/127.0.0.1/${GATEWAY_PORT}) 2>/dev/null; then
