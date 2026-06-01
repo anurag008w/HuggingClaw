@@ -853,6 +853,16 @@ server.on("upgrade", (req, socket, head) => {
   const { pathname, search } = parseRequestUrl(req.url);
   const isJupyter = JUPYTER_ENABLED && (pathname === JUPYTER_BASE || pathname.startsWith(JUPYTER_BASE + "/"));
   const isApp = pathname === APP_BASE || pathname.startsWith(APP_BASE + "/");
+  const isWebSocketUpgrade = String(req.headers.upgrade || "").toLowerCase() === "websocket";
+
+  // Prevent non-WebSocket probes from being forwarded to the gateway listener.
+  // Keep unknown-but-valid websocket routes working by defaulting them to gateway.
+  if (!isWebSocketUpgrade) {
+    try { socket.end("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n"); }
+    catch { socket.destroy(); }
+    return;
+  }
+
   const [targetHost, targetPort] = isJupyter ? [JUPYTER_HOST, JUPYTER_PORT] : [GATEWAY_HOST, GATEWAY_PORT];
   const publicPrefix = isJupyter ? JUPYTER_BASE : isApp ? APP_BASE : "";
   const targetPath = pathname + search;
