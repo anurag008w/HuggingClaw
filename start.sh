@@ -61,6 +61,7 @@ load_env_bundle
 # Normalize core env values so accidental surrounding spaces in HF Variables
 # do not block updates or cause stale comparisons/merges.
 LLM_MODEL="$(trim_var "${LLM_MODEL:-}")"
+LLM_FALLBACK_MODELS="$(trim_var "${LLM_FALLBACK_MODELS:-}")"
 GATEWAY_TOKEN="$(trim_var "${GATEWAY_TOKEN:-}")"
 OPENCLAW_PASSWORD="$(trim_var "${OPENCLAW_PASSWORD:-}")"
 LLM_API_KEY="$(trim_var "${LLM_API_KEY:-}")"
@@ -152,7 +153,7 @@ if [ -z "$LLM_API_KEY" ]; then
   ERRORS="${ERRORS}  - LLM_API_KEY is not set\n"
 fi
 if [ -z "$LLM_MODEL" ]; then
-  ERRORS="${ERRORS}  - LLM_MODEL is not set (e.g. google/gemini-2.5-flash, anthropic/claude-sonnet-4-5, openai/gpt-4)\n"
+  ERRORS="${ERRORS}  - LLM_MODEL is not set (e.g. google/gemini-3.5-flash, anthropic/claude-sonnet-4-6, openai/gpt-5.4)\n"
 fi
 if [ -z "$GATEWAY_TOKEN" ]; then
   ERRORS="${ERRORS}  - GATEWAY_TOKEN is not set (generate: openssl rand -hex 32)\n"
@@ -189,6 +190,20 @@ fi
 
 # Extract provider prefix from model name (e.g. "google/gemini-2.5-flash" → "google")
 LLM_PROVIDER=$(echo "$LLM_MODEL" | cut -d'/' -f1)
+
+# ── Build fallback model JSON array from LLM_FALLBACK_MODELS ──
+# LLM_FALLBACK_MODELS is a comma-separated list of model refs, e.g.:
+#   LLM_FALLBACK_MODELS="anthropic/claude-sonnet-4-6,openai/gpt-4o,google/gemini-2.5-flash"
+# Each fallback provider's API key must be set separately (e.g. ANTHROPIC_API_KEY, OPENAI_API_KEY).
+LLM_FALLBACK_MODELS_JSON="[]"
+if [ -n "$LLM_FALLBACK_MODELS" ]; then
+  LLM_FALLBACK_MODELS_JSON=$(printf '%s' "$LLM_FALLBACK_MODELS" \
+    | tr ',' '\n' \
+    | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
+    | grep -v '^$' \
+    | jq -R . \
+    | jq -s .)
+fi
 
 # Map provider prefix to the correct API key environment variable
 # Based on OpenClaw provider system: /usr/local/lib/node_modules/openclaw/docs/concepts/model-providers.md
@@ -239,7 +254,7 @@ case "$LLM_PROVIDER" in
     export TOGETHER_API_KEY="${TOGETHER_API_KEY:-$LLM_API_KEY}" ;;
   # ── Fallback: Anthropic (default) ──
   *)
-    echo "Warning: Unknown provider prefix '$LLM_PROVIDER' in LLM_MODEL='$LLM_MODEL'. Defaulting to ANTHROPIC_API_KEY. If using a router-namespaced model (e.g. moonshotai/Kimi-K2.5), set TOGETHER_API_KEY or OPENROUTER_API_KEY as a separate secret."
+    echo "Warning: Unknown provider prefix '$LLM_PROVIDER' in LLM_MODEL='$LLM_MODEL'. Defaulting to ANTHROPIC_API_KEY. If using a router-namespaced model (e.g. moonshotai/Kimi-K2.6), set TOGETHER_API_KEY or OPENROUTER_API_KEY as a separate secret."
     export ANTHROPIC_API_KEY="$LLM_API_KEY"
     ;;
 esac
@@ -377,15 +392,22 @@ CONFIGEOF
 # Apply gateway token, model, and logging in a single jq pass.
 # Uses --arg so values containing quotes/backslashes can't break the JSON or
 # inject jq filters (relevant for OPENCLAW_PASSWORD/GATEWAY_TOKEN below too).
+# When LLM_FALLBACK_MODELS is set, agents.defaults.model is written as an
+# object { primary, fallbacks } so OpenClaw can chain through backup models
+# automatically on rate-limit, auth failure, or provider outage.
 CONFIG_JSON=$(jq \
   --arg token "$GATEWAY_TOKEN" \
   --arg model "$LLM_MODEL" \
+  --argjson fallbacks "$LLM_FALLBACK_MODELS_JSON" \
   --arg fileLevel "$OPENCLAW_FILE_LOG_LEVEL" \
   --arg consoleLevel "$OPENCLAW_CONSOLE_LOG_LEVEL" \
   --arg consoleStyle "$OPENCLAW_CONSOLE_LOG_STYLE" \
   --arg port "$GATEWAY_PORT" \
   '.gateway.auth.token = $token
-   | .agents.defaults.model = $model
+   | .agents.defaults.model = (if ($fallbacks | length) > 0
+       then {"primary": $model, "fallbacks": $fallbacks}
+       else $model
+     end)
    | .gateway.port = ($port | tonumber)
    | .logging.level = $fileLevel
    | .logging.consoleLevel = $consoleLevel
@@ -465,27 +487,27 @@ fi
 # This helps when provider auto-discovery does not populate models reliably.
 # Default catalogs (used when *_MODELS env is not set but key IS configured).
 # These let multi-key pool users see models without having to also set *_MODELS.
-_DEFAULT_ANTHROPIC_MODELS="anthropic/claude-opus-4-6,anthropic/claude-sonnet-4-6,anthropic/claude-haiku-4-5"
-_DEFAULT_OPENAI_MODELS="openai/gpt-5.5,openai/gpt-5.4-mini,openai/gpt-4o,openai/gpt-4o-mini"
-_DEFAULT_GEMINI_MODELS="google/gemini-3.1-pro-preview,google/gemini-3.1-flash-preview,google/gemini-2.5-pro,google/gemini-2.5-flash,google/gemini-2.0-flash"
-_DEFAULT_VERTEX_MODELS="google-vertex/gemini-2.5-pro,google-vertex/gemini-2.5-flash,google-vertex/gemini-2.0-flash"
+_DEFAULT_ANTHROPIC_MODELS="anthropic/claude-opus-4-7,anthropic/claude-sonnet-4-6,anthropic/claude-haiku-4-5"
+_DEFAULT_OPENAI_MODELS="openai/gpt-5.4,openai/gpt-5.4-mini,openai/gpt-4o,openai/gpt-4o-mini"
+_DEFAULT_GEMINI_MODELS="google/gemini-3.5-flash,google/gemini-3.1-pro-preview,google/gemini-3.1-flash-lite,google/gemini-2.5-pro,google/gemini-2.5-flash"
+_DEFAULT_VERTEX_MODELS="google-vertex/gemini-3.5-flash,google-vertex/gemini-3.1-pro-preview,google-vertex/gemini-2.5-pro,google-vertex/gemini-2.5-flash"
 _DEFAULT_DEEPSEEK_MODELS="deepseek/deepseek-v4-pro,deepseek/deepseek-v4-flash,deepseek/deepseek-chat,deepseek/deepseek-reasoner"
-_DEFAULT_OPENROUTER_MODELS="openrouter/auto,openrouter/anthropic/claude-opus-4-6,openrouter/openai/gpt-4o,openrouter/google/gemini-2.5-pro"
-_DEFAULT_GROQ_MODELS="groq/compound-beta,groq/moonshotai/kimi-k2-5,groq/deepseek-r1-distill-llama-70b"
+_DEFAULT_OPENROUTER_MODELS="openrouter/auto,openrouter/anthropic/claude-opus-4-7,openrouter/openai/gpt-5.4,openrouter/google/gemini-3.5-flash"
+_DEFAULT_GROQ_MODELS="groq/compound,groq/compound-mini,groq/openai/gpt-oss-120b,groq/moonshotai/kimi-k2-instruct-0905"
 _DEFAULT_MISTRAL_MODELS="mistral/mistral-large-latest,mistral/codestral-latest,mistral/mistral-small-latest"
-_DEFAULT_XAI_MODELS="xai/grok-4.3,xai/grok-3,xai/grok-3-mini"
-_DEFAULT_COHERE_MODELS="cohere/command-r-plus,cohere/command-r"
-_DEFAULT_TOGETHER_MODELS="together/moonshotai/Kimi-K2.5,together/deepseek-ai/DeepSeek-V3.2,together/meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
-_DEFAULT_CEREBRAS_MODELS="cerebras/zai-glm-4.7,cerebras/llama-4-scout-17b-16e-instruct"
-_DEFAULT_NVIDIA_MODELS="nvidia/nemotron-3-super-120b-a12b,nvidia/moonshotai/kimi-k2.5"
+_DEFAULT_XAI_MODELS="xai/grok-4.3,xai/grok-3-mini"
+_DEFAULT_COHERE_MODELS="cohere/command-a-plus-05-2026,cohere/command-a-03-2025,cohere/command-r-plus-08-2024"
+_DEFAULT_TOGETHER_MODELS="together/moonshotai/Kimi-K2.6,together/deepseek-ai/DeepSeek-V4-Pro,together/meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
+_DEFAULT_CEREBRAS_MODELS="cerebras/zai-glm-4.7,cerebras/gpt-oss-120b,cerebras/deepseek-r1,cerebras/qwen3-32b"
+_DEFAULT_NVIDIA_MODELS="nvidia/nemotron-3-super-120b-a12b,nvidia/moonshotai/kimi-k2.6"
 _DEFAULT_KILOCODE_MODELS="kilocode/kilo/auto"
-_DEFAULT_MOONSHOT_MODELS="moonshot/kimi-k2.6,moonshot/kimi-k2.5,moonshot/kimi-k2-thinking"
+_DEFAULT_MOONSHOT_MODELS="moonshot/kimi-k2.6,moonshot/kimi-k2.6-thinking,moonshot/kimi-k2-thinking"
 _DEFAULT_MINIMAX_MODELS="minimax/MiniMax-M2.7,minimax/MiniMax-M2.5"
-_DEFAULT_ZAI_MODELS="zai/glm-5.1,zai/glm-4.7"
+_DEFAULT_ZAI_MODELS="zai/glm-5,zai/glm-5-turbo,zai/glm-4.7,zai/glm-4.7-flash"
 _DEFAULT_MODELSTUDIO_MODELS="modelstudio/qwen3-max,modelstudio/qwen3-coder,modelstudio/qwen3-32b"
 _DEFAULT_VENICE_MODELS="venice/llama-3.3-70b"
-_DEFAULT_OPENCODE_MODELS="opencode/claude-opus-4-6,opencode/claude-sonnet-4-6"
-_DEFAULT_HUGGINGFACE_MODELS="huggingface/deepseek-ai/DeepSeek-R1,huggingface/meta-llama/Llama-4-Scout-17B-16E-Instruct"
+_DEFAULT_OPENCODE_MODELS="opencode/claude-opus-4-7,opencode/claude-sonnet-4-6"
+_DEFAULT_HUGGINGFACE_MODELS="huggingface/deepseek-ai/DeepSeek-R1,huggingface/moonshotai/Kimi-K2.6"
 _DEFAULT_GITHUB_COPILOT_MODELS="github-copilot/gpt-5,github-copilot/gpt-4.1,github-copilot/gpt-4o"
 
 INJECTED_MODELS_PROVIDERS='{}'
@@ -523,11 +545,16 @@ inject_provider_models_from_env() {
     | jq -s --arg provider "$provider" '
         map(
           if contains("/") then
-            # Fix cross-prefix: strip any foreign provider prefix, reapply correct one.
-            # e.g. "google/gemini-2.5-pro" injected into "google-vertex" becomes
-            #      "google-vertex/gemini-2.5-pro"
+            # Fix cross-prefix: strip only the first "/" segment (the foreign provider
+            # prefix) and reapply the correct one. Using `last` was a bug for 3-part IDs:
+            # e.g. "openai/gpt-oss-120b" injected into "groq" would become
+            #      "groq/gpt-oss-120b" instead of "groq/openai/gpt-oss-120b".
+            # Examples:
+            #   "google/gemini-2.5-pro"        → "google-vertex/gemini-2.5-pro"
+            #   "openai/gpt-oss-120b"          → "groq/openai/gpt-oss-120b"
+            #   "moonshotai/kimi-k2.6"         → "nvidia/moonshotai/kimi-k2.6"
             if startswith($provider + "/") then .
-            else ($provider + "/" + (split("/") | last))
+            else ($provider + "/" + (split("/") | .[1:] | join("/")))
             end
           else
             ($provider + "/" + .)
@@ -901,6 +928,7 @@ if [ -f "$EXISTING_CONFIG" ]; then
   PATCHED=$(jq \
     --arg token "$GATEWAY_TOKEN" \
     --arg model "$LLM_MODEL" \
+    --argjson fallbacks "$LLM_FALLBACK_MODELS_JSON" \
     --arg fileLevel "$OPENCLAW_FILE_LOG_LEVEL" \
     --arg consoleLevel "$OPENCLAW_CONSOLE_LOG_LEVEL" \
     --arg consoleStyle "$OPENCLAW_CONSOLE_LOG_STYLE" \
@@ -916,23 +944,28 @@ if [ -f "$EXISTING_CONFIG" ]; then
     '(.channels.whatsapp // {}) as $existingWhatsapp
      | (.channels.telegram // {}) as $existingTelegram
      | .gateway.auth.token = $token
-     | .agents.defaults.model = $model
+     | .agents.defaults.model = (if ($fallbacks | length) > 0
+         then {"primary": $model, "fallbacks": $fallbacks}
+         elif ((.agents.defaults.model | type) == "object" and ((.agents.defaults.model.fallbacks // []) | length) > 0)
+         then (.agents.defaults.model | .primary = $model)
+         else $model
+       end)
      | .gateway.port = ($desired.gateway.port // .gateway.port)
      | .gateway.controlUi.dangerouslyDisableDeviceAuth = true
      | (if ($desired.gateway.controlUi.allowedOrigins // [] | length) > 0 then
-          .gateway.controlUi.allowedOrigins = (
-            ((.gateway.controlUi.allowedOrigins // []) + ($desired.gateway.controlUi.allowedOrigins // []))
-            | unique
-          )
-        else . end)
+            .gateway.controlUi.allowedOrigins = (
+              ((.gateway.controlUi.allowedOrigins // []) + ($desired.gateway.controlUi.allowedOrigins // []))
+              | unique
+            )
+          else . end)
      | (if ($desired.gateway.auth.mode // "") != "" then
-          .gateway.auth.mode = $desired.gateway.auth.mode
-          | .gateway.auth.password = ($desired.gateway.auth.password // "")
-        else . end)
+            .gateway.auth.mode = $desired.gateway.auth.mode
+            | .gateway.auth.password = ($desired.gateway.auth.password // "")
+          else . end)
      | .gateway.trustedProxies = (
-         ((.gateway.trustedProxies // []) + ($desired.gateway.trustedProxies // []))
-         | unique
-       )
+           ((.gateway.trustedProxies // []) + ($desired.gateway.trustedProxies // []))
+           | unique
+         )
      | if $fileLogConfigured then .logging.level = $fileLevel else . end
      | if $consoleLogConfigured then .logging.consoleLevel = $consoleLevel else . end
      | if $consoleStyleConfigured then .logging.consoleStyle = $consoleStyle else . end
@@ -1034,6 +1067,9 @@ export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--require /home/node/app/ifr
 echo ""
 echo "Version   : ${OPENCLAW_DISPLAY_VERSION}"
 echo "Model     : ${LLM_MODEL}"
+if [ -n "${LLM_FALLBACK_MODELS:-}" ]; then
+  echo "Fallbacks : ${LLM_FALLBACK_MODELS}"
+fi
 if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
   echo "Telegram  : enabled"
 else
@@ -1730,7 +1766,7 @@ sync_installed_plugins_into_allow() {
 hc_finish_startup_commands() {
   if [ "$HC_STARTUP_FAILURES" -gt 0 ]; then
     echo "ERROR: ${HC_STARTUP_FAILURES} startup command(s) failed. Check the log lines above." >&2
-    if [ "$HC_STARTUP_STRICT_NORMALIZED" = "true" ] || [ "$HC_STARTUP_STRICT_NORMALIZED" = "1" ] || [ "$HC_STARTUP_STRICT_NORMALIZED" = "yes" ]; then
+    if hc_is_true "$HC_STARTUP_STRICT_NORMALIZED"; then
       echo "ERROR: HUGGINGCLAW_STARTUP_STRICT=true, stopping startup." >&2
       exit 1
     fi
@@ -1743,7 +1779,13 @@ hc_finish_startup_commands() {
 # Use them when you prefer HF Variables over editing workspace/startup.sh.
 if [ -n "${HUGGINGCLAW_APT_PACKAGES:-}" ]; then
   echo "Installing apt packages from HUGGINGCLAW_APT_PACKAGES..."
-  read -r -a HC_APT_PACKAGES <<< "$HUGGINGCLAW_APT_PACKAGES"
+  # Normalize: commas and newlines → spaces so all three input styles work:
+  #   space-separated: "curl wget git"
+  #   comma-separated: "curl,wget,git"        (common user mistake)
+  #   one-per-line (textarea default): "curl\nwget\ngit"
+  # read -r -a with <<< only reads the FIRST LINE, so normalization is required.
+  _HC_APT_NORM=$(printf '%s' "$HUGGINGCLAW_APT_PACKAGES" | tr ',\n\r' '   ' | tr -s ' ')
+  read -r -a HC_APT_PACKAGES <<< "$_HC_APT_NORM"
   if command -v sudo >/dev/null 2>&1; then
     if sudo apt-get update && sudo apt-get install -y "${HC_APT_PACKAGES[@]}"; then
       echo "HUGGINGCLAW_APT_PACKAGES install complete."
@@ -1758,7 +1800,8 @@ if [ -n "${HUGGINGCLAW_APT_PACKAGES:-}" ]; then
 fi
 if [ -n "${HUGGINGCLAW_PIP_PACKAGES:-}" ]; then
   echo "Installing Python packages from HUGGINGCLAW_PIP_PACKAGES..."
-  read -r -a HC_PIP_PACKAGES <<< "$HUGGINGCLAW_PIP_PACKAGES"
+  _HC_PIP_NORM=$(printf '%s' "$HUGGINGCLAW_PIP_PACKAGES" | tr ',\n\r' '   ' | tr -s ' ')
+  read -r -a HC_PIP_PACKAGES <<< "$_HC_PIP_NORM"
   if python3 -m pip install --user --break-system-packages "${HC_PIP_PACKAGES[@]}"; then
     echo "HUGGINGCLAW_PIP_PACKAGES install complete."
   else
@@ -1768,7 +1811,8 @@ if [ -n "${HUGGINGCLAW_PIP_PACKAGES:-}" ]; then
 fi
 if [ -n "${HUGGINGCLAW_NPM_PACKAGES:-}" ]; then
   echo "Installing global npm packages from HUGGINGCLAW_NPM_PACKAGES..."
-  read -r -a HC_NPM_PACKAGES <<< "$HUGGINGCLAW_NPM_PACKAGES"
+  _HC_NPM_NORM=$(printf '%s' "$HUGGINGCLAW_NPM_PACKAGES" | tr ',\n\r' '   ' | tr -s ' ')
+  read -r -a HC_NPM_PACKAGES <<< "$_HC_NPM_NORM"
   if npm install -g "${HC_NPM_PACKAGES[@]}"; then
     echo "HUGGINGCLAW_NPM_PACKAGES install complete."
   else
@@ -1778,7 +1822,8 @@ if [ -n "${HUGGINGCLAW_NPM_PACKAGES:-}" ]; then
 fi
 if [ -n "${HUGGINGCLAW_OPENCLAW_PLUGINS:-}" ]; then
   echo "Installing OpenClaw plugins from HUGGINGCLAW_OPENCLAW_PLUGINS..."
-  read -r -a HC_OPENCLAW_PLUGINS <<< "$HUGGINGCLAW_OPENCLAW_PLUGINS"
+  _HC_PLUGINS_NORM=$(printf '%s' "$HUGGINGCLAW_OPENCLAW_PLUGINS" | tr ',\n\r' '   ' | tr -s ' ')
+  read -r -a HC_OPENCLAW_PLUGINS <<< "$_HC_PLUGINS_NORM"
   if openclaw plugins install "${HC_OPENCLAW_PLUGINS[@]}"; then
     echo "HUGGINGCLAW_OPENCLAW_PLUGINS install complete."
   else

@@ -277,8 +277,16 @@ function isHttpsRequest(req) {
 }
 
 function buildSessionCookie(req) {
-  const secure = isHttpsRequest(req) ? "; Secure" : "";
-  return `${SESSION_COOKIE}=${encodeURIComponent(expectedSessionValue())}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400${secure}`;
+  // Private spaces are embedded inside a HuggingFace App iframe (cross-site).
+  // SameSite=Lax cookies are NOT sent on cross-site iframe requests, so the
+  // session cookie is invisible to the iframe → auth fails → infinite login loop.
+  // Fix: use SameSite=None; Secure; Partitioned (CHIPS) on HTTPS so the cookie
+  // works inside the HF iframe while remaining scoped to this partition.
+  // Fall back to SameSite=Lax on plain HTTP (local dev, no Secure flag).
+  if (isHttpsRequest(req)) {
+    return `${SESSION_COOKIE}=${encodeURIComponent(expectedSessionValue())}; Path=/; HttpOnly; SameSite=None; Secure; Partitioned; Max-Age=86400`;
+  }
+  return `${SESSION_COOKIE}=${encodeURIComponent(expectedSessionValue())}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400`;
 }
 
 function getBearerToken(req) {
