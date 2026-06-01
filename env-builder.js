@@ -652,6 +652,33 @@ const FIELDS = [
     "tag": "advanced"
   },
 {
+    "g": "Plugins",
+    "icon": "🔄",
+    "k": "KEY_USE_SUSPENDED_AS_LAST_RESORT",
+    "lbl": "Use suspended key as last resort — when all keys are blocked, reuse the soonest-recovering key rather than returning nothing (recommended: on)",
+    "type": "toggle",
+    "ph": "true",
+    "tag": "advanced"
+  },
+{
+    "g": "Plugins",
+    "icon": "🔄",
+    "k": "KEY_MAX_WAIT_MS",
+    "lbl": "Max real-cycle wait (ms) — how long to sleep for the soonest suspended key to recover before firing (0 = disable, fire immediately; keep below proxy timeout ~45s)",
+    "type": "text",
+    "ph": "20000",
+    "tag": "advanced"
+  },
+{
+    "g": "Plugins",
+    "icon": "🔄",
+    "k": "KEY_MAX_RETRY_AFTER_MS",
+    "lbl": "Max Retry-After header value to honour (ms) — caps how long a server-hint cooldown can suspend a key (default 5 min; Gemini often sends 60s+)",
+    "type": "text",
+    "ph": "300000",
+    "tag": "advanced"
+  },
+{
     "g": "Startup",
     "icon": "⚡",
     "k": "DEV_MODE",
