@@ -146,7 +146,7 @@ const MODEL_CATALOGS = {
       "nvidia/moonshotai/kimi-k2.6",
       "nvidia/minimaxai/minimax-m2.7",
       "nvidia/openai/gpt-oss-120b",
-      "nvidia/z-ai/glm5.1",
+      "nvidia/z-ai/glm-5.1",
       "nvidia/stepfun-ai/step-3.7-flash"
     ],
     "KiloCode": [
@@ -385,7 +385,7 @@ const MODEL_CATALOGS = {
     "moonshotai/kimi-k2.6",
     "minimaxai/minimax-m2.7",
     "openai/gpt-oss-120b",
-    "z-ai/glm5.1",
+    "z-ai/glm-5.1",
     "stepfun-ai/step-3.7-flash"
   ],
   "KILOCODE_MODELS": [
