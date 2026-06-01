@@ -51,6 +51,9 @@ CONFIG_SETTLE_SECONDS = max(
     float(os.environ.get("OPENCLAW_CONFIG_SETTLE_SECONDS", "3")),
 )
 SESSIONS_MIN_SYNC_GAP = int(os.environ.get("SESSIONS_MIN_SYNC_GAP", "30"))
+SYNC_LOCK_TIMEOUT = max(1.0, float(os.environ.get("SYNC_LOCK_TIMEOUT", "20")))
+SYNC_UPLOAD_TIMEOUT = max(0.0, float(os.environ.get("SYNC_UPLOAD_TIMEOUT", "180")))
+SYNC_UPLOAD_STRATEGY = os.environ.get("SYNC_UPLOAD_STRATEGY", "folder").strip().lower() or "folder"
 HF_TOKEN = os.environ.get("HF_TOKEN", "").strip()
 HF_USERNAME = os.environ.get("HF_USERNAME", "").strip()
 SPACE_AUTHOR_NAME = os.environ.get("SPACE_AUTHOR_NAME", "").strip()
@@ -88,6 +91,22 @@ EXCLUDED_STATE_NAMES = {
     # "WhatsApp enabled but not installing on restart".
     "extensions",
 }
+# Internal restore/snapshot working directories live beside the workspace under
+# /home/node/.openclaw.  If a previous container is killed mid-restore, these
+# hidden directories can be left behind and may contain a full copy of the
+# workspace, including huggingclaw-state/openclaw itself.  Backing them up makes
+# the dataset grow recursively under huggingclaw-state/openclaw and can keep the
+# sync loop busy forever, which in turn blocks session deletes/updates from being
+# pruned remotely.  Treat every such helper path as disposable sync scratch.
+INTERNAL_TEMP_STATE_NAMES = {
+    ".workspace-restore-staging",
+    ".workspace-restore-old",
+    ".openclaw-staging",
+}
+INTERNAL_TEMP_NAME_PREFIXES = (
+    ".workspace-restore-",
+    ".openclaw-staging",
+)
 SESSIONS_ROOT = OPENCLAW_HOME / "agents"
 WHATSAPP_CREDS_DIR = OPENCLAW_HOME / "credentials" / "whatsapp" / "default"
 WHATSAPP_BACKUP_DIR = STATE_DIR / "credentials" / "whatsapp" / "default"
@@ -95,11 +114,29 @@ RESET_MARKER = WORKSPACE / ".reset_credentials"
 HF_API = HfApi(token=HF_TOKEN) if HF_TOKEN else None
 STOP_EVENT = threading.Event()
 _REPO_ID_CACHE: str | None = None
-_SESSIONS_FILE_DIGEST_CACHE: dict[str, tuple[int, int, int, str]] = {}
 WorkspaceMarker: TypeAlias = tuple[int, int, int, str]
+FileMarker: TypeAlias = tuple[int, int, int, int, str]
 # Set True when prune fails so the next sync pass bypasses the fingerprint
 # early-exit and retries the prune even if no local files changed.
 _prune_needed: bool = False
+_remote_temp_prune_done: bool = False
+
+# Workspace-relative temp paths managed by this sync script.  Keep this narrow:
+# user projects may legitimately contain folders with similar names, and those
+# must keep syncing normally.  Only the script-owned state/restore scratch
+# locations are skipped and pruned.
+INTERNAL_TEMP_WORKSPACE_PREFIXES: tuple[tuple[str, ...], ...] = (
+    (".workspace-restore-staging",),
+    (".workspace-restore-old",),
+    ("huggingclaw-state", ".openclaw-staging"),
+    ("huggingclaw-state", "openclaw", ".workspace-restore-staging"),
+    ("huggingclaw-state", "openclaw", ".workspace-restore-old"),
+    ("huggingclaw-state", "openclaw", ".openclaw-staging"),
+)
+
+
+class SyncUploadTimeoutError(TimeoutError):
+    pass
 
 
 def write_status(status: str, message: str) -> None:
@@ -131,6 +168,86 @@ def _remove_path(path: Path) -> None:
         shutil.rmtree(path, ignore_errors=True)
     else:
         path.unlink(missing_ok=True)
+
+
+def _is_internal_temp_name(name: str) -> bool:
+    return name in INTERNAL_TEMP_STATE_NAMES or any(
+        name.startswith(prefix) for prefix in INTERNAL_TEMP_NAME_PREFIXES
+    )
+
+
+def _has_internal_temp_part(path: str) -> bool:
+    parts = Path(path).parts
+    return any(_matches_prefix(parts, prefix) for prefix in INTERNAL_TEMP_WORKSPACE_PREFIXES)
+
+
+def _matches_prefix(parts: tuple[str, ...], prefix: tuple[str, ...]) -> bool:
+    return len(parts) >= len(prefix) and parts[:len(prefix)] == prefix
+
+
+def _should_skip_state_entry_name(name: str) -> bool:
+    return (
+        name in EXCLUDED_STATE_NAMES
+        or name in EXCLUDED_SYNC_DIRS
+        or _is_internal_temp_name(name)
+    )
+
+
+def _should_skip_sync_path(rel_parts: tuple[str, ...]) -> bool:
+    return any(part in EXCLUDED_SYNC_DIRS for part in rel_parts) or any(
+        _matches_prefix(rel_parts, prefix) for prefix in INTERNAL_TEMP_WORKSPACE_PREFIXES
+    )
+
+
+def _iter_sync_tree(root: Path):
+    """Yield syncable paths without descending into ignored/temp directories."""
+    if not root.exists():
+        return
+
+    for dirpath, dirnames, filenames in os.walk(root):
+        dir_path = Path(dirpath)
+        try:
+            dir_rel_parts = dir_path.relative_to(root).parts
+        except ValueError:
+            dir_rel_parts = ()
+        if dir_rel_parts == (".",):
+            dir_rel_parts = ()
+        dirnames[:] = sorted(
+            name for name in dirnames
+            if not _should_skip_sync_path(dir_rel_parts + (name,))
+        )
+
+        for dirname in dirnames:
+            yield dir_path / dirname
+        for filename in sorted(filenames):
+            if _should_skip_sync_path(dir_rel_parts + (filename,)):
+                continue
+            yield dir_path / filename
+
+
+def _iter_sync_files(root: Path):
+    for path in _iter_sync_tree(root):
+        if path.is_file():
+            yield path
+
+
+def cleanup_internal_temp_paths() -> None:
+    """Remove stale sync/restore scratch dirs that must never be backed up."""
+    for root in (OPENCLAW_HOME, STATE_DIR):
+        if not root.exists() or not root.is_dir():
+            continue
+        try:
+            children = list(root.iterdir())
+        except OSError:
+            continue
+        for child in children:
+            if not _is_internal_temp_name(child.name):
+                continue
+            try:
+                _remove_path(child)
+                print(f"Removed stale sync scratch path: {child}")
+            except OSError as exc:
+                print(f"Warning: could not remove stale sync scratch path {child}: {exc}")
 
 
 def _copy_hot_directory_snapshot(source_path: Path, tmp_path: Path) -> bool:
@@ -259,6 +376,7 @@ def copy_state_entry_with_retry(source_path: Path, backup_path: Path, attempts: 
 def snapshot_state_into_workspace() -> bool:
     had_copy_failures = False
     try:
+        cleanup_internal_temp_paths()
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         # Atomic snapshot: copy to a staging dir first, then rename.
         # This prevents a half-written (or empty) backup if we crash mid-copy,
@@ -274,7 +392,7 @@ def snapshot_state_into_workspace() -> bool:
         skipped_entries: list[tuple[str, Exception]] = []
         copied_entry_names: set[str] = set()
         for source_path in OPENCLAW_HOME.iterdir():
-            if source_path.name in EXCLUDED_STATE_NAMES:
+            if _should_skip_state_entry_name(source_path.name):
                 continue
 
             backup_path = staging_dir / source_path.name
@@ -300,7 +418,9 @@ def snapshot_state_into_workspace() -> bool:
         # dataset on the next sync.  Only remove an entry from staging when the
         # source has genuinely been deleted from OPENCLAW_HOME.
         for staged_path in list(staging_dir.iterdir()):
-            if staged_path.name in EXCLUDED_STATE_NAMES:
+            if _should_skip_state_entry_name(staged_path.name):
+                if staged_path.exists() or staged_path.is_symlink():
+                    _remove_path(staged_path)
                 continue
             if staged_path.name in copied_entry_names:
                 continue
@@ -425,13 +545,8 @@ def locally_existing_large_files(root: Path) -> set[str]:
     protected: set[str] = set()
     if not root.exists():
         return protected
-    for path in root.rglob("*"):
-        if not path.is_file():
-            continue
+    for path in _iter_sync_files(root):
         rel = path.relative_to(root).as_posix()
-        parts = Path(rel).parts
-        if any(part in EXCLUDED_SYNC_DIRS for part in parts):
-            continue
         try:
             if path.stat().st_size > MAX_FILE_SIZE_BYTES:
                 protected.add(rel)
@@ -441,6 +556,7 @@ def locally_existing_large_files(root: Path) -> set[str]:
 
 
 def restore_embedded_state() -> None:
+    cleanup_internal_temp_paths()
     state_backup_root = STATE_DIR / "openclaw"
 
     # Migration fix: old backups stored state in ".huggingclaw-state/openclaw"
@@ -462,7 +578,7 @@ def restore_embedded_state() -> None:
     if state_backup_root.is_dir():
         for source_path in state_backup_root.iterdir():
             name = source_path.name
-            if name in EXCLUDED_STATE_NAMES:
+            if _should_skip_state_entry_name(name):
                 if source_path.is_dir():
                     shutil.rmtree(source_path, ignore_errors=True)
                 else:
@@ -527,7 +643,7 @@ def ensure_repo_exists() -> str:
 
 def _should_exclude(rel_posix: str, path: Path) -> bool:
     parts = Path(rel_posix).parts
-    if any(part in EXCLUDED_SYNC_DIRS for part in parts):
+    if _should_skip_sync_path(parts):
         return True
     if path.is_file():
         try:
@@ -538,16 +654,28 @@ def _should_exclude(rel_posix: str, path: Path) -> bool:
     return False
 
 
-def file_marker(path: Path) -> tuple[int, int, int]:
+def file_marker(path: Path) -> FileMarker:
     try:
         stat = path.stat()
     except OSError:
-        return (0, 0, 0)
+        return (0, 0, 0, 0, "")
 
     if not path.is_file():
-        return (0, 0, 0)
+        return (0, 0, 0, 0, "")
 
-    return (1, int(stat.st_size), int(stat.st_mtime_ns))
+    digest = ""
+    try:
+        hasher = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                hasher.update(chunk)
+        digest = hasher.hexdigest()
+    except OSError:
+        # If the file is being rewritten, include ctime/mtime/size and let the
+        # next watch loop re-read it.  Never pretend the marker is unchanged.
+        digest = f"unreadable:{time.monotonic_ns()}"
+
+    return (1, int(stat.st_size), int(stat.st_mtime_ns), int(stat.st_ctime_ns), digest)
 
 
 def metadata_marker(root: Path) -> WorkspaceMarker:
@@ -558,17 +686,12 @@ def metadata_marker(root: Path) -> WorkspaceMarker:
     total_size = 0
     newest_mtime = 0
     metadata_hasher = hashlib.sha256()
-    for path in sorted(root.rglob("*")):
-        if not path.is_file():
-            continue
+    for path in _iter_sync_files(root):
         rel = path.relative_to(root).as_posix()
         # BUG FIX: use directory-only exclusion here (not size-based) so that
         # deleting a large file changes the marker and triggers a sync/prune
         # pass.  Large files are still excluded from the upload snapshot via
         # _should_exclude; this only controls change-detection.
-        parts = Path(rel).parts
-        if any(part in EXCLUDED_SYNC_DIRS for part in parts):
-            continue
         try:
             stat = path.stat()
         except OSError:
@@ -576,13 +699,16 @@ def metadata_marker(root: Path) -> WorkspaceMarker:
         file_count += 1
         size = int(stat.st_size)
         mtime_ns = int(stat.st_mtime_ns)
+        ctime_ns = int(stat.st_ctime_ns)
         total_size += size
-        newest_mtime = max(newest_mtime, mtime_ns)
+        newest_mtime = max(newest_mtime, mtime_ns, ctime_ns)
         metadata_hasher.update(rel.encode("utf-8"))
         metadata_hasher.update(b"\0")
         metadata_hasher.update(str(size).encode("ascii"))
         metadata_hasher.update(b"\0")
         metadata_hasher.update(str(mtime_ns).encode("ascii"))
+        metadata_hasher.update(b"\0")
+        metadata_hasher.update(str(ctime_ns).encode("ascii"))
         metadata_hasher.update(b"\0")
     return (file_count, total_size, newest_mtime, metadata_hasher.hexdigest())
 
@@ -592,15 +718,12 @@ def fingerprint_dir(root: Path) -> str:
     if not root.exists():
         return hasher.hexdigest()
 
-    for path in sorted(p for p in root.rglob("*") if p.is_file()):
+    for path in _iter_sync_files(root):
         rel = path.relative_to(root).as_posix()
         # BUG FIX: use directory-only exclusion (not size-based) so that
         # creating or deleting a large file changes the fingerprint.
         # Large files are hashed by path + metadata only (no content read)
         # to avoid reading gigabytes for a change-detection hash.
-        parts = Path(rel).parts
-        if any(part in EXCLUDED_SYNC_DIRS for part in parts):
-            continue
         hasher.update(rel.encode("utf-8"))
         try:
             stat = path.stat()
@@ -628,7 +751,7 @@ def fingerprint_dir(root: Path) -> str:
 
 def create_snapshot_dir(source_root: Path) -> Path:
     staging_root = Path(tempfile.mkdtemp(prefix="huggingclaw-sync-"))
-    for path in sorted(source_root.rglob("*")):
+    for path in _iter_sync_tree(source_root):
         rel = path.relative_to(source_root)
         rel_posix = rel.as_posix()
         if _should_exclude(rel_posix, path):
@@ -646,6 +769,64 @@ def create_snapshot_dir(source_root: Path) -> Path:
                 f"Snapshot changed while copying {rel_posix}; retrying next sync pass."
             )
     return staging_root
+
+
+def _run_with_timeout(seconds: float, label: str, func):
+    """Run *func* with a SIGALRM watchdog so hung HF calls release the sync lock."""
+    if seconds <= 0 or not hasattr(signal, "SIGALRM"):
+        return func()
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    try:
+        previous_timer = signal.setitimer(signal.ITIMER_REAL, 0)
+    except Exception:
+        previous_timer = (0.0, 0.0)
+
+    def _timeout_handler(_sig, _frame):
+        raise SyncUploadTimeoutError(f"{label} timed out after {seconds:.0f}s")
+
+    signal.signal(signal.SIGALRM, _timeout_handler)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        return func()
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer and previous_timer[0] > 0:
+            signal.setitimer(signal.ITIMER_REAL, previous_timer[0], previous_timer[1])
+
+
+def upload_snapshot(repo_id: str, snapshot_dir: Path) -> None:
+    strategy = SYNC_UPLOAD_STRATEGY.replace("-", "_")
+    timeout_label = "no timeout" if SYNC_UPLOAD_TIMEOUT <= 0 else f"{SYNC_UPLOAD_TIMEOUT:.0f}s timeout"
+    if strategy not in {"folder", "upload_folder", "large_folder"}:
+        print(f"Warning: unknown SYNC_UPLOAD_STRATEGY={SYNC_UPLOAD_STRATEGY!r}; using upload_folder.")
+        strategy = "folder"
+
+    def _upload() -> None:
+        if strategy == "large_folder":
+            try:
+                HF_API.upload_large_folder(
+                    repo_id=repo_id,
+                    repo_type="dataset",
+                    folder_path=str(snapshot_dir),
+                    num_workers=2,
+                    print_report=False,
+                )
+                return
+            except AttributeError:
+                print("Warning: upload_large_folder unavailable; falling back to upload_folder.")
+
+        upload_folder(
+            folder_path=str(snapshot_dir),
+            repo_id=repo_id,
+            repo_type="dataset",
+            token=HF_TOKEN,
+            commit_message=f"HuggingClaw sync {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
+        )
+
+    print(f"Workspace upload: strategy={strategy}, {timeout_label}")
+    _run_with_timeout(SYNC_UPLOAD_TIMEOUT, "Workspace upload", _upload)
 
 
 def prune_remote_deleted_files(
@@ -679,15 +860,19 @@ def prune_remote_deleted_files(
         and path not in protected_paths
         and not any(path == prefix or path.startswith(prefix + "/") for prefix in skip_prefixes)
     ]
-    if not stale_files:
+    _commit_delete_batches(repo_id, stale_files, "Prune", "stale file(s) after workspace sync")
+
+
+def _commit_delete_batches(repo_id: str, paths: list[str], action: str, reason: str) -> None:
+    if not paths:
         return
 
-    total = len(stale_files)
+    total = len(paths)
     num_batches = (total + PRUNE_BATCH_SIZE - 1) // PRUNE_BATCH_SIZE
     for batch_idx in range(num_batches):
-        batch = stale_files[batch_idx * PRUNE_BATCH_SIZE:(batch_idx + 1) * PRUNE_BATCH_SIZE]
+        batch = paths[batch_idx * PRUNE_BATCH_SIZE:(batch_idx + 1) * PRUNE_BATCH_SIZE]
         batch_label = f"{batch_idx + 1}/{num_batches}" if num_batches > 1 else ""
-        msg = f"Prune {len(batch)} stale file(s) after workspace sync"
+        msg = f"{action} {len(batch)} {reason}"
         if batch_label:
             msg += f" (batch {batch_label})"
         operations = [CommitOperationDelete(path_in_repo=path) for path in batch]
@@ -698,7 +883,25 @@ def prune_remote_deleted_files(
             commit_message=msg,
         )
         if num_batches > 1:
-            print(f"Pruned batch {batch_label}: {len(batch)} file(s)")
+            print(f"{action} batch {batch_label}: {len(batch)} file(s)")
+
+
+def prune_remote_internal_temp_files(repo_id: str) -> None:
+    """Remove old recursive scratch files from the HF backup even if nothing changed locally."""
+    if HF_API is None:
+        return
+
+    remote_files = list(HF_API.list_repo_files(repo_id=repo_id, repo_type="dataset"))
+    internal_temp_files = [
+        path for path in remote_files
+        if path != ".gitattributes" and _has_internal_temp_part(path)
+    ]
+    _commit_delete_batches(
+        repo_id,
+        internal_temp_files,
+        "Prune internal sync scratch",
+        "file(s) from backup",
+    )
 
 
 def restore_workspace() -> bool:
@@ -795,10 +998,20 @@ def _sync_once_unlocked(
         write_status("disabled", "HF_TOKEN is not configured.")
         return (last_fingerprint or "", last_marker or (0, 0, 0, ""))
 
-    global _prune_needed
+    global _prune_needed, _remote_temp_prune_done
 
     had_snapshot_copy_failures = snapshot_state_into_workspace()
     repo_id = ensure_repo_exists()
+    if not _remote_temp_prune_done:
+        try:
+            prune_remote_internal_temp_files(repo_id)
+            _remote_temp_prune_done = True
+        except Exception as temp_prune_exc:
+            # Do not block normal user-data sync if the cleanup commit fails;
+            # leave the flag false so the next pass retries before taking the
+            # metadata/fingerprint early exit again.
+            print(f"Warning: could not prune internal sync scratch files: {temp_prune_exc}")
+            _prune_needed = True
     current_marker = metadata_marker(WORKSPACE)
     # Session watcher uses content digests and can detect same-size rewrites
     # whose workspace metadata marker is unchanged.  In that case, force the
@@ -817,25 +1030,11 @@ def _sync_once_unlocked(
         write_status("synced", "No workspace changes detected.")
         return (last_fingerprint, current_marker)
 
-    write_status("syncing", f"Uploading workspace to {repo_id}")
+    upload_timeout_label = "no timeout" if SYNC_UPLOAD_TIMEOUT <= 0 else f"timeout {SYNC_UPLOAD_TIMEOUT:.0f}s"
+    write_status("syncing", f"Uploading workspace to {repo_id} ({SYNC_UPLOAD_STRATEGY}, {upload_timeout_label})")
     snapshot_dir = create_snapshot_dir(WORKSPACE)
     try:
-        try:
-            HF_API.upload_large_folder(
-                repo_id=repo_id,
-                repo_type="dataset",
-                folder_path=str(snapshot_dir),
-                num_workers=2,
-                print_report=False,
-            )
-        except AttributeError:
-            upload_folder(
-                folder_path=str(snapshot_dir),
-                repo_id=repo_id,
-                repo_type="dataset",
-                token=HF_TOKEN,
-                commit_message=f"HuggingClaw sync {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
-            )
+        upload_snapshot(repo_id, snapshot_dir)
         skip_prune_prefixes: set[str] = set()
         if had_snapshot_copy_failures:
             # BUG FIX: the old code added "huggingclaw-state/openclaw" to
@@ -879,7 +1078,18 @@ def sync_once(
 ) -> tuple[str, WorkspaceMarker]:
     SYNC_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
     with SYNC_LOCK_FILE.open("w", encoding="utf-8") as lock_handle:
-        fcntl.flock(lock_handle, fcntl.LOCK_EX)
+        deadline = time.monotonic() + SYNC_LOCK_TIMEOUT
+        while True:
+            try:
+                fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"Timed out waiting {SYNC_LOCK_TIMEOUT:.0f}s for workspace sync lock."
+                    )
+                if STOP_EVENT.wait(0.25):
+                    raise TimeoutError("Stopped while waiting for workspace sync lock.")
         try:
             return _sync_once_unlocked(
                 last_fingerprint,
@@ -920,9 +1130,6 @@ def sessions_marker() -> tuple[int, int, int, str]:
     newest_mtime = 0
     metadata_hasher = hashlib.sha256()
 
-    global _SESSIONS_FILE_DIGEST_CACHE
-    next_cache: dict[str, tuple[int, int, int, str]] = {}
-
     for profile_dir in sorted(SESSIONS_ROOT.iterdir()):
         if not profile_dir.is_dir():
             continue
@@ -943,7 +1150,6 @@ def sessions_marker() -> tuple[int, int, int, str]:
             size = int(stat.st_size)
             mtime_ns = int(stat.st_mtime_ns)
             ctime_ns = int(stat.st_ctime_ns)
-            cache_key = f"{profile_dir.name}\0{rel}"
             digest.update(rel.encode("utf-8"))
             digest.update(b"\0")
             digest.update(str(size).encode("ascii"))
@@ -952,24 +1158,17 @@ def sessions_marker() -> tuple[int, int, int, str]:
             digest.update(b"\0")
             digest.update(str(ctime_ns).encode("ascii"))
             digest.update(b"\0")
-            cached = _SESSIONS_FILE_DIGEST_CACHE.get(cache_key)
-            if (
-                cached is not None
-                and cached[0] == size
-                and cached[1] == mtime_ns
-                and cached[2] == ctime_ns
-            ):
-                file_digest = cached[3]
-            else:
-                file_hasher = hashlib.sha256()
-                try:
-                    with path.open("rb") as handle:
-                        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                            file_hasher.update(chunk)
-                except (FileNotFoundError, IsADirectoryError, NotADirectoryError):
-                    continue
-                file_digest = file_hasher.hexdigest()
-            next_cache[cache_key] = (size, mtime_ns, ctime_ns, file_digest)
+            # Sessions are the most important live data.  Hash every scan
+            # instead of trusting size/mtime/ctime caches so same-size rewrites
+            # and very small edits are never missed by the sessions trigger.
+            file_hasher = hashlib.sha256()
+            try:
+                with path.open("rb") as handle:
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                        file_hasher.update(chunk)
+            except (FileNotFoundError, IsADirectoryError, NotADirectoryError):
+                continue
+            file_digest = file_hasher.hexdigest()
             digest.update(file_digest.encode("ascii"))
             digest.update(b"\0")
 
@@ -981,11 +1180,10 @@ def sessions_marker() -> tuple[int, int, int, str]:
         metadata_hasher.update(digest.hexdigest().encode("ascii"))
         metadata_hasher.update(b"\0")
 
-    _SESSIONS_FILE_DIGEST_CACHE = next_cache
     return (file_count, total_size, newest_mtime, metadata_hasher.hexdigest())
 
 
-def wait_for_config_settle(config_marker: tuple[int, int, int]) -> tuple[str, tuple[int, int, int]]:
+def wait_for_config_settle(config_marker: FileMarker) -> tuple[str, FileMarker]:
     stable_since = time.monotonic()
     current_marker = config_marker
 
@@ -1008,9 +1206,9 @@ def wait_for_config_settle(config_marker: tuple[int, int, int]) -> tuple[str, tu
 
 
 def wait_for_sync_trigger(
-    config_marker: tuple[int, int, int],
+    config_marker: FileMarker,
     last_sessions_sync_time: float = 0.0,
-) -> tuple[str, tuple[int, int, int]]:
+) -> tuple[str, FileMarker]:
     deadline = time.monotonic() + max(0, INTERVAL)
     # BUG FIX: also watch sessions directory so new/updated sessions
     # trigger an immediate sync instead of waiting the full interval.
