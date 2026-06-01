@@ -48,10 +48,6 @@ EXCLUDE = {
     "Trash",            # covers .local/share/Trash and any nested trash folder
     ".ipynb_checkpoints",
     ".openclaw",
-    "app",
-    "HuggingClaw",
-    "HuggingClaw-Workspace",
-    "browser-deps",
     "site-packages",
     "__pycache__",
 }
@@ -59,6 +55,13 @@ EXCLUDE = {
 # Path prefixes, relative to JUPYTER_ROOT, that should not be synced. This keeps
 # package/runtime trees out of the dataset without blocking real JupyterLab
 # settings under .local/share/jupyter/lab/user-settings.
+ROOT_SKIP_PATH_PREFIXES = {
+    ("app",),
+    ("HuggingClaw",),
+    ("HuggingClaw-Workspace",),
+    ("browser-deps",),
+}
+
 SKIP_PATH_PREFIXES = {
     (".jupyter", "runtime"),
     (".local", "bin"),
@@ -173,6 +176,8 @@ def should_skip(p: Path):
     # Skip directories/files in the hard-coded exclude set.
     parts = p.parts
     if any(x in parts for x in EXCLUDE):
+        return True
+    if any(parts == prefix or _matches_prefix(parts, prefix) for prefix in ROOT_SKIP_PATH_PREFIXES):
         return True
     if _matches_prefix(parts, JUPYTER_DATA_DIR_PREFIX) and not any(
         _matches_prefix(parts, prefix) for prefix in JUPYTER_DATA_ALLOW_PREFIXES

@@ -198,9 +198,11 @@ if [ "$BROWSER_PLUGIN_MODE" = "remote" ]; then
   esac
 fi
 echo ""
-echo "  ╔══════════════════════════════════════╗"
-echo "  ║     🦞 HuggingClaw + 💻 JupyterLab    ║"
-echo "  ╚══════════════════════════════════════╝"
+printf '%s\n' \
+  "  +--------------------------------------+" \
+  "  | HuggingClaw + JupyterLab             |" \
+  "  | OpenClaw gateway with DevData sync   |" \
+  "  +--------------------------------------+"
 echo ""
 
 # ── Validate required secrets ──
