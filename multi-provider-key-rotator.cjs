@@ -814,7 +814,10 @@ function nextKey(p, model) {
   }
 
   let bestPick = null;
-  const startIdx = isStickyProvider(p) ? 0 : p.idx;
+  // Sticky mode should pin an existing provider/model bucket, but the first
+  // assignment for a new bucket must still use normal round-robin.  Otherwise
+  // every newly-seen model would hot-spot key #1 until it fails.
+  const startIdx = p.idx;
   for (let offset = 0; offset < total; offset++) {
     const i   = (startIdx + offset) % total;
     const key = p.keys[i];
