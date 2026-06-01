@@ -31,9 +31,41 @@ const MAX_STRIKES = Math.max(
   1,
   parseInt(process.env.KEY_MAX_STRIKES || '', 10) || 3,
 );
-// Permanently blacklisted keys retry after this long (default 24 h).
-// "Permanent" just means very long — avoids truly forever loops on app restart.
-const PERM_BLACKLIST_MS = 24 * 60 * 60 * 1000;
+const MAX_INFLIGHT_PER_KEY = Math.max(
+  1,
+  parseInt(process.env.KEY_MAX_INFLIGHT_PER_KEY || '', 10) || 3,
+);
+const COOLDOWN_JITTER_PCT = Math.min(
+  50,
+  Math.max(0, parseInt(process.env.KEY_BLACKLIST_JITTER_PCT || '', 10) || 15),
+);
+const FAILURE_DECAY_MS = Math.max(
+  30_000,
+  parseInt(process.env.KEY_FAILURE_DECAY_MS || '', 10) || 15 * 60_000,
+);
+const MAX_PERM_SUSPEND_MS = 16 * 60 * 60 * 1000;
+const PERM_SUSPEND_MS = Math.min(
+  MAX_PERM_SUSPEND_MS,
+  Math.max(60_000, parseInt(process.env.KEY_PERM_SUSPEND_MS || '', 10) || MAX_PERM_SUSPEND_MS),
+);
+const FETCH_MAX_RETRIES = Math.max(
+  0,
+  Math.min(2, parseInt(process.env.KEY_FETCH_MAX_RETRIES || '', 10) || 2),
+);
+const FETCH_RETRY_BASE_DELAY_MS = Math.max(
+  0,
+  Math.min(10_000, parseInt(process.env.KEY_FETCH_RETRY_BASE_DELAY_MS || '', 10) || 250),
+);
+const DIAGNOSTICS_ENABLED = /^(1|true|yes|on)$/i.test(
+  String(process.env.KEY_ROTATOR_DIAGNOSTICS || '').trim(),
+);
+const DIAGNOSTICS_INTERVAL_MS = Math.max(
+  10_000,
+  parseInt(process.env.KEY_ROTATOR_DIAGNOSTICS_INTERVAL_MS || '', 10) || 60_000,
+);
+// Long suspend window for exhausted/invalid keys.
+// Capped to 16h to avoid oversuppressing pools for too long.
+const formatHours = (ms) => (ms / (60 * 60 * 1000)).toFixed(ms % (60 * 60 * 1000) === 0 ? 0 : 2);
 
 // ─── Provider definitions ────────────────────────────────────────────────────
 
@@ -88,7 +120,7 @@ function normalizeKeys(...inputs) {
 // Per-key state: { strikes, blacklistedUntil }
 // strikes   – consecutive 429/402 count; resets on success
 // blacklistedUntil – epoch ms; 0 = active
-function makeKeyState() { return { strikes: 0, blacklistedUntil: 0 }; }
+function makeKeyState() { return { strikes: 0, blacklistedUntil: 0, lastFailureAt: 0 }; }
 
 const providerState = PROVIDERS.map(p => {
   const llmFallbackEnabled = !/^(0|false|no|off)$/.test(
@@ -120,7 +152,7 @@ const providerState = PROVIDERS.map(p => {
   // FIX: idx tracks position in the ACTIVE (non-permanently-removed) pool.
   // We never remove keys from the array — we just skip blacklisted ones.
   // idx advances only when a key is ACTUALLY picked (no drift for skipped keys).
-  return { ...p, keys, keyState, idx: 0 };
+  return { ...p, keys, keyState, inFlight: new Map(), idx: 0 };
 });
 
 // LLM_API_KEY fallback summary
@@ -155,7 +187,7 @@ function isActive(p, key) {
  * Strike logic:
  *   strike 1 → BASE_COOLDOWN_MS  (e.g. 60 s  — probably rate-limit)
  *   strike 2 → BASE_COOLDOWN_MS × 4            (240 s)
- *   strike 3 → PERM_BLACKLIST_MS (24 h — treat as quota exhausted, skip all day)
+ *   strike 3 → PERM_SUSPEND_MS (max 16 h — treat as quota exhausted, skip long)
  *
  * A successful response resets strikes so a key that was temporarily
  * rate-limited and recovered is treated as fresh again.
@@ -165,14 +197,17 @@ function recordFailure(p, key) {
   if (!ks) { ks = makeKeyState(); p.keyState.set(key, ks); }
 
   ks.strikes = Math.min(ks.strikes + 1, MAX_STRIKES);
+  ks.lastFailureAt = Date.now();
 
   let cooldown;
   if (ks.strikes >= MAX_STRIKES) {
-    cooldown = PERM_BLACKLIST_MS;
-    warn(`[key-rotator] ${p.name}: ...${key.slice(-6)} reached ${MAX_STRIKES} strikes — suspended for 24 h (quota likely exhausted)`);
+    cooldown = PERM_SUSPEND_MS;
+    warn(`[key-rotator] ${p.name}: ...${key.slice(-6)} reached ${MAX_STRIKES} strikes — suspended for ${formatHours(PERM_SUSPEND_MS)} h (quota likely exhausted)`);
   } else {
     // Exponential: 1× → 4× (strikes 1 and 2)
     cooldown = BASE_COOLDOWN_MS * Math.pow(4, ks.strikes - 1);
+    const jitter = 1 + ((Math.random() * 2 - 1) * (COOLDOWN_JITTER_PCT / 100));
+    cooldown = Math.max(1000, Math.round(cooldown * jitter));
     const secs = Math.round(cooldown / 1000);
     log(`[key-rotator] ${p.name}: ...${key.slice(-6)} strike ${ks.strikes}/${MAX_STRIKES} — backoff ${secs}s`);
   }
@@ -187,8 +222,32 @@ function recordSuccess(p, key) {
   const ks = p.keyState.get(key);
   if (ks && ks.strikes > 0) {
     ks.strikes = 0;
+    ks.lastFailureAt = 0;
     log(`[key-rotator] ${p.name}: ...${key.slice(-6)} recovered — strikes reset`);
   }
+}
+
+function classifyRetryableFailure(status, errCode) {
+  const retryableStatus = new Set([408, 425, 429, 500, 502, 503, 504, 529, 402]);
+  const retryableErrorCodes = new Set([
+    'ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ENOTFOUND',
+    'ECONNREFUSED', 'EPIPE',
+  ]);
+  if (typeof status === 'number') return retryableStatus.has(status);
+  if (errCode) return retryableErrorCodes.has(String(errCode).toUpperCase());
+  return false;
+}
+
+function beginInFlight(p, key) {
+  if (!p || !key) return;
+  p.inFlight.set(key, (p.inFlight.get(key) || 0) + 1);
+}
+
+function endInFlight(p, key) {
+  if (!p || !key) return;
+  const next = Math.max(0, (p.inFlight.get(key) || 0) - 1);
+  if (next === 0) p.inFlight.delete(key);
+  else p.inFlight.set(key, next);
 }
 
 // ─── Round-robin selection ────────────────────────────────────────────────────
@@ -213,13 +272,30 @@ function nextKey(p) {
 
   const total = p.keys.length;
 
+  let bestPick = null;
   for (let offset = 0; offset < total; offset++) {
     const i   = (p.idx + offset) % total;
     const key = p.keys[i];
     if (isActive(p, key)) {
-      p.idx = (i + 1) % total;   // next call starts AFTER the key we just picked
-      return key;
+      const inflight = p.inFlight.get(key) || 0;
+      if (inflight < MAX_INFLIGHT_PER_KEY) {
+        p.idx = (i + 1) % total;   // next call starts AFTER the key we just picked
+        log(`[key-rotator] ${p.name}: picked ...${key.slice(-6)} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
+        return key;
+      }
+      if (!bestPick) bestPick = { i, key, inflight, score: Number.POSITIVE_INFINITY };
+      const ks = p.keyState.get(key) || makeKeyState();
+      const recentFailPenalty = ks.lastFailureAt > 0 && (Date.now() - ks.lastFailureAt) < FAILURE_DECAY_MS ? 100 : 0;
+      const strikePenalty = (ks.strikes || 0) * 10;
+      const score = recentFailPenalty + strikePenalty + inflight;
+      if (score < bestPick.score) bestPick = { i, key, inflight, score };
     }
+  }
+
+  if (bestPick) {
+    p.idx = (bestPick.i + 1) % total;
+    warn(`[key-rotator] ${p.name}: all active keys saturated, reusing ...${bestPick.key.slice(-6)} inflight=${bestPick.inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
+    return bestPick.key;
   }
 
   // All keys are sitting out — pick the one closest to recovering
@@ -267,11 +343,72 @@ function setAuthHeader(headers, key) {
 
 function handleStatus(p, key, status) {
   if (!p || !key) return;
-  if (status === 429 || status === 402) {
+  if (status === 401 || status === 403) {
+    // Usually invalid/expired key. Suspend long to avoid repeatedly poisoning requests.
+    let ks = p.keyState.get(key);
+    if (!ks) { ks = makeKeyState(); p.keyState.set(key, ks); }
+    ks.strikes = MAX_STRIKES;
+    ks.lastFailureAt = Date.now();
+    ks.blacklistedUntil = Date.now() + PERM_SUSPEND_MS;
+    warn(`[key-rotator] ${p.name}: ...${key.slice(-6)} auth-failed (${status}) — suspended for ${formatHours(PERM_SUSPEND_MS)} h`);
+    return;
+  }
+  if (classifyRetryableFailure(status)) {
     recordFailure(p, key);
+    warn(`[key-rotator] ${p.name}: retryable status=${status} on ...${key.slice(-6)}`);
   } else if (status >= 200 && status < 400) {
     recordSuccess(p, key);
   }
+}
+
+function handleTransportError(p, key, err) {
+  if (!p || !key) return;
+  const code = err?.code ? String(err.code).toUpperCase() : '';
+  if (classifyRetryableFailure(undefined, code)) {
+    recordFailure(p, key);
+    warn(`[key-rotator] ${p.name}: retryable network code=${code} on ...${key.slice(-6)}`);
+  }
+}
+
+function startDiagnostics() {
+  if (!DIAGNOSTICS_ENABLED) return;
+  setInterval(() => {
+    const now = Date.now();
+    const snapshot = providerState.map(p => {
+      const keyStats = p.keys.map(k => {
+        const ks = p.keyState.get(k) || makeKeyState();
+        return {
+          keySuffix: k.slice(-6),
+          active: ks.blacklistedUntil === 0 || now >= ks.blacklistedUntil,
+          strikes: ks.strikes,
+          inFlight: p.inFlight.get(k) || 0,
+        };
+      });
+      const active = keyStats.filter(s => s.active).length;
+      const suspended = keyStats.length - active;
+      const avgStrikes = keyStats.length
+        ? Number((keyStats.reduce((sum, s) => sum + s.strikes, 0) / keyStats.length).toFixed(2))
+        : 0;
+      return { provider: p.name, total: keyStats.length, active, suspended, avgStrikes, keys: keyStats };
+    });
+    log('[key-rotator] diagnostics', JSON.stringify({ ts: new Date().toISOString(), providers: snapshot }));
+  }, DIAGNOSTICS_INTERVAL_MS).unref?.();
+}
+
+function sleep(ms) {
+  if (!ms || ms <= 0) return Promise.resolve();
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseRetryAfterMs(value) {
+  if (!value) return 0;
+  const raw = String(value).trim();
+  if (!raw) return 0;
+  const sec = Number(raw);
+  if (Number.isFinite(sec) && sec >= 0) return Math.min(10_000, Math.round(sec * 1000));
+  const ts = Date.parse(raw);
+  if (Number.isFinite(ts)) return Math.min(10_000, Math.max(0, ts - Date.now()));
+  return 0;
 }
 
 // ─── Patch globalThis.fetch ───────────────────────────────────────────────────
@@ -281,43 +418,94 @@ function patchFetch() {
   const orig = globalThis.fetch.bind(globalThis);
 
   globalThis.fetch = async function patchedFetch(input, init = {}) {
-    let usedKey = null, usedProvider = null;
-
     try {
       const urlLike = typeof input === 'string' || input instanceof URL
         ? input
         : (input && typeof input.url === 'string' ? input.url : null);
       const provider = matchProvider(resolveHostname(urlLike));
+      if (!provider) return await orig(input, init);
 
-      if (provider) {
-        const key = nextKey(provider);
-        if (key) {
-          usedKey = key; usedProvider = provider;
-          if (provider.queryParam) {
-            const url = new URL(typeof input === 'string' ? input : input.url);
-            url.searchParams.set('key', key);
-            if (typeof input === 'string') {
-              input = url.toString();
-            } else {
-              init = { method:input.method, headers:input.headers, body:input.body,
-                       mode:input.mode, credentials:input.credentials, cache:input.cache,
-                       redirect:input.redirect, referrer:input.referrer,
-                       integrity:input.integrity, ...init };
-              input = url.toString();
+      const baseRequest = new Request(input, init);
+      const method = String(baseRequest.method || 'GET').toUpperCase();
+      const replaySafe = method === 'GET' || method === 'HEAD' || method === 'OPTIONS';
+      const maxAttempts = replaySafe ? 1 + FETCH_MAX_RETRIES : 1;
+      const triedKeys = new Set();
+      let lastErr = null;
+      let lastResponse = null;
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        let usedKey = null;
+        try {
+          let key = nextKey(provider);
+          // Prefer a fresh key for each retry when possible, but never spin forever.
+          if (key && triedKeys.has(key) && triedKeys.size < provider.keys.length) {
+            const maxProbe = Math.min(provider.keys.length, 8);
+            for (let probe = 0; probe < maxProbe; probe++) {
+              const alt = nextKey(provider);
+              if (!alt || !triedKeys.has(alt)) {
+                key = alt;
+                break;
+              }
             }
-          } else {
-            init = { ...init, headers: setAuthHeader(init.headers || (input && input.headers) || undefined, key) };
           }
+          if (key) {
+            triedKeys.add(key);
+            usedKey = key;
+            beginInFlight(provider, key);
+          }
+
+          const req = new Request(baseRequest);
+          let attemptRequest = req;
+          if (usedKey) {
+            if (provider.queryParam) {
+              const url = new URL(req.url);
+              url.searchParams.set('key', usedKey);
+              attemptRequest = new Request(url.toString(), req);
+            } else {
+              req.headers.set('authorization', `Bearer ${usedKey}`);
+            }
+          }
+
+          const response = await orig(attemptRequest);
+          lastResponse = response;
+          try { handleStatus(provider, usedKey, response.status); } catch (_) {}
+          try { endInFlight(provider, usedKey); } catch (_) {}
+
+          const shouldRetry = attempt < maxAttempts && classifyRetryableFailure(response.status);
+          if (shouldRetry) {
+            const retryAfterMs = parseRetryAfterMs(response.headers?.get?.('retry-after'));
+            const backoffMs = Math.min(
+              10_000,
+              Math.max(retryAfterMs, FETCH_RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1)),
+            );
+            warn(`[key-rotator] ${provider.name}: fetch retry ${attempt}/${maxAttempts - 1} after status=${response.status}`);
+            await sleep(backoffMs);
+            continue;
+          }
+          return response;
+        } catch (err) {
+          lastErr = err;
+          try { handleTransportError(provider, usedKey, err); } catch (_) {}
+          try { endInFlight(provider, usedKey); } catch (_) {}
+          const code = err?.code ? String(err.code).toUpperCase() : '';
+          const shouldRetry = attempt < maxAttempts && classifyRetryableFailure(undefined, code);
+          if (shouldRetry) {
+            const backoffMs = Math.min(10_000, FETCH_RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1));
+            warn(`[key-rotator] ${provider.name}: fetch retry ${attempt}/${maxAttempts - 1} after network code=${code || 'unknown'}`);
+            await sleep(backoffMs);
+            continue;
+          }
+          throw err;
         }
       }
-    } catch (err) { warn('[key-rotator] fetch patch error:', err?.message || err); }
 
-    let response;
-    try { response = await orig(input, init); }
-    catch (err) { throw err; }
-
-    try { handleStatus(usedProvider, usedKey, response.status); } catch (_) {}
-    return response;
+      if (lastResponse) return lastResponse;
+      if (lastErr) throw lastErr;
+      return await orig(baseRequest);
+    } catch (err) {
+      warn('[key-rotator] fetch patch error:', err?.message || err);
+      throw err;
+    }
   };
 }
 
@@ -337,6 +525,7 @@ function patchHttpModule(mod) {
         const key = nextKey(provider);
         if (key) {
           usedKey = key; usedProvider = provider;
+          beginInFlight(usedProvider, usedKey);
           if (provider.queryParam) {
             const u = new URL(String(
               typeof options === 'string' || options instanceof URL
@@ -369,9 +558,14 @@ function patchHttpModule(mod) {
         if (event === 'response') {
           const res = rest[0];
           try { handleStatus(usedProvider, usedKey, res?.statusCode); } catch (_) {}
+          try { endInFlight(usedProvider, usedKey); } catch (_) {}
         }
         return _emit(event, ...rest);
       };
+      req.on('error', (err) => {
+        try { handleTransportError(usedProvider, usedKey, err); } catch (_) {}
+        try { endInFlight(usedProvider, usedKey); } catch (_) {}
+      });
     }
     return req;
   };
@@ -382,5 +576,6 @@ function patchHttpModule(mod) {
 patchFetch();
 patchHttpModule(http);
 patchHttpModule(https);
+startDiagnostics();
 
-log(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:24h`);
+log(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:${formatHours(PERM_SUSPEND_MS)}h (cap 16h) max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'}`);
