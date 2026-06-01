@@ -167,6 +167,10 @@ def _matches_prefix(parts: tuple[str, ...], prefix: tuple[str, ...]) -> bool:
     return len(parts) >= len(prefix) and parts[:len(prefix)] == prefix
 
 
+def _is_prefix_of(parts: tuple[str, ...], full_path: tuple[str, ...]) -> bool:
+    return len(parts) <= len(full_path) and full_path[:len(parts)] == parts
+
+
 def should_skip(p: Path):
     # Reserved sync helper files are not user data. Old datasets may still have
     # these markers, but fresh snapshots no longer create them.
@@ -188,15 +192,52 @@ def should_skip(p: Path):
     # Skip any component whose name looks like a secret file/dir.
     return any(_name_is_secret(part) for part in parts)
 
+
+def iter_sync_tree(root: Path):
+    """Yield syncable DevData paths without descending into excluded trees."""
+    if not root.exists():
+        return
+
+    for dirpath, dirnames, filenames in os.walk(root):
+        dir_path = Path(dirpath)
+        try:
+            dir_rel = dir_path.relative_to(root)
+        except ValueError:
+            dir_rel = Path()
+
+        kept_dirnames: list[str] = []
+        for dirname in sorted(dirnames):
+            rel = dir_rel / dirname
+            child = dir_path / dirname
+            rel_parts = rel.parts
+            # Do not prune ancestors of explicitly allowed Jupyter settings
+            # paths. should_skip(.local/share/jupyter) is true by design for
+            # files under that tree, but we must still descend through the
+            # parent dirs to reach lab/user-settings and lab/workspaces.
+            allowed_ancestor = any(
+                _is_prefix_of(rel_parts, prefix) for prefix in JUPYTER_DATA_ALLOW_PREFIXES
+            )
+            if child.is_symlink() or (should_skip(rel) and not allowed_ancestor):
+                continue
+            kept_dirnames.append(dirname)
+        dirnames[:] = kept_dirnames
+
+        for dirname in kept_dirnames:
+            yield dir_path / dirname
+
+        for filename in sorted(filenames):
+            rel = dir_rel / filename
+            child = dir_path / filename
+            if child.is_symlink() or should_skip(rel):
+                continue
+            yield child
+
+
 def snapshot(src: Path, dst: Path) -> tuple[bool, set[str]]:
     had_copy_failures = False
     protected_large_files: set[str] = set()
-    for p in src.rglob("*"):
+    for p in iter_sync_tree(src):
         rel = p.relative_to(src)
-        if should_skip(rel):
-            continue
-        if p.is_symlink():
-            continue
         target = dst / rel
         if p.is_dir():
             # Keep parent directories for files copied later in this snapshot.
