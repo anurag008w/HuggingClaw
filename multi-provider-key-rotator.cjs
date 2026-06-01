@@ -330,7 +330,8 @@ function recordFailure(p, key, model, retryAfterMs) {
     if (isPerm)
       warn(`[key-rotator] ${p.name}: ${keyMask(key)} model=${model} hit ${MAX_STRIKES} strikes — suspended for ${formatHours(PERM_SUSPEND_MS)}h (quota likely exhausted for this model)`);
     else
-      debug(`[key-rotator] ${p.name}: ${keyMask(key)} model=${model} strike ${mks.strikes}/${MAX_STRIKES} — backoff ${Math.round(cooldown / 1000)}s${serverHintMs > 0 ? ` (server-hint ${Math.round(serverHintMs/1000)}s)` : ''}`);
+      // FIX: was debug() — invisible at default info level; users couldn't see key backoffs happening.
+      log(`[key-rotator] ${p.name}: ${keyMask(key)} model=${model} strike ${mks.strikes}/${MAX_STRIKES} — backoff ${Math.round(cooldown / 1000)}s${serverHintMs > 0 ? ` (server-hint ${Math.round(serverHintMs/1000)}s)` : ''}`);
     return;
   }
 
@@ -357,7 +358,8 @@ function recordFailure(p, key, model, retryAfterMs) {
   if (isPerm)
     warn(`[key-rotator] ${p.name}: ${keyMask(key)} reached ${MAX_STRIKES} strikes — suspended for ${formatHours(PERM_SUSPEND_MS)} h (quota likely exhausted)`);
   else
-    debug(`[key-rotator] ${p.name}: ${keyMask(key)} strike ${ks.strikes}/${MAX_STRIKES} — backoff ${Math.round(cooldown / 1000)}s${serverHintMs > 0 ? ` (server-hint ${Math.round(serverHintMs/1000)}s)` : ''}`);
+    // FIX: was debug() — invisible at default info level; users couldn't see key backoffs happening.
+    log(`[key-rotator] ${p.name}: ${keyMask(key)} strike ${ks.strikes}/${MAX_STRIKES} — backoff ${Math.round(cooldown / 1000)}s${serverHintMs > 0 ? ` (server-hint ${Math.round(serverHintMs/1000)}s)` : ''}`);
 }
 
 /**
@@ -476,7 +478,9 @@ function nextKey(p, model) {
       const inflight = p.inFlight.get(key) || 0;
       if (inflight < MAX_INFLIGHT_PER_KEY) {
         p.idx = (i + 1) % total;   // next call starts AFTER the key we just picked
-        if (VERBOSE_PICKS) debug(`[key-rotator] ${p.name}: picked ${keyMask(key)}${model ? ` model=${model}` : ''} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
+        // FIX: was debug() which silently does nothing unless LOG_LEVEL=debug — VERBOSE_PICKS
+        // is supposed to enable pick-level visibility without requiring full debug mode.
+        if (VERBOSE_PICKS) log(`[key-rotator] ${p.name}: picked ${keyMask(key)}${model ? ` model=${model}` : ''} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
         return { key, waitMs: 0 };
       }
       if (!bestPick) bestPick = { i, key, inflight, score: Number.POSITIVE_INFINITY };
@@ -1128,6 +1132,22 @@ function patchHttpModule(mod) {
                 chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, typeof encoding === 'string' ? encoding : 'utf8'));
               }
               const fullBody = Buffer.concat(chunks).toString('utf8');
+
+              // ★ FIX: extract model from body for OpenAI-compat Gemini endpoint.
+              // Native endpoint: /v1beta/models/gemini-X:generateContent → model in URL (already set).
+              // OpenAI-compat:   /v1beta/openai/chat/completions       → model in body (usedModel=null).
+              // Without this, a 429 on gemini-2.5-pro via the compat path blacklists the KEY globally
+              // so gemini-flash etc. also stop working — defeating per-model rate-limit scoping.
+              if (usedModel === null && usedProvider && usedProvider.perModelLimits) {
+                try {
+                  const bodyModel = JSON.parse(fullBody)?.model;
+                  if (bodyModel && typeof bodyModel === 'string' && bodyModel.length > 0) {
+                    usedModel = (bodyModel.includes('/') ? bodyModel.split('/').slice(1).join('/') : bodyModel).toLowerCase();
+                    debug(`[key-rotator] ${usedProvider.name}: (http) model extracted from request body: ${usedModel}`);
+                  }
+                } catch (_) { /* non-JSON body — leave model null */ }
+              }
+
               const cleaned = stripGeminiThoughtParts(fullBody);
               if (cleaned !== fullBody) {
                 debug('[key-rotator] gemini (http): normalized malformed thought_signature history');
