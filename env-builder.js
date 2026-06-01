@@ -599,6 +599,56 @@ const FIELDS = [
 {
     "g": "Plugins",
     "icon": "🔄",
+    "k": "KEY_INFLIGHT_TTL_MS",
+    "lbl": "Key rotation in-flight safety lease (ms)",
+    "type": "text",
+    "ph": "300000",
+    "tag": "advanced",
+    "help": "Clears stale in-flight counters if a streaming/undici request never completes cleanly. Default: 5 minutes."
+  },
+{
+    "g": "Plugins",
+    "icon": "🔄",
+    "k": "KEY_MODEL_SNIFF_MAX_BYTES",
+    "lbl": "Gemini model sniff max body bytes",
+    "type": "text",
+    "ph": "262144",
+    "tag": "advanced",
+    "help": "Maximum request-body bytes inspected to find model names in streaming OpenAI-compatible Gemini calls. Default: 256 KiB."
+  },
+{
+    "g": "Plugins",
+    "icon": "🔄",
+    "k": "KEY_ERROR_BODY_SNIFF_MAX_BYTES",
+    "lbl": "Provider error sniff max bytes",
+    "type": "text",
+    "ph": "65536",
+    "tag": "advanced",
+    "help": "Maximum error-response bytes inspected to distinguish quota/rate failures from auth failures. Default: 64 KiB."
+  },
+{
+    "g": "Plugins",
+    "icon": "🔄",
+    "k": "KEY_STICKY_UNTIL_FAILURE",
+    "lbl": "Sticky key mode — keep selected providers on one key until failure/quota exhaustion",
+    "type": "toggle",
+    "ph": "true",
+    "tag": "advanced",
+    "help": "Enabled by default for Gemini so one model keeps using the same key until that key fails or exhausts, instead of spending multiple keys on one chat turn."
+  },
+{
+    "g": "Plugins",
+    "icon": "🔄",
+    "k": "KEY_STICKY_PROVIDERS",
+    "lbl": "Sticky key providers (comma-separated)",
+    "type": "text",
+    "ph": "gemini",
+    "tag": "advanced",
+    "help": "Provider names that should reuse one key until failure/quota exhaustion. Default: gemini."
+  },
+{
+    "g": "Plugins",
+    "icon": "🔄",
     "k": "KEY_FETCH_MAX_RETRIES",
     "lbl": "Auto-retries for retryable failures (GET/HEAD/OPTIONS/POST)",
     "type": "text",

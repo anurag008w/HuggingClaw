@@ -604,14 +604,19 @@ function modelProviderToRotatorProvider(model) {
     moonshot: "kimi-moonshot",
     "kimi-coding": "kimi-moonshot",
     qwen: "modelstudio",
+    dashscope: "modelstudio",
+    modelstudio: "modelstudio",
+    "vercel-ai-gateway": "vercel-ai-gateway",
     mistralai: "mistral",
     "x-ai": "xai",
     "z-ai": "zai",
     "z.ai": "zai",
     zhipu: "zai",
+    bigmodel: "zai",
     "volcengine-plan": "volcengine",
     "byteplus-plan": "byteplus",
     "opencode-go": "opencode",
+    "github-copilot": "github-copilot",
   };
   return aliases[provider] || provider;
 }
@@ -634,7 +639,7 @@ function keyRotatorRuntimeSummary() {
 
 function providerKeySummary() {
   const providers = [
-    { name: "gemini", env: ["GEMINI_API_KEYS", "GEMINI_API_KEY"], aliases: ["GOOGLE_API_KEYS", "GOOGLE_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEYS", "GOOGLE_GENERATIVE_AI_API_KEY", "GOOGLE_AI_API_KEYS", "GOOGLE_AI_API_KEY"] },
+    { name: "gemini", env: ["GEMINI_API_KEYS", "GEMINI_API_KEY"], aliases: ["GOOGLE_API_KEYS", "GOOGLE_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEYS", "GOOGLE_GENERATIVE_AI_API_KEY", "GOOGLE_AI_API_KEYS", "GOOGLE_AI_API_KEY", "GOOGLE_GENAI_API_KEYS", "GOOGLE_GENAI_API_KEY"] },
     { name: "openai", env: ["OPENAI_API_KEYS", "OPENAI_API_KEY"] },
     { name: "anthropic", env: ["ANTHROPIC_API_KEYS", "ANTHROPIC_API_KEY"] },
     { name: "openrouter", env: ["OPENROUTER_API_KEYS", "OPENROUTER_API_KEY"] },
@@ -645,20 +650,21 @@ function providerKeySummary() {
     { name: "cohere", env: ["COHERE_API_KEYS", "COHERE_API_KEY"] },
     { name: "together", env: ["TOGETHER_API_KEYS", "TOGETHER_API_KEY"] },
     { name: "cerebras", env: ["CEREBRAS_API_KEYS", "CEREBRAS_API_KEY"] },
-    { name: "huggingface", env: ["HUGGINGFACE_HUB_TOKENS", "HUGGINGFACE_HUB_TOKEN"] },
+    { name: "huggingface", env: ["HUGGINGFACE_HUB_TOKENS", "HUGGINGFACE_HUB_TOKEN"], aliases: ["HUGGINGFACE_API_KEYS", "HUGGINGFACE_API_KEY", "HUGGINGFACE_HUB_API_KEYS", "HUGGINGFACE_HUB_API_KEY", "HF_TOKEN_POOL", "HF_TOKEN"] },
     { name: "deepseek", env: ["DEEPSEEK_API_KEYS", "DEEPSEEK_API_KEY"] },
     { name: "kilocode", env: ["KILOCODE_API_KEYS", "KILOCODE_API_KEY"] },
     { name: "opencode", env: ["OPENCODE_API_KEYS", "OPENCODE_API_KEY"] },
-    { name: "zai", env: ["ZAI_API_KEYS", "ZAI_API_KEY"] },
+    { name: "zai", env: ["ZAI_API_KEYS", "ZAI_API_KEY"], aliases: ["ZHIPU_API_KEYS", "ZHIPU_API_KEY", "BIGMODEL_API_KEYS", "BIGMODEL_API_KEY"] },
     { name: "kimi-moonshot", env: ["KIMI_API_KEYS", "KIMI_API_KEY", "MOONSHOT_API_KEYS", "MOONSHOT_API_KEY"] },
     { name: "minimax", env: ["MINIMAX_API_KEYS", "MINIMAX_API_KEY"] },
-    { name: "modelstudio", env: ["MODELSTUDIO_API_KEYS", "MODELSTUDIO_API_KEY"] },
+    { name: "modelstudio", env: ["MODELSTUDIO_API_KEYS", "MODELSTUDIO_API_KEY"], aliases: ["DASHSCOPE_API_KEYS", "DASHSCOPE_API_KEY", "QWEN_API_KEYS", "QWEN_API_KEY", "ALIBABA_CLOUD_API_KEYS", "ALIBABA_CLOUD_API_KEY"] },
     { name: "xiaomi", env: ["XIAOMI_API_KEYS", "XIAOMI_API_KEY"] },
-    { name: "volcengine", env: ["VOLCANO_ENGINE_API_KEYS", "VOLCANO_ENGINE_API_KEY"] },
+    { name: "volcengine", env: ["VOLCANO_ENGINE_API_KEYS", "VOLCANO_ENGINE_API_KEY"], aliases: ["VOLCENGINE_API_KEYS", "VOLCENGINE_API_KEY", "ARK_API_KEYS", "ARK_API_KEY"] },
     { name: "byteplus", env: ["BYTEPLUS_API_KEYS", "BYTEPLUS_API_KEY"] },
     { name: "qianfan", env: ["QIANFAN_API_KEYS", "QIANFAN_API_KEY"] },
     { name: "venice", env: ["VENICE_API_KEYS", "VENICE_API_KEY"] },
-    { name: "github-copilot", env: ["COPILOT_GITHUB_TOKENS", "COPILOT_GITHUB_TOKEN"] },
+    { name: "github-copilot", env: ["COPILOT_GITHUB_TOKENS", "COPILOT_GITHUB_TOKEN"], aliases: ["GITHUB_COPILOT_TOKENS", "GITHUB_COPILOT_TOKEN", "GITHUB_COPILOT_API_KEYS", "GITHUB_COPILOT_API_KEY"] },
+    { name: "vercel-ai-gateway", env: ["AI_GATEWAY_API_KEYS", "AI_GATEWAY_API_KEY"], aliases: ["VERCEL_AI_GATEWAY_API_KEYS", "VERCEL_AI_GATEWAY_API_KEY", "VERCEL_OIDC_TOKEN"] },
     { name: "synthetic", env: ["SYNTHETIC_API_KEYS", "SYNTHETIC_API_KEY"] },
   ];
   return providers.map((p) => {

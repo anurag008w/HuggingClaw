@@ -260,7 +260,7 @@ Configure password access and network restrictions:
 
 ## 🔑 API Key Rotation *(Optional)*
 
-Spread requests across multiple API keys to avoid rate limits. Supply a comma-separated pool for any provider — keys rotate round-robin per provider independently.
+Spread requests across multiple API keys to avoid rate limits. Supply a comma-separated pool for any provider. Gemini uses sticky-per-model key selection by default, so each model starts on the first healthy key and reuses it until it fails or hits quota; other providers keep the normal round-robin behavior.
 
 ```bash
 # Single provider, multiple keys
@@ -290,6 +290,11 @@ Optional tuning:
 - `KEY_PERM_SUSPEND_MS` (default `57600000`) — long suspend duration for exhausted/auth-invalid keys (**capped at 16h max**).
 - `KEY_FAILURE_DECAY_MS` (default `900000`) — recent-failure decay window used to deprioritize keys.
 - `KEY_MAX_INFLIGHT_PER_KEY` (default `3`) — soft concurrent request cap per key.
+- `KEY_INFLIGHT_TTL_MS` (default `300000`) — safety lease for in-flight counters, preventing stale undici streams from making keys look permanently saturated.
+- `KEY_MODEL_SNIFF_MAX_BYTES` (default `262144`) — max request-body bytes to inspect for model names on streaming OpenAI-compatible Gemini calls.
+- `KEY_ERROR_BODY_SNIFF_MAX_BYTES` (default `65536`) — max error-response bytes to inspect so provider quota/rate bodies such as 403 quota errors are scoped correctly instead of being treated as permanent auth failures.
+- `KEY_STICKY_UNTIL_FAILURE` (default `true`) — keep sticky providers on one key until that key fails/exhausts.
+- `KEY_STICKY_PROVIDERS` (default `gemini`) — comma-separated provider names that should use sticky key selection instead of per-request round-robin.
 - `KEY_FETCH_MAX_RETRIES` (default `0`) — optional auto-retry count for retryable failures on **GET/HEAD/OPTIONS/POST** with a different key. Default `0` means the rotator does **not** spend extra upstream attempts for a single caller request.
 - `KEY_FETCH_RETRY_BASE_DELAY_MS` (default `250`) — base delay for retry backoff (respects `Retry-After`, capped to 10s).
 - `KEY_ROTATOR_ASSERT_NO_EXTRA_CALLS=true` — optional diagnostic warning if a single caller fetch creates more than one upstream provider attempt.
@@ -299,7 +304,7 @@ Optional tuning:
 - `KEY_ROTATOR_LOG_LEVEL` (`info`/`debug`/`silent`, default `info`) — controls rotator log verbosity.
 - `KEY_ROTATOR_VERBOSE_PICKS` (`true`/`false`, default `false`) — enable per-request key-pick logs (best with `KEY_ROTATOR_LOG_LEVEL=debug`).
 
-Supported per-provider variables: `ANTHROPIC_API_KEYS`, `OPENAI_API_KEYS`, `GEMINI_API_KEYS`, `DEEPSEEK_API_KEYS`, `GROQ_API_KEYS`, `MISTRAL_API_KEYS`, `OPENROUTER_API_KEYS`, `XAI_API_KEYS`, `NVIDIA_API_KEYS`, `COHERE_API_KEYS`, `TOGETHER_API_KEYS`, `CEREBRAS_API_KEYS`, and more — see `.env.example` for the full list.
+Supported per-provider variables include `ANTHROPIC_API_KEYS`, `OPENAI_API_KEYS`, `GEMINI_API_KEYS`, `DEEPSEEK_API_KEYS`, `GROQ_API_KEYS`, `MISTRAL_API_KEYS`, `OPENROUTER_API_KEYS`, `XAI_API_KEYS`, `NVIDIA_API_KEYS`, `COHERE_API_KEYS`, `TOGETHER_API_KEYS`, `CEREBRAS_API_KEYS`, `HUGGINGFACE_HUB_TOKENS`, `COPILOT_GITHUB_TOKENS`, `AI_GATEWAY_API_KEYS`, and more. Common aliases such as `GOOGLE_API_KEYS`, `DASHSCOPE_API_KEYS`, `ZHIPU_API_KEYS`, `VOLCENGINE_API_KEYS`, and `GITHUB_COPILOT_TOKENS` are normalized automatically; see `.env.example` for the full list.
 
 ## 🤖 LLM Providers
 

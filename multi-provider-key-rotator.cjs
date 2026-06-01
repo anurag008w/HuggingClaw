@@ -89,9 +89,36 @@ const DIAGNOSTICS_INTERVAL_MS = Math.max(
 );
 const EVENT_LOG_FILE = process.env.KEY_ROTATOR_EVENT_LOG_FILE || '/tmp/huggingclaw-key-rotator-events.jsonl';
 const EVENT_LOG_MAX_BYTES = Math.max(64 * 1024, parseInt(process.env.KEY_ROTATOR_EVENT_LOG_MAX_BYTES || '', 10) || 1024 * 1024);
+const INFLIGHT_TTL_MS = Math.max(
+  30_000,
+  Math.min(30 * 60_000, parseInt(process.env.KEY_INFLIGHT_TTL_MS || '', 10) || 5 * 60_000),
+);
+const REQUEST_MODEL_SNIFF_MAX_BYTES = Math.max(
+  16 * 1024,
+  Math.min(1024 * 1024, parseInt(process.env.KEY_MODEL_SNIFF_MAX_BYTES || '', 10) || 256 * 1024),
+);
+const ERROR_BODY_SNIFF_MAX_BYTES = Math.max(
+  4 * 1024,
+  Math.min(256 * 1024, parseInt(process.env.KEY_ERROR_BODY_SNIFF_MAX_BYTES || '', 10) || 64 * 1024),
+);
 
 const USE_SUSPENDED_KEY_AS_LAST_RESORT = !/^(0|false|no|off)$/i.test(
   String(process.env.KEY_USE_SUSPENDED_AS_LAST_RESORT || 'true').trim(),
+);
+
+// Sticky mode keeps one key assigned to the same provider/model bucket until
+// that key is suspended or fails.  Gemini enables it by default because Google
+// quotas are model-scoped. New model buckets are initially balanced through
+// normal round-robin, then stay pinned until their selected key fails for that
+// model, preventing a logical chat turn from burning 2-3 keys.
+const STICKY_UNTIL_FAILURE = !/^(0|false|no|off)$/i.test(
+  String(process.env.KEY_STICKY_UNTIL_FAILURE || 'true').trim(),
+);
+const STICKY_PROVIDER_SET = new Set(
+  String(process.env.KEY_STICKY_PROVIDERS || 'gemini')
+    .split(/[,\s]+/)
+    .map(s => s.trim().toLowerCase())
+    .filter(Boolean),
 );
 
 // Maximum ms to respect from a Retry-After header.
@@ -131,8 +158,8 @@ const PROVIDERS = [
   { name:'openai',       hostname:/(?:^|\.)api\.openai\.com$/i,               envPlural:'OPENAI_API_KEYS',           envSingular:'OPENAI_API_KEY' },
   { name:'gemini',       hostname:/(?:^|\.)(?:generativelanguage\.googleapis\.com|aiplatform\.googleapis\.com)$/i,
                                                                                envPlural:'GEMINI_API_KEYS',           envSingular:'GEMINI_API_KEY',  queryParam:true,
-    extraEnvPlural:['GOOGLE_API_KEYS', 'GOOGLE_GENERATIVE_AI_API_KEYS', 'GOOGLE_AI_API_KEYS'],
-    extraEnvSingular:['GOOGLE_API_KEY', 'GOOGLE_GENERATIVE_AI_API_KEY', 'GOOGLE_AI_API_KEY'],
+    extraEnvPlural:['GOOGLE_API_KEYS', 'GOOGLE_GENERATIVE_AI_API_KEYS', 'GOOGLE_AI_API_KEYS', 'GOOGLE_GENAI_API_KEYS'],
+    extraEnvSingular:['GOOGLE_API_KEY', 'GOOGLE_GENERATIVE_AI_API_KEY', 'GOOGLE_AI_API_KEY', 'GOOGLE_GENAI_API_KEY'],
     // Google enforces rate limits per-model per-key (RPM / TPD per model).
     // A 429 on gemini-2.5-pro must NOT blacklist the key for gemini-1.5-flash.
     perModelLimits: true },
@@ -140,7 +167,8 @@ const PROVIDERS = [
   { name:'openrouter',   hostname:/(?:^|\.)openrouter\.ai$/i,                 envPlural:'OPENROUTER_API_KEYS',       envSingular:'OPENROUTER_API_KEY' },
   { name:'kilocode',     hostname:/(?:^|\.)kilocode\.ai$/i,                   envPlural:'KILOCODE_API_KEYS',         envSingular:'KILOCODE_API_KEY' },
   { name:'opencode',     hostname:/(?:^|\.)opencode\.ai$/i,                   envPlural:'OPENCODE_API_KEYS',         envSingular:'OPENCODE_API_KEY' },
-  { name:'zai',          hostname:/(?:^|\.)(?:z\.ai|open\.bigmodel\.cn)$/i,   envPlural:'ZAI_API_KEYS',             envSingular:'ZAI_API_KEY' },
+  { name:'zai',          hostname:/(?:^|\.)(?:z\.ai|open\.bigmodel\.cn)$/i,   envPlural:'ZAI_API_KEYS',             envSingular:'ZAI_API_KEY',
+    extraEnvPlural:['ZHIPU_API_KEYS', 'BIGMODEL_API_KEYS'], extraEnvSingular:['ZHIPU_API_KEY', 'BIGMODEL_API_KEY'] },
   // FIX: kimi-coding aur moonshot ek hi hostname share karte hain (api.moonshot.cn).
   // Purani file mein dono alag entries thi — find() hamesha kimi-coding pick karta tha,
   // MOONSHOT_API_KEYS kabhi use nahi hoti. Ab merged entry: dono pools combine honge.
@@ -149,7 +177,8 @@ const PROVIDERS = [
   { name:'minimax',      hostname:/(?:^|\.)api\.minimax\.chat$/i,             envPlural:'MINIMAX_API_KEYS',          envSingular:'MINIMAX_API_KEY' },
   { name:'xiaomi',       hostname:/(?:^|\.)api\.xiaomi\.com$/i,               envPlural:'XIAOMI_API_KEYS',           envSingular:'XIAOMI_API_KEY' },
   { name:'volcengine',   hostname:/(?:^|\.)(?:ark\.cn-beijing\.volces\.com|volcengineapi\.com)$/i,
-                                                                               envPlural:'VOLCANO_ENGINE_API_KEYS',  envSingular:'VOLCANO_ENGINE_API_KEY' },
+                                                                               envPlural:'VOLCANO_ENGINE_API_KEYS',  envSingular:'VOLCANO_ENGINE_API_KEY',
+    extraEnvPlural:['VOLCENGINE_API_KEYS', 'ARK_API_KEYS'], extraEnvSingular:['VOLCENGINE_API_KEY', 'ARK_API_KEY'] },
   { name:'byteplus',     hostname:/(?:^|\.)maas-api\.ml-platform-cn-beijing\.byteplus\.com$/i,
                                                                                envPlural:'BYTEPLUS_API_KEYS',         envSingular:'BYTEPLUS_API_KEY' },
   { name:'mistral',      hostname:/(?:^|\.)api\.mistral\.ai$/i,               envPlural:'MISTRAL_API_KEYS',          envSingular:'MISTRAL_API_KEY' },
@@ -161,11 +190,19 @@ const PROVIDERS = [
   { name:'together',     hostname:/(?:^|\.)api\.together\.(?:xyz|ai)$/i,      envPlural:'TOGETHER_API_KEYS',         envSingular:'TOGETHER_API_KEY' },
   { name:'cerebras',     hostname:/(?:^|\.)api\.cerebras\.ai$/i,              envPlural:'CEREBRAS_API_KEYS',         envSingular:'CEREBRAS_API_KEY' },
   { name:'huggingface',  hostname:/(?:^|\.)(?:api-inference\.huggingface\.co|router\.huggingface\.co|huggingface\.co)$/i,
-                                                                               envPlural:'HUGGINGFACE_HUB_TOKENS',   envSingular:'HUGGINGFACE_HUB_TOKEN' },
+                                                                               envPlural:'HUGGINGFACE_HUB_TOKENS',   envSingular:'HUGGINGFACE_HUB_TOKEN',
+    extraEnvPlural:['HUGGINGFACE_API_KEYS', 'HUGGINGFACE_HUB_API_KEYS', 'HF_TOKEN_POOL'],
+    extraEnvSingular:['HUGGINGFACE_API_KEY', 'HUGGINGFACE_HUB_API_KEY', 'HF_TOKEN'] },
   { name:'venice',       hostname:/(?:^|\.)api\.venice\.ai$/i,                envPlural:'VENICE_API_KEYS',           envSingular:'VENICE_API_KEY' },
-  { name:'github-copilot',hostname:/(?:^|\.)api\.githubcopilot\.com$/i,       envPlural:'COPILOT_GITHUB_TOKENS',    envSingular:'COPILOT_GITHUB_TOKEN' },
+  { name:'github-copilot',hostname:/(?:^|\.)api\.githubcopilot\.com$/i,       envPlural:'COPILOT_GITHUB_TOKENS',    envSingular:'COPILOT_GITHUB_TOKEN',
+    extraEnvPlural:['GITHUB_COPILOT_TOKENS', 'GITHUB_COPILOT_API_KEYS'],
+    extraEnvSingular:['GITHUB_COPILOT_TOKEN', 'GITHUB_COPILOT_API_KEY'] },
   { name:'qianfan',      hostname:/(?:^|\.)(?:aip|qianfan)\.baidubce\.com$/i, envPlural:'QIANFAN_API_KEYS',         envSingular:'QIANFAN_API_KEY' },
-  { name:'modelstudio',  hostname:/(?:^|\.)dashscope\.aliyuncs\.com$/i,       envPlural:'MODELSTUDIO_API_KEYS',      envSingular:'MODELSTUDIO_API_KEY' },
+  { name:'modelstudio',  hostname:/(?:^|\.)dashscope\.aliyuncs\.com$/i,       envPlural:'MODELSTUDIO_API_KEYS',      envSingular:'MODELSTUDIO_API_KEY',
+    extraEnvPlural:['DASHSCOPE_API_KEYS', 'QWEN_API_KEYS', 'ALIBABA_CLOUD_API_KEYS'],
+    extraEnvSingular:['DASHSCOPE_API_KEY', 'QWEN_API_KEY', 'ALIBABA_CLOUD_API_KEY'] },
+  { name:'vercel-ai-gateway',hostname:/(?:^|\.)ai-gateway\.vercel\.sh$/i,     envPlural:'AI_GATEWAY_API_KEYS',       envSingular:'AI_GATEWAY_API_KEY',
+    extraEnvPlural:['VERCEL_AI_GATEWAY_API_KEYS'], extraEnvSingular:['VERCEL_AI_GATEWAY_API_KEY', 'VERCEL_OIDC_TOKEN'] },
   { name:'synthetic',    hostname:/(?:^|\.)synthetic\.local$/i,               envPlural:'SYNTHETIC_API_KEYS',        envSingular:'SYNTHETIC_API_KEY' },
 ];
 
@@ -245,6 +282,10 @@ function bodyToUtf8String(body) {
   if (Buffer.isBuffer(body)) return body.toString('utf8');
   if (body instanceof Uint8Array) return Buffer.from(body).toString('utf8');
   if (body instanceof ArrayBuffer) return Buffer.from(body).toString('utf8');
+  if (Array.isArray(body)) {
+    const parts = body.map(part => bodyToUtf8String(part));
+    return parts.every(part => part !== null) ? parts.join('') : null;
+  }
   return null;
 }
 
@@ -255,6 +296,109 @@ function extractModelFromBody(body) {
     const bodyModel = JSON.parse(text)?.model;
     return normalizeModelName(bodyModel);
   } catch { return null; }
+}
+
+function normalizeErrorToken(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function parseProviderErrorInfo(text) {
+  if (!text || typeof text !== 'string') return null;
+  const info = { raw: text.slice(0, ERROR_BODY_SNIFF_MAX_BYTES) };
+  try {
+    const body = JSON.parse(text);
+    const err = body?.error || body;
+    if (err && typeof err === 'object') {
+      info.code = err.code ?? body.code;
+      info.type = err.type ?? body.type;
+      info.status = err.status ?? body.status;
+      info.reason = err.reason ?? body.reason;
+      info.message = err.message ?? body.message;
+      if (!info.reason && Array.isArray(err.errors) && err.errors[0]) info.reason = err.errors[0].reason;
+      if (!info.reason && Array.isArray(err.details)) {
+        const quota = err.details.find(d => d && (d.reason || d.violations || d.quotaMetric));
+        if (quota) info.reason = quota.reason || quota.quotaMetric || 'quota_details';
+      }
+    }
+  } catch (_) {
+    info.message = text.slice(0, 512);
+  }
+  return info;
+}
+
+async function parseResponseErrorInfo(response) {
+  if (!response || response.status < 400 || typeof response.clone !== 'function') return null;
+  try {
+    const clone = response.clone();
+    if (clone.body && typeof clone.body.getReader === 'function') {
+      const reader = clone.body.getReader();
+      const chunks = [];
+      let total = 0;
+      try {
+        while (total < ERROR_BODY_SNIFF_MAX_BYTES) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const buf = Buffer.isBuffer(value)
+            ? value
+            : value instanceof Uint8Array
+              ? Buffer.from(value)
+              : Buffer.from(String(value || ''));
+          if (!buf.length) continue;
+          const remaining = ERROR_BODY_SNIFF_MAX_BYTES - total;
+          const slice = buf.length > remaining ? buf.subarray(0, remaining) : buf;
+          chunks.push(slice);
+          total += slice.length;
+        }
+      } finally {
+        try { await reader.cancel(); } catch (_) {}
+      }
+      return parseProviderErrorInfo(Buffer.concat(chunks).toString('utf8'));
+    }
+    const text = await clone.text();
+    return parseProviderErrorInfo(text.slice(0, ERROR_BODY_SNIFF_MAX_BYTES));
+  } catch (_) {
+    return null;
+  }
+}
+
+function providerErrorFields(errorInfo) {
+  if (!errorInfo) return {};
+  return {
+    ...(errorInfo.code !== undefined ? { errorCode: String(errorInfo.code) } : {}),
+    ...(errorInfo.type ? { errorType: String(errorInfo.type) } : {}),
+    ...(errorInfo.status ? { errorStatus: String(errorInfo.status) } : {}),
+    ...(errorInfo.reason ? { errorReason: String(errorInfo.reason) } : {}),
+  };
+}
+
+function statusNeedsErrorBodyForScope(status) {
+  return status === 400 || status === 403 || status === 409 || status === 413 || status === 423 || status === 425 || status === 529;
+}
+
+function classifyProviderFailure(p, status, errorInfo) {
+  const haystack = [
+    errorInfo?.code,
+    errorInfo?.type,
+    errorInfo?.status,
+    errorInfo?.reason,
+    errorInfo?.message,
+  ].map(normalizeErrorToken).join(' ');
+
+  const looksRateOrQuota = /rate.?limit|too.?many|quota|resource.?exhaust|usage.?limit|insufficient.?quota|capacity.?exceeded|tokens?.?per|requests?.?per|rate_limit|rate.?limited|userratelimit|dailylimit|limitexceeded/.test(haystack);
+  const looksAuth = /auth|unauthori[sz]ed|invalid.?api.?key|invalid.?key|permission|forbidden|billing|credit|payment|required/.test(haystack);
+  const looksTransient = /overload|temporar|unavailable|timeout|backend|internal|server.?error|try.?again|capacity/.test(haystack);
+
+  if (status === 401) return 'auth';
+  if (status === 402) return 'rate';
+  if (status === 429) return 'rate';
+  // Google/Vertex and some Google APIs can return 403 for quota/rate conditions
+  // (rateLimitExceeded / QUOTA_EXCEEDED), while plain 403 remains auth/permission.
+  if (status === 403) return looksRateOrQuota ? 'rate' : 'auth';
+  if (looksRateOrQuota && (status === 400 || status === 409 || status === 413 || status === 423 || status === 425 || status === 529)) return 'rate';
+  if (looksTransient) return 'transient';
+  if (classifyRetryableFailure(status)) return 'transient';
+  if (looksAuth && status >= 400 && status < 500) return 'auth';
+  return 'other';
 }
 
 function isGeminiOpenAICompatPath(pathOrUrl) {
@@ -280,6 +424,43 @@ function getKeyExpiry(p, key, model) {
     if (mks && mks.blacklistedUntil > expiry) expiry = mks.blacklistedUntil;
   }
   return expiry;
+}
+
+function stickyBucket(model) {
+  return model || '__default__';
+}
+
+function isStickyProvider(p) {
+  return !!(STICKY_UNTIL_FAILURE && p && STICKY_PROVIDER_SET.has(String(p.name || '').toLowerCase()));
+}
+
+function rememberStickyKey(p, model, key) {
+  if (!isStickyProvider(p) || !key) return;
+  p.stickyKeys.set(stickyBucket(model), key);
+}
+
+function clearStickyKey(p, key, model) {
+  if (!p?.stickyKeys || !key) return;
+  if (model) {
+    const bucket = stickyBucket(model);
+    if (p.stickyKeys.get(bucket) === key) p.stickyKeys.delete(bucket);
+    // Also clear the ambiguous fallback bucket if this key was selected before
+    // a Gemini OpenAI-compatible request body revealed its model.  Do not clear
+    // other model buckets: Gemini quota failures are model-scoped.
+    const fallbackBucket = stickyBucket(null);
+    if (p.stickyKeys.get(fallbackBucket) === key) p.stickyKeys.delete(fallbackBucket);
+    return;
+  }
+  for (const [bucket, stickyKey] of p.stickyKeys) {
+    if (stickyKey === key) p.stickyKeys.delete(bucket);
+  }
+}
+
+function promoteStickyKeyModel(p, key, fromModel, toModel) {
+  if (!isStickyProvider(p) || !key || !toModel) return;
+  const fromBucket = stickyBucket(fromModel);
+  if (p.stickyKeys.get(fromBucket) === key) p.stickyKeys.delete(fromBucket);
+  rememberStickyKey(p, toModel, key);
 }
 
 const providerState = PROVIDERS.map(p => {
@@ -328,7 +509,7 @@ const providerState = PROVIDERS.map(p => {
   // FIX: idx tracks position in the ACTIVE (non-permanently-removed) pool.
   // We never remove keys from the array — we just skip blacklisted ones.
   // idx advances only when a key is ACTUALLY picked (no drift for skipped keys).
-  return { ...p, keys, keyState, modelKeyState, inFlight: new Map(), idx: 0 };
+  return { ...p, keys, keyState, modelKeyState, inFlight: new Map(), inFlightTimers: new Map(), idx: 0, stickyKeys: new Map() };
 });
 
 // LLM_API_KEY fallback summary
@@ -532,16 +713,57 @@ function shouldRetryMethod(method, hasReplayableBody) {
   return hasReplayableBody;
 }
 
-function beginInFlight(p, key) {
-  if (!p || !key) return;
-  p.inFlight.set(key, (p.inFlight.get(key) || 0) + 1);
-}
-
-function endInFlight(p, key) {
-  if (!p || !key) return;
+function decrementInFlight(p, key) {
   const next = Math.max(0, (p.inFlight.get(key) || 0) - 1);
   if (next === 0) p.inFlight.delete(key);
   else p.inFlight.set(key, next);
+  return next;
+}
+
+function removeInFlightToken(p, key, token) {
+  if (!p?.inFlightTimers || !key || !token) return;
+  const tokens = p.inFlightTimers.get(key) || [];
+  const idx = tokens.indexOf(token);
+  if (idx >= 0) tokens.splice(idx, 1);
+  if (tokens.length) p.inFlightTimers.set(key, tokens);
+  else p.inFlightTimers.delete(key);
+}
+
+function beginInFlight(p, key) {
+  if (!p || !key) return null;
+  const token = { done: false, timer: null };
+  p.inFlight.set(key, (p.inFlight.get(key) || 0) + 1);
+  token.timer = setTimeout(() => {
+    if (token.done) return;
+    token.done = true;
+    removeInFlightToken(p, key, token);
+    const before = p.inFlight.get(key) || 0;
+    if (before > 0) {
+      const next = decrementInFlight(p, key);
+      emitEvent('inflight_timeout', p, key, { inflightBefore: before, inflightAfter: next, ttlMs: INFLIGHT_TTL_MS });
+    }
+  }, INFLIGHT_TTL_MS);
+  token.timer.unref?.();
+  const tokens = p.inFlightTimers?.get(key) || [];
+  tokens.push(token);
+  p.inFlightTimers?.set(key, tokens);
+  return token;
+}
+
+function endInFlight(p, key, token = null) {
+  if (!p || !key) return;
+  let activeToken = token;
+  if (!activeToken) {
+    const tokens = p.inFlightTimers?.get(key) || [];
+    activeToken = tokens[0] || null;
+  }
+  if (activeToken) {
+    if (activeToken.done) return;
+    activeToken.done = true;
+    if (activeToken.timer) clearTimeout(activeToken.timer);
+    removeInFlightToken(p, key, activeToken);
+  }
+  decrementInFlight(p, key);
 }
 
 // ─── Round-robin selection ────────────────────────────────────────────────────
@@ -575,16 +797,37 @@ function nextKey(p, model) {
 
   const total = p.keys.length;
 
+  if (isStickyProvider(p)) {
+    const stickyKey = p.stickyKeys.get(stickyBucket(model));
+    if (stickyKey && p.keys.includes(stickyKey) && isActive(p, stickyKey, model)) {
+      const inflight = p.inFlight.get(stickyKey) || 0;
+      if (VERBOSE_PICKS) debug(`[key-rotator] ${p.name}: sticky picked ${keySlot(p, stickyKey)}${keyMask(stickyKey)}${model ? ` model=${model}` : ''} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
+      if (inflight >= MAX_INFLIGHT_PER_KEY) {
+        warn(`[key-rotator] ${p.name}: sticky key saturated, still reusing ${keySlot(p, stickyKey)}${keyMask(stickyKey)}${model ? ` model=${model}` : ''} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY} until it fails/exhausts`);
+        emitEvent('sticky_saturated_reuse', p, stickyKey, { model, inflight: inflight + 1, maxInflight: MAX_INFLIGHT_PER_KEY });
+      } else {
+        emitEvent('sticky_pick', p, stickyKey, { model, inflight: inflight + 1, maxInflight: MAX_INFLIGHT_PER_KEY });
+      }
+      return { key: stickyKey, waitMs: 0 };
+    }
+    if (stickyKey) clearStickyKey(p, stickyKey, model);
+  }
+
   let bestPick = null;
+  // Sticky mode should pin an existing provider/model bucket, but the first
+  // assignment for a new bucket must still use normal round-robin.  Otherwise
+  // every newly-seen model would hot-spot key #1 until it fails.
+  const startIdx = p.idx;
   for (let offset = 0; offset < total; offset++) {
-    const i   = (p.idx + offset) % total;
+    const i   = (startIdx + offset) % total;
     const key = p.keys[i];
     if (isActive(p, key, model)) {
       const inflight = p.inFlight.get(key) || 0;
       if (inflight < MAX_INFLIGHT_PER_KEY) {
         p.idx = (i + 1) % total;   // next call starts AFTER the key we just picked
-        if (VERBOSE_PICKS) debug(`[key-rotator] ${p.name}: picked ${keySlot(p, key)}${keyMask(key)}${model ? ` model=${model}` : ''} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
-        emitEvent('pick', p, key, { model, inflight: inflight + 1, maxInflight: MAX_INFLIGHT_PER_KEY });
+        rememberStickyKey(p, model, key);
+        if (VERBOSE_PICKS) debug(`[key-rotator] ${p.name}: picked ${keySlot(p, key)}${keyMask(key)}${model ? ` model=${model}` : ''}${isStickyProvider(p) ? ' (sticky until failure)' : ''} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
+        emitEvent('pick', p, key, { model, inflight: inflight + 1, maxInflight: MAX_INFLIGHT_PER_KEY, sticky: isStickyProvider(p) });
         return { key, waitMs: 0 };
       }
       if (!bestPick) bestPick = { i, key, inflight, score: Number.POSITIVE_INFINITY };
@@ -603,8 +846,9 @@ function nextKey(p, model) {
 
   if (bestPick) {
     p.idx = (bestPick.i + 1) % total;
+    rememberStickyKey(p, model, bestPick.key);
     warn(`[key-rotator] ${p.name}: all active keys saturated, reusing ${keySlot(p, bestPick.key)}${keyMask(bestPick.key)}${model ? ` model=${model}` : ''} inflight=${bestPick.inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
-    emitEvent('saturated_reuse', p, bestPick.key, { model, inflight: bestPick.inflight + 1, maxInflight: MAX_INFLIGHT_PER_KEY });
+    emitEvent('saturated_reuse', p, bestPick.key, { model, inflight: bestPick.inflight + 1, maxInflight: MAX_INFLIGHT_PER_KEY, sticky: isStickyProvider(p) });
     return { key: bestPick.key, waitMs: 0 };
   }
 
@@ -637,7 +881,8 @@ function nextKey(p, model) {
   else
     warn(`[key-rotator] ${p.name}: all ${total} key(s) suspended — using soonest-recovering key ${keySlot(p, chosenKey)}${keyMask(chosenKey)}`);
 
-  emitEvent('all_suspended_pick', p, chosenKey, { model, waitMs });
+  rememberStickyKey(p, model, chosenKey);
+  emitEvent('all_suspended_pick', p, chosenKey, { model, waitMs, sticky: isStickyProvider(p) });
   return { key: chosenKey, waitMs };
 }
 
@@ -682,35 +927,42 @@ function setAuthHeader(headers, key) {
   return { authorization: val };
 }
 
-function handleStatus(p, key, status, model, retryAfterMs) {
+function handleStatus(p, key, status, model, retryAfterMs, errorInfo) {
   if (!p || !key) return;
-  if (status === 401 || status === 403) {
-    // Invalid/expired key — always a global (not model-scoped) blacklist.
+  const failureKind = classifyProviderFailure(p, status, errorInfo);
+  const errorFields = providerErrorFields(errorInfo);
+
+  if (failureKind === 'auth') {
+    // Invalid/expired/unauthorized key — always a global (not model-scoped) blacklist.
     let ks = p.keyState.get(key);
     if (!ks) { ks = makeKeyState(); p.keyState.set(key, ks); }
     ks.strikes = MAX_STRIKES;
     ks.lastFailureAt = Date.now();
     ks.blacklistedUntil = Date.now() + PERM_SUSPEND_MS;
+    clearStickyKey(p, key);
     warn(`[key-rotator] ${p.name}: ${keySlot(p, key)}${keyMask(key)} auth-failed (${status}) — suspended for ${formatHours(PERM_SUSPEND_MS)} h`);
-    emitEvent('auth_failed', p, key, { status, suspendMs: PERM_SUSPEND_MS });
+    emitEvent('auth_failed', p, key, { status, suspendMs: PERM_SUSPEND_MS, ...errorFields });
     return;
   }
 
-  if (status === 429 || status === 402) {
+  if (failureKind === 'rate') {
     // For perModelLimits providers (gemini): quota is per (key, model).
     // recordFailure will scope the blacklist to the model when model is provided.
     // Pass retryAfterMs so the key blacklist respects the server's stated wait time.
     recordFailure(p, key, model, retryAfterMs);
-    warn(`[key-rotator] ${p.name}: quota/rate status=${status} on ${keySlot(p, key)}${keyMask(key)}${model ? ` model=${model}` : ''}${retryAfterMs ? ` retry-after=${Math.round(retryAfterMs/1000)}s` : ''}`);
-    emitEvent('rate_limited', p, key, { status, model, retryAfterMs: retryAfterMs || 0 });
+    clearStickyKey(p, key, model);
+    const reason = errorFields.errorReason || errorFields.errorStatus || errorFields.errorType || errorFields.errorCode;
+    warn(`[key-rotator] ${p.name}: quota/rate status=${status}${reason ? ` reason=${reason}` : ''} on ${keySlot(p, key)}${keyMask(key)}${model ? ` model=${model}` : ''}${retryAfterMs ? ` retry-after=${Math.round(retryAfterMs/1000)}s` : ''}`);
+    emitEvent('rate_limited', p, key, { status, model, retryAfterMs: retryAfterMs || 0, ...errorFields });
     return;
   }
 
-  if (classifyRetryableFailure(status)) {
+  if (failureKind === 'transient') {
     // Transient server errors are not model-specific — penalise key globally.
     recordTransientFailure(p, key);
+    clearStickyKey(p, key);
     warn(`[key-rotator] ${p.name}: transient status=${status} on ${keySlot(p, key)}${keyMask(key)}`);
-    emitEvent('transient_status', p, key, { status, model });
+    emitEvent('transient_status', p, key, { status, model, ...errorFields });
     return;
   }
 
@@ -733,6 +985,7 @@ function handleTransportError(p, key, err) {
   const retryable = classifyRetryableFailure(undefined, code) || name === 'AbortError';
   if (retryable) {
     recordTransientFailure(p, key);
+    clearStickyKey(p, key);
     warn(`[key-rotator] ${p.name}: retryable network ${name || 'Error'}${code ? ` code=${code}` : ''} on ${keySlot(p, key)}${keyMask(key)}`);
     emitEvent('network_retryable', p, key, { name: name || 'Error', code });
   }
@@ -851,7 +1104,18 @@ function startDiagnostics() {
         });
         const active    = keyStats.filter(s => s.active).length;
         const suspended = keyStats.length - active;
-        return { provider: p.name, total: keyStats.length, active, suspended, keys: keyStats };
+        const stickyBuckets = {};
+        if (p.stickyKeys?.size) {
+          for (const [bucket, stickyKey] of p.stickyKeys) stickyBuckets[bucket] = keyMask(stickyKey);
+        }
+        return {
+          provider: p.name,
+          total: keyStats.length,
+          active,
+          suspended,
+          ...(Object.keys(stickyBuckets).length ? { stickyBuckets } : {}),
+          keys: keyStats,
+        };
       });
       debug('[key-rotator] diagnostics-json', JSON.stringify({ ts: new Date().toISOString(), providers: snapshot }));
     }
@@ -874,6 +1138,98 @@ function parseRetryAfterMs(value) {
   const ts = Date.parse(raw);
   if (Number.isFinite(ts)) return Math.min(MAX_RETRY_AFTER_MS, Math.max(0, ts - Date.now()));
   return 0;
+}
+
+function chunkToBuffer(chunk) {
+  if (typeof chunk === 'string') return Buffer.from(chunk, 'utf8');
+  if (Buffer.isBuffer(chunk)) return chunk;
+  if (chunk instanceof Uint8Array) return Buffer.from(chunk);
+  if (chunk instanceof ArrayBuffer) return Buffer.from(chunk);
+  return null;
+}
+
+function createBodyModelSniffer(provider, key, getModel, setModel) {
+  if (!provider?.perModelLimits || !key || typeof setModel !== 'function') return null;
+  let total = 0;
+  const chunks = [];
+  let done = false;
+  const tryDetect = (final = false) => {
+    if (done || getModel?.()) return;
+    if (!chunks.length) return;
+    const text = Buffer.concat(chunks).toString('utf8');
+    const model = extractModelFromBody(text);
+    if (model) {
+      done = true;
+      setModel(model);
+      promoteStickyKeyModel(provider, key, null, model);
+      emitEvent('model_detected', provider, key, { model, source: 'request_body_sniff' });
+    } else if (final || total >= REQUEST_MODEL_SNIFF_MAX_BYTES) {
+      done = true;
+    }
+  };
+  return {
+    push(chunk) {
+      if (done || getModel?.()) return;
+      const buf = chunkToBuffer(chunk);
+      if (!buf) { done = true; return; }
+      if (total < REQUEST_MODEL_SNIFF_MAX_BYTES) {
+        const remain = REQUEST_MODEL_SNIFF_MAX_BYTES - total;
+        chunks.push(buf.length > remain ? buf.subarray(0, remain) : buf);
+        total += Math.min(buf.length, remain);
+        tryDetect(false);
+      } else {
+        done = true;
+      }
+    },
+    final() { tryDetect(true); },
+  };
+}
+
+function wrapBodyForModelSniffing(body, provider, key, getModel, setModel) {
+  if (!body || getModel?.() || !provider?.perModelLimits) return body;
+  const sniffer = createBodyModelSniffer(provider, key, getModel, setModel);
+  if (!sniffer) return body;
+
+  if (typeof body === 'string' || Buffer.isBuffer(body) || body instanceof Uint8Array || body instanceof ArrayBuffer || Array.isArray(body)) {
+    const text = bodyToUtf8String(body);
+    if (text) {
+      const model = extractModelFromBody(text);
+      if (model) {
+        setModel(model);
+        promoteStickyKeyModel(provider, key, null, model);
+        emitEvent('model_detected', provider, key, { model, source: 'request_body' });
+      }
+    }
+    return body;
+  }
+
+  if (typeof body[Symbol.asyncIterator] === 'function') {
+    return (async function* sniffAsyncBody() {
+      try {
+        for await (const chunk of body) {
+          sniffer.push(chunk);
+          yield chunk;
+        }
+      } finally {
+        sniffer.final();
+      }
+    })();
+  }
+
+  if (typeof body[Symbol.iterator] === 'function') {
+    return (function* sniffSyncBody() {
+      try {
+        for (const chunk of body) {
+          sniffer.push(chunk);
+          yield chunk;
+        }
+      } finally {
+        sniffer.final();
+      }
+    })();
+  }
+
+  return body;
 }
 
 function buildAttemptFetchArgs(input, init, provider, usedKey) {
@@ -1069,15 +1425,43 @@ function uSetHeader(headers, name, value) {
  * Uses a Proxy so all undici handler methods forward correctly, including any
  * added in future undici versions (onBodySent, onRequestSent, onUpgrade …).
  */
-function wrapUndiciHandler(handler, provider, key, model) {
+function wrapUndiciHandler(handler, provider, key, inFlightToken, getModel) {
   if (!handler || typeof handler !== 'object') return handler;
   let statusCode = 0;
   let retryAfterMs = 0;
   let settled = false;
+  let statusHandled = false;
+  let errorBytes = 0;
+  const errorChunks = [];
+  const currentModel = () => (typeof getModel === 'function' ? getModel() : null);
+  const collectErrorBody = (chunk) => {
+    if (!statusNeedsErrorBodyForScope(statusCode) || errorBytes >= ERROR_BODY_SNIFF_MAX_BYTES) return;
+    try {
+      const buf = chunkToBuffer(chunk);
+      if (!buf?.length) return;
+      const remaining = ERROR_BODY_SNIFF_MAX_BYTES - errorBytes;
+      const slice = buf.length > remaining ? buf.subarray(0, remaining) : buf;
+      errorChunks.push(slice);
+      errorBytes += slice.length;
+    } catch (_) {}
+  };
+  const currentErrorInfo = () => {
+    if (!errorChunks.length) return null;
+    try { return parseProviderErrorInfo(Buffer.concat(errorChunks).toString('utf8')); } catch (_) { return null; }
+  };
+  const handleHeadersStatus = (force = false) => {
+    if (statusHandled || !statusCode) return;
+    // Success is emitted immediately for observability. Ambiguous 4xx provider
+    // errors (notably Gemini/Google 403 quota) wait until onComplete so their
+    // JSON error body can decide model-scoped quota vs global auth suspension.
+    if (!force && statusNeedsErrorBodyForScope(statusCode)) return;
+    statusHandled = true;
+    try { handleStatus(provider, key, statusCode, currentModel(), retryAfterMs, currentErrorInfo()); } catch (_) {}
+  };
   const settle = (fn) => {
     if (settled) return;
     settled = true;
-    try { endInFlight(provider, key); } catch (_) {}
+    try { endInFlight(provider, key, inFlightToken); } catch (_) {}
     try { fn(); } catch (_) {}
   };
   return new Proxy(handler, {
@@ -1086,20 +1470,27 @@ function wrapUndiciHandler(handler, provider, key, model) {
         return function (sc, headers, resume, statusMessage) {
           statusCode = sc;
           retryAfterMs = parseRetryAfterMs(uGetHeader(headers, 'retry-after'));
+          handleHeadersStatus();
           return target.onHeaders ? target.onHeaders.call(target, sc, headers, resume, statusMessage) : undefined;
+        };
+      }
+      if (prop === 'onData') {
+        return function (chunk) {
+          collectErrorBody(chunk);
+          return target.onData ? target.onData.call(target, chunk) : undefined;
         };
       }
       if (prop === 'onComplete') {
         return function (trailers) {
           const result = target.onComplete ? target.onComplete.call(target, trailers) : undefined;
-          settle(() => { try { handleStatus(provider, key, statusCode, model, retryAfterMs); } catch (_) {} });
+          settle(() => { handleHeadersStatus(true); });
           return result;
         };
       }
       if (prop === 'onError') {
         return function (err) {
           const result = target.onError ? target.onError.call(target, err) : undefined;
-          settle(() => { try { handleTransportError(provider, key, err); } catch (_) {} });
+          settle(() => { if (!statusHandled) { try { handleTransportError(provider, key, err); } catch (_) {} } });
           return result;
         };
       }
@@ -1121,7 +1512,7 @@ function patchUndiciDispatch(proto, tag) {
   const origDispatch = proto.dispatch;
 
   proto.dispatch = function rotatorDispatch(options, handler) {
-    let usedKey = null, usedProvider = null, usedModel = null;
+    let usedKey = null, usedProvider = null, usedModel = null, usedInFlight = null;
     try {
       // Read origin BEFORE cloudflare-proxy's dispatch wrapper rewrites it.
       // We wrap CF proxy's wrapper, so at this point options.origin is still
@@ -1163,7 +1554,7 @@ function patchUndiciDispatch(proto, tag) {
 
         if (key) {
           usedKey = key; usedProvider = provider; usedModel = model;
-          beginInFlight(usedProvider, usedKey);
+          usedInFlight = beginInFlight(usedProvider, usedKey);
 
           const newOptions = { ...options };
 
@@ -1187,13 +1578,20 @@ function patchUndiciDispatch(proto, tag) {
             newOptions.headers = uSetHeader(options.headers || {}, 'authorization', `Bearer ${key}`);
           }
 
-          const wrappedHandler = wrapUndiciHandler(handler, usedProvider, usedKey, usedModel);
+          newOptions.body = wrapBodyForModelSniffing(
+            newOptions.body,
+            usedProvider,
+            usedKey,
+            () => usedModel,
+            (model) => { usedModel = model; },
+          );
+          const wrappedHandler = wrapUndiciHandler(handler, usedProvider, usedKey, usedInFlight, () => usedModel);
           return origDispatch.call(this, newOptions, wrappedHandler);
         }
       }
     } catch (err) {
       warn(`[key-rotator] undici (${tag}) dispatch patch error:`, err?.message || err);
-      if (usedProvider && usedKey) { try { endInFlight(usedProvider, usedKey); } catch (_) {} }
+      if (usedProvider && usedKey) { try { endInFlight(usedProvider, usedKey, usedInFlight); } catch (_) {} }
     }
 
     return origDispatch.call(this, options, handler);
@@ -1332,6 +1730,7 @@ function patchFetch() {
 
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         let usedKey = null;
+        let usedInFlight = null;
         try {
           let { key, waitMs } = nextKey(provider, model);
 
@@ -1340,15 +1739,17 @@ function patchFetch() {
           // Instead, scan the pool directly for an untried active key.
           if (key && triedKeys.has(key) && triedKeys.size < provider.keys.length) {
             const total = provider.keys.length;
+            const startIdx = isStickyProvider(provider) ? 0 : provider.idx;
             for (let offset = 0; offset < total; offset++) {
-              const i = (provider.idx + offset) % total;
+              const i = (startIdx + offset) % total;
               const candidate = provider.keys[i];
               if (!triedKeys.has(candidate) && isActive(provider, candidate, model)) {
                 const inflight = provider.inFlight.get(candidate) || 0;
                 if (inflight < MAX_INFLIGHT_PER_KEY) {
                   provider.idx = (i + 1) % total;
                   key = candidate; waitMs = 0;
-                  emitEvent('pick_retry_fresh', provider, key, { model, attempt });
+                  rememberStickyKey(provider, model, key);
+                  emitEvent('pick_retry_fresh', provider, key, { model, attempt, sticky: isStickyProvider(provider) });
                   break;
                 }
               }
@@ -1368,7 +1769,7 @@ function patchFetch() {
           if (key) {
             triedKeys.add(key);
             usedKey = key;
-            beginInFlight(provider, key);
+            usedInFlight = beginInFlight(provider, key);
           }
 
           const attemptArgs = buildAttemptFetchArgs(input, init, provider, usedKey);
@@ -1379,8 +1780,9 @@ function patchFetch() {
           // Parse Retry-After BEFORE calling handleStatus so the key blacklist
           // is set to the correct duration the server asked for.
           const retryAfterMs = parseRetryAfterMs(response.headers?.get?.('retry-after'));
-          try { endInFlight(provider, usedKey); } catch (_) {}
-          try { handleStatus(provider, usedKey, response.status, model, retryAfterMs); } catch (_) {}
+          const errorInfo = await parseResponseErrorInfo(response);
+          try { endInFlight(provider, usedKey, usedInFlight); } catch (_) {}
+          try { handleStatus(provider, usedKey, response.status, model, retryAfterMs, errorInfo); } catch (_) {}
 
           const shouldRetry = attempt < maxAttempts && classifyRetryableFailure(response.status);
           if (shouldRetry) {
@@ -1397,7 +1799,7 @@ function patchFetch() {
           return response;
         } catch (err) {
           lastErr = err;
-          try { endInFlight(provider, usedKey); } catch (_) {}
+          try { endInFlight(provider, usedKey, usedInFlight); } catch (_) {}
           try { handleTransportError(provider, usedKey, err); } catch (_) {}
           // Node.js 18+ undici fetch: network errors are TypeError("fetch failed")
           // where the real code (ECONNRESET, ETIMEDOUT, ENOTFOUND …) is in
@@ -1436,7 +1838,7 @@ function patchHttpModule(mod) {
   const orig = mod.request;
 
   mod.request = function patchedRequest(...args) {
-    let usedKey = null, usedProvider = null, usedModel = null;
+    let usedKey = null, usedProvider = null, usedModel = null, usedInFlight = null;
 
     try {
       const options  = args[0];
@@ -1461,8 +1863,9 @@ function patchHttpModule(mod) {
 
         if (key) {
           usedKey = key; usedProvider = provider; usedModel = model;
-          beginInFlight(usedProvider, usedKey);
+          usedInFlight = beginInFlight(usedProvider, usedKey);
           if (provider.queryParam) {
+            const hasOptionsArg = args[1] && typeof args[1] === 'object' && typeof args[1].on !== 'function';
             const u = new URL(String(
               typeof options === 'string' || options instanceof URL
                 ? options
@@ -1470,15 +1873,27 @@ function patchHttpModule(mod) {
             ));
             if (!isGeminiOpenAICompatPath(u.pathname)) u.searchParams.set('key', key);
             // BUG FIX: Google OpenAI-compatible endpoint uses Bearer, not ?key=.
-            // Set it even if the caller omitted Authorization.
-            const existingHeaders = (typeof options === 'object' && options.headers) ? options.headers : {};
-            const authVal = existingHeaders['authorization'] || existingHeaders['Authorization'] || '';
-            const patchedHeaders = (isGeminiOpenAICompatPath(u.pathname) || String(authVal).toLowerCase().startsWith('bearer '))
+            // Preserve string/URL overload options too; many SDKs call
+            // http.request(url, { headers }, cb), and dropping that overload left
+            // OpenAI-compatible Gemini without the rotated Authorization header.
+            const existingHeaders = (typeof options === 'object' && !(options instanceof URL) && options.headers)
+              ? options.headers
+              : (hasOptionsArg ? args[1].headers : undefined);
+            const authVal = existingHeaders?.['authorization'] || existingHeaders?.['Authorization'] || '';
+            const needsBearer = isGeminiOpenAICompatPath(u.pathname) || String(authVal).toLowerCase().startsWith('bearer ');
+            const patchedHeaders = needsBearer
               ? setAuthHeader(typeof existingHeaders === 'object' ? { ...existingHeaders } : existingHeaders, key)
               : existingHeaders;
-            args[0] = typeof options === 'object' && !(options instanceof URL)
-              ? { ...options, path:`${u.pathname}${u.search}`, headers: patchedHeaders }
-              : u.toString();
+            if (typeof options === 'object' && !(options instanceof URL)) {
+              args[0] = { ...options, path:`${u.pathname}${u.search}`, headers: patchedHeaders };
+            } else {
+              args[0] = u.toString();
+              if (needsBearer) {
+                if (hasOptionsArg) args[1] = { ...args[1], headers: patchedHeaders };
+                else if (typeof args[1] === 'function') { args[2] = args[1]; args[1] = { headers: patchedHeaders }; }
+                else args[1] = { headers: patchedHeaders };
+              }
+            }
           } else if (typeof options === 'string' || options instanceof URL) {
             const u = new URL(String(options));
             const extra = (args[1] && typeof args[1] === 'object' && typeof args[1].on !== 'function') ? args[1] : {};
@@ -1540,6 +1955,8 @@ function patchHttpModule(mod) {
                   const bodyModel = extractModelFromBody(fullBody);
                   if (bodyModel) {
                     usedModel = bodyModel;
+                    promoteStickyKeyModel(usedProvider, usedKey, null, usedModel);
+                    emitEvent('model_detected', usedProvider, usedKey, { model: usedModel, source: 'http_request_body' });
                     debug(`[key-rotator] ${usedProvider.name}: (http) model extracted from request body: ${usedModel}`);
                   }
                 } catch (_) { /* non-JSON body — leave model null */ }
@@ -1560,20 +1977,54 @@ function patchHttpModule(mod) {
       } catch (_) { /* never break the request */ }
     }
 
-    // Intercept response to track 429/success — pass model for per-model accounting
+    // Intercept response to track provider status.  For ambiguous provider
+    // errors (for example Gemini 403 RESOURCE_EXHAUSTED), sniff the response
+    // body before classification so quota failures stay model-scoped instead
+    // of becoming global auth suspensions.
     if (usedProvider && usedKey) {
       const _emit = req.emit.bind(req);
+      let statusHandled = false;
+      const finishStatus = (res, errorInfo) => {
+        if (statusHandled) return;
+        statusHandled = true;
+        const retryAfterMs = parseRetryAfterMs(res?.headers?.['retry-after']);
+        try { endInFlight(usedProvider, usedKey, usedInFlight); } catch (_) {}
+        try { handleStatus(usedProvider, usedKey, res?.statusCode, usedModel, retryAfterMs, errorInfo); } catch (_) {}
+      };
       req.emit = function (event, ...rest) {
         if (event === 'response') {
           const res = rest[0];
-          try { endInFlight(usedProvider, usedKey); } catch (_) {}
-          try { handleStatus(usedProvider, usedKey, res?.statusCode, usedModel); } catch (_) {}
+          if (statusNeedsErrorBodyForScope(res?.statusCode)) {
+            const chunks = [];
+            let total = 0;
+            res.on('data', (chunk) => {
+              if (total >= ERROR_BODY_SNIFF_MAX_BYTES) return;
+              const buf = chunkToBuffer(chunk);
+              if (!buf?.length) return;
+              const remaining = ERROR_BODY_SNIFF_MAX_BYTES - total;
+              const slice = buf.length > remaining ? buf.subarray(0, remaining) : buf;
+              chunks.push(slice);
+              total += slice.length;
+            });
+            const finishWithSniffedBody = () => {
+              const errorInfo = chunks.length
+                ? parseProviderErrorInfo(Buffer.concat(chunks).toString('utf8'))
+                : null;
+              finishStatus(res, errorInfo);
+            };
+            res.on('end', finishWithSniffedBody);
+            res.on('close', finishWithSniffedBody);
+          } else {
+            finishStatus(res, null);
+          }
         }
         return _emit(event, ...rest);
       };
       req.on('error', (err) => {
-        try { endInFlight(usedProvider, usedKey); } catch (_) {}
-        try { handleTransportError(usedProvider, usedKey, err); } catch (_) {}
+        try { endInFlight(usedProvider, usedKey, usedInFlight); } catch (_) {}
+        if (!statusHandled) {
+          try { handleTransportError(usedProvider, usedKey, err); } catch (_) {}
+        }
       });
     }
     return req;
@@ -1591,11 +2042,16 @@ if (hasProviderKeys) {
   patchUndici();         // covers OpenClaw gateway's bundled undici AI calls
   startDiagnostics();
 
-  debug(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:${formatHours(PERM_SUSPEND_MS)}h (cap 16h) max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} max-retry-after:${MAX_RETRY_AFTER_MS/1000}s max-key-wait:${MAX_KEY_WAIT_MS/1000}s diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'} log-level:${LOG_LEVEL} verbose-picks:${VERBOSE_PICKS ? 'on' : 'off'} suspended-last-resort:${USE_SUSPENDED_KEY_AS_LAST_RESORT ? 'on' : 'off'} per-model-providers:${providerState.filter(p => p.perModelLimits).map(p => p.name).join(',') || 'none'} model-from-body:on`);
+  debug(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:${formatHours(PERM_SUSPEND_MS)}h (cap 16h) max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} max-retry-after:${MAX_RETRY_AFTER_MS/1000}s max-key-wait:${MAX_KEY_WAIT_MS/1000}s diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'} log-level:${LOG_LEVEL} verbose-picks:${VERBOSE_PICKS ? 'on' : 'off'} suspended-last-resort:${USE_SUSPENDED_KEY_AS_LAST_RESORT ? 'on' : 'off'} per-model-providers:${providerState.filter(p => p.perModelLimits).map(p => p.name).join(',') || 'none'} model-from-body:on model-sniff-max:${REQUEST_MODEL_SNIFF_MAX_BYTES} error-sniff-max:${ERROR_BODY_SNIFF_MAX_BYTES} inflight-ttl:${INFLIGHT_TTL_MS}ms sticky-until-failure:${STICKY_UNTIL_FAILURE ? 'on' : 'off'} sticky-providers:${[...STICKY_PROVIDER_SET].join(',') || 'none'}`);
   emitEvent('rotator_loaded', null, null, {
     providers: providerState.filter(p => p.keys.length).map(p => ({ name: p.name, total: p.keys.length })),
     logLevel: LOG_LEVEL,
     verbosePicks: VERBOSE_PICKS,
+    inflightTtlMs: INFLIGHT_TTL_MS,
+    modelSniffMaxBytes: REQUEST_MODEL_SNIFF_MAX_BYTES,
+    errorBodySniffMaxBytes: ERROR_BODY_SNIFF_MAX_BYTES,
+    stickyUntilFailure: STICKY_UNTIL_FAILURE,
+    stickyProviders: [...STICKY_PROVIDER_SET],
   });
 } else {
   debug('[key-rotator] skipped — no provider keys configured');
