@@ -615,7 +615,7 @@ function providerKeySummary() {
     { name: "zai", env: ["ZAI_API_KEYS", "ZAI_API_KEY"] },
     { name: "kimi-moonshot", env: ["KIMI_API_KEYS", "KIMI_API_KEY", "MOONSHOT_API_KEYS", "MOONSHOT_API_KEY"] },
     { name: "minimax", env: ["MINIMAX_API_KEYS", "MINIMAX_API_KEY"] },
-    { name: "modelstudio/qwen", env: ["MODELSTUDIO_API_KEYS", "MODELSTUDIO_API_KEY"] },
+    { name: "modelstudio", env: ["MODELSTUDIO_API_KEYS", "MODELSTUDIO_API_KEY"] },
     { name: "xiaomi", env: ["XIAOMI_API_KEYS", "XIAOMI_API_KEY"] },
     { name: "volcengine", env: ["VOLCANO_ENGINE_API_KEYS", "VOLCANO_ENGINE_API_KEY"] },
     { name: "byteplus", env: ["BYTEPLUS_API_KEYS", "BYTEPLUS_API_KEY"] },

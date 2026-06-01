@@ -209,6 +209,14 @@ function makeKeyState() { return { strikes: 0, blacklistedUntil: 0, lastFailureA
  * Gemini:   /v1beta/models/gemini-2.5-pro:generateContent  → "gemini-2.5-pro"
  * OpenAI-compat: cannot be extracted from URL (body only) → null
  */
+function normalizeModelName(model) {
+  if (typeof model !== 'string') return null;
+  const raw = model.trim();
+  if (!raw) return null;
+  // Strip provider prefix when present (e.g. "google/gemini-2.5-pro" → "gemini-2.5-pro").
+  return (raw.includes('/') ? raw.split('/').slice(1).join('/') : raw).toLowerCase();
+}
+
 function extractModelFromUrl(urlLike) {
   try {
     const str =
@@ -218,7 +226,24 @@ function extractModelFromUrl(urlLike) {
       : null;
     if (!str) return null;
     const m = new URL(str).pathname.match(/\/models\/([^/:?]+)/);
-    return m ? m[1].toLowerCase() : null;
+    return m ? normalizeModelName(m[1]) : null;
+  } catch { return null; }
+}
+
+function bodyToUtf8String(body) {
+  if (typeof body === 'string') return body;
+  if (Buffer.isBuffer(body)) return body.toString('utf8');
+  if (body instanceof Uint8Array) return Buffer.from(body).toString('utf8');
+  if (body instanceof ArrayBuffer) return Buffer.from(body).toString('utf8');
+  return null;
+}
+
+function extractModelFromBody(body) {
+  const text = bodyToUtf8String(body);
+  if (!text) return null;
+  try {
+    const bodyModel = JSON.parse(text)?.model;
+    return normalizeModelName(bodyModel);
   } catch { return null; }
 }
 
@@ -1015,6 +1040,7 @@ function uSetHeader(headers, name, value) {
 function wrapUndiciHandler(handler, provider, key, model) {
   if (!handler || typeof handler !== 'object') return handler;
   let statusCode = 0;
+  let retryAfterMs = 0;
   let settled = false;
   const settle = (fn) => {
     if (settled) return;
@@ -1027,12 +1053,13 @@ function wrapUndiciHandler(handler, provider, key, model) {
       if (prop === 'onHeaders') {
         return function (sc, headers, resume, statusMessage) {
           statusCode = sc;
+          retryAfterMs = parseRetryAfterMs(uGetHeader(headers, 'retry-after'));
           return target.onHeaders ? target.onHeaders.call(target, sc, headers, resume, statusMessage) : undefined;
         };
       }
       if (prop === 'onComplete') {
         return function (trailers) {
-          settle(() => { try { handleStatus(provider, key, statusCode, model); } catch (_) {} });
+          settle(() => { try { handleStatus(provider, key, statusCode, model, retryAfterMs); } catch (_) {} });
           return target.onComplete ? target.onComplete.call(target, trailers) : undefined;
         };
       }
@@ -1080,9 +1107,21 @@ function patchUndiciDispatch(proto, tag) {
       const provider = matchProvider(hostname);
       if (provider) {
         const pathStr = options.path || '/';
-        const model = provider.perModelLimits
-          ? (pathStr.match(/\/models\/([^/:?]+)/)?.[1]?.toLowerCase() || null)
+        let model = provider.perModelLimits
+          ? normalizeModelName(pathStr.match(/\/models\/([^/:?]+)/)?.[1])
           : null;
+
+        // OpenAI-compatible Gemini requests sent through undici use a generic
+        // /v1beta/openai/chat/completions path; the model only exists in the
+        // JSON body.  Extract it before nextKey() so pick/rate/success events
+        // carry the same per-model scope that the limiter uses.
+        if (provider.perModelLimits && model === null) {
+          const bodyModel = extractModelFromBody(options.body);
+          if (bodyModel) {
+            model = bodyModel;
+            debug(`[key-rotator] ${provider.name}: undici (${tag}) model extracted from request body: ${model}`);
+          }
+        }
 
         const { key, waitMs } = nextKey(provider, model);
         if (key && waitMs > 0)
@@ -1231,13 +1270,10 @@ function patchFetch() {
     if (provider.perModelLimits && model === null) {
       try {
         const rawBody = init?.body ?? (typeof input === 'object' && !(input instanceof URL) ? input?.body : null);
-        if (typeof rawBody === 'string') {
-          const bodyModel = JSON.parse(rawBody)?.model;
-          if (bodyModel && typeof bodyModel === 'string' && bodyModel.length > 0) {
-            // Strip provider prefix when present (e.g. "google/gemini-2.5-pro" → "gemini-2.5-pro").
-            model = (bodyModel.includes('/') ? bodyModel.split('/').slice(1).join('/') : bodyModel).toLowerCase();
-            debug(`[key-rotator] ${provider.name}: model extracted from request body: ${model}`);
-          }
+        const bodyModel = extractModelFromBody(rawBody);
+        if (bodyModel) {
+          model = bodyModel;
+          debug(`[key-rotator] ${provider.name}: model extracted from request body: ${model}`);
         }
       } catch (_) { /* malformed or non-JSON body — leave model as null */ }
     }
@@ -1457,9 +1493,9 @@ function patchHttpModule(mod) {
               // so gemini-flash etc. also stop working — defeating per-model rate-limit scoping.
               if (usedModel === null && usedProvider && usedProvider.perModelLimits) {
                 try {
-                  const bodyModel = JSON.parse(fullBody)?.model;
-                  if (bodyModel && typeof bodyModel === 'string' && bodyModel.length > 0) {
-                    usedModel = (bodyModel.includes('/') ? bodyModel.split('/').slice(1).join('/') : bodyModel).toLowerCase();
+                  const bodyModel = extractModelFromBody(fullBody);
+                  if (bodyModel) {
+                    usedModel = bodyModel;
                     debug(`[key-rotator] ${usedProvider.name}: (http) model extracted from request body: ${usedModel}`);
                   }
                 } catch (_) { /* non-JSON body — leave model null */ }
