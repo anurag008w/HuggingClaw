@@ -79,6 +79,14 @@ EXCLUDED_STATE_NAMES = {
     "gateway.log",
     "browser",
     "npm",
+    # Never back up or restore plugin extension dirs.  Plugin binaries are
+    # environment-specific and can become stale/broken across restarts.
+    # start.sh always does a fresh `openclaw plugins install` when
+    # WHATSAPP_ENABLED=true, so the extensions dir is regenerated each boot.
+    # Restoring a stale copy prevents that reinstall (whatsapp_plugin_runtime_ok
+    # sees the old dist files and returns early), which is the root cause of
+    # "WhatsApp enabled but not installing on restart".
+    "extensions",
 }
 SESSIONS_ROOT = OPENCLAW_HOME / "agents"
 WHATSAPP_CREDS_DIR = OPENCLAW_HOME / "credentials" / "whatsapp" / "default"
