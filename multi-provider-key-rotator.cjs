@@ -68,6 +68,10 @@ const DIAGNOSTICS_INTERVAL_MS = Math.max(
   10_000,
   parseInt(process.env.KEY_ROTATOR_DIAGNOSTICS_INTERVAL_MS || '', 10) || 60_000,
 );
+
+const USE_SUSPENDED_KEY_AS_LAST_RESORT = !/^(0|false|no|off)$/i.test(
+  String(process.env.KEY_USE_SUSPENDED_AS_LAST_RESORT || 'true').trim(),
+);
 // Long suspend window for exhausted/invalid keys.
 // Capped to 16h to avoid oversuppressing pools for too long.
 const formatHours = (ms) => (ms / (60 * 60 * 1000)).toFixed(ms % (60 * 60 * 1000) === 0 ? 0 : 2);
@@ -326,7 +330,13 @@ function nextKey(p) {
     return bestPick.key;
   }
 
-  // All keys are sitting out — pick the one closest to recovering
+  // All keys are sitting out — default to best-effort progress by reusing
+  // the soonest-recovering key, unless explicitly disabled.
+  if (!USE_SUSPENDED_KEY_AS_LAST_RESORT) {
+    warn(`[key-rotator] ${p.name}: all ${total} key(s) suspended — withholding key until cooldown expires (last-resort disabled)`);
+    return null;
+  }
+
   warn(`[key-rotator] ${p.name}: all ${total} key(s) suspended — using soonest-recovering key`);
   let best = p.keys[0], bestExpiry = Infinity;
   for (const k of p.keys) {
@@ -383,7 +393,9 @@ function handleStatus(p, key, status) {
   }
 
   if (status === 429 || status === 402) {
-    recordTransientFailure(p, key);
+    // Treat quota/rate-limit as strike-bearing failures so repeatedly
+    // exhausted keys quickly move into long suspend (up to 16h).
+    recordFailure(p, key);
     warn(`[key-rotator] ${p.name}: quota/rate status=${status} on ...${key.slice(-6)}`);
     return;
   }
@@ -662,4 +674,4 @@ patchHttpModule(http);
 patchHttpModule(https);
 startDiagnostics();
 
-log(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:${formatHours(PERM_SUSPEND_MS)}h (cap 16h) max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'} log-level:${LOG_LEVEL} verbose-picks:${VERBOSE_PICKS ? 'on' : 'off'}`);
+log(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:${formatHours(PERM_SUSPEND_MS)}h (cap 16h) max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'} log-level:${LOG_LEVEL} verbose-picks:${VERBOSE_PICKS ? 'on' : 'off'} suspended-last-resort:${USE_SUSPENDED_KEY_AS_LAST_RESORT ? 'on' : 'off'}`);
