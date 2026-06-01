@@ -1865,6 +1865,7 @@ function patchHttpModule(mod) {
           usedKey = key; usedProvider = provider; usedModel = model;
           usedInFlight = beginInFlight(usedProvider, usedKey);
           if (provider.queryParam) {
+            const hasOptionsArg = args[1] && typeof args[1] === 'object' && typeof args[1].on !== 'function';
             const u = new URL(String(
               typeof options === 'string' || options instanceof URL
                 ? options
@@ -1872,15 +1873,27 @@ function patchHttpModule(mod) {
             ));
             if (!isGeminiOpenAICompatPath(u.pathname)) u.searchParams.set('key', key);
             // BUG FIX: Google OpenAI-compatible endpoint uses Bearer, not ?key=.
-            // Set it even if the caller omitted Authorization.
-            const existingHeaders = (typeof options === 'object' && options.headers) ? options.headers : {};
-            const authVal = existingHeaders['authorization'] || existingHeaders['Authorization'] || '';
-            const patchedHeaders = (isGeminiOpenAICompatPath(u.pathname) || String(authVal).toLowerCase().startsWith('bearer '))
+            // Preserve string/URL overload options too; many SDKs call
+            // http.request(url, { headers }, cb), and dropping that overload left
+            // OpenAI-compatible Gemini without the rotated Authorization header.
+            const existingHeaders = (typeof options === 'object' && !(options instanceof URL) && options.headers)
+              ? options.headers
+              : (hasOptionsArg ? args[1].headers : undefined);
+            const authVal = existingHeaders?.['authorization'] || existingHeaders?.['Authorization'] || '';
+            const needsBearer = isGeminiOpenAICompatPath(u.pathname) || String(authVal).toLowerCase().startsWith('bearer ');
+            const patchedHeaders = needsBearer
               ? setAuthHeader(typeof existingHeaders === 'object' ? { ...existingHeaders } : existingHeaders, key)
               : existingHeaders;
-            args[0] = typeof options === 'object' && !(options instanceof URL)
-              ? { ...options, path:`${u.pathname}${u.search}`, headers: patchedHeaders }
-              : u.toString();
+            if (typeof options === 'object' && !(options instanceof URL)) {
+              args[0] = { ...options, path:`${u.pathname}${u.search}`, headers: patchedHeaders };
+            } else {
+              args[0] = u.toString();
+              if (needsBearer) {
+                if (hasOptionsArg) args[1] = { ...args[1], headers: patchedHeaders };
+                else if (typeof args[1] === 'function') { args[2] = args[1]; args[1] = { headers: patchedHeaders }; }
+                else args[1] = { headers: patchedHeaders };
+              }
+            }
           } else if (typeof options === 'string' || options instanceof URL) {
             const u = new URL(String(options));
             const extra = (args[1] && typeof args[1] === 'object' && typeof args[1].on !== 'function') ? args[1] : {};
