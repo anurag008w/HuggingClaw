@@ -126,13 +126,96 @@ def count_files(path: Path) -> int:
     return sum(1 for child in path.rglob("*") if child.is_file())
 
 
-def copy_state_entry_with_retry(source_path: Path, backup_path: Path, attempts: int = 3) -> None:
+def _remove_path(path: Path) -> None:
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path, ignore_errors=True)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def _copy_hot_directory_snapshot(source_path: Path, tmp_path: Path) -> bool:
+    """Best-effort mirror of a hot directory into *tmp_path*.
+
+    OpenClaw session files under .openclaw/agents can be rewritten or removed
+    while the sync process is copying them. A single raced file must not make the
+    whole agents tree keep its old backup forever, so copy files independently
+    and preserve the previous staged version only for paths that failed while
+    still existing in the source tree.
+    """
+    had_copy_failures = False
+    protected_rel_paths: set[Path] = set()
+
+    try:
+        discovered_paths = sorted(
+            source_path.rglob("*"),
+            key=lambda child: child.relative_to(source_path).as_posix(),
+        )
+    except OSError:
+        discovered_paths = []
+        had_copy_failures = True
+
+    for source_child in discovered_paths:
+        try:
+            rel = source_child.relative_to(source_path)
+        except ValueError:
+            continue
+        target_child = tmp_path / rel
+
+        try:
+            if source_child.is_symlink():
+                link_target = os.readlink(source_child)
+                target_child.parent.mkdir(parents=True, exist_ok=True)
+                if target_child.exists() or target_child.is_symlink():
+                    _remove_path(target_child)
+                os.symlink(link_target, target_child)
+            elif source_child.is_dir():
+                if target_child.exists() and not target_child.is_dir():
+                    _remove_path(target_child)
+                target_child.mkdir(parents=True, exist_ok=True)
+            elif source_child.is_file():
+                target_child.parent.mkdir(parents=True, exist_ok=True)
+                tmp_file = target_child.parent / f".{target_child.name}.copy-tmp-{os.getpid()}"
+                try:
+                    shutil.copy2(source_child, tmp_file)
+                    if target_child.is_dir() and not target_child.is_symlink():
+                        _remove_path(target_child)
+                    tmp_file.replace(target_child)
+                finally:
+                    tmp_file.unlink(missing_ok=True)
+        except OSError:
+            had_copy_failures = True
+            # If the file/dir still exists, treat this as a hot-file race and
+            # keep the previously seeded backup for this exact path. If it no
+            # longer exists, the stale-prune pass below can remove it.
+            if source_child.exists() or source_child.is_symlink():
+                protected_rel_paths.add(rel)
+            continue
+
+    for staged_child in sorted(tmp_path.rglob("*"), key=lambda child: len(child.parts), reverse=True):
+        try:
+            rel = staged_child.relative_to(tmp_path)
+        except ValueError:
+            continue
+        if rel in protected_rel_paths:
+            continue
+        source_child = source_path / rel
+        if source_child.exists() or source_child.is_symlink():
+            continue
+        _remove_path(staged_child)
+
+    return had_copy_failures
+
+
+def copy_state_entry_with_retry(source_path: Path, backup_path: Path, attempts: int = 3) -> bool:
     """Copy one top-level .openclaw entry with short retries for hot files/dirs.
 
     The state staging dir is seeded from the last known-good backup before this
-    function runs.  Never delete that seeded entry until a fresh copy has fully
+    function runs. Never delete that seeded entry until a fresh copy has fully
     succeeded; hot session files can change mid-copy, and a failed copy must not
     turn into a deletion that later prunes valid remote session data.
+
+    Returns True when an individual hot-file copy had to be skipped while the
+    rest of the entry was still refreshed.
     """
     last_exc: Exception | None = None
     parent = backup_path.parent
@@ -140,37 +223,33 @@ def copy_state_entry_with_retry(source_path: Path, backup_path: Path, attempts: 
         tmp_path = parent / f".{backup_path.name}.snapshot-tmp-{os.getpid()}-{attempt}"
         old_path = parent / f".{backup_path.name}.snapshot-old-{os.getpid()}-{attempt}"
         for cleanup_path in (tmp_path, old_path):
-            if cleanup_path.exists():
-                if cleanup_path.is_dir():
-                    shutil.rmtree(cleanup_path, ignore_errors=True)
-                else:
-                    cleanup_path.unlink(missing_ok=True)
+            if cleanup_path.exists() or cleanup_path.is_symlink():
+                _remove_path(cleanup_path)
         try:
+            entry_had_copy_failures = False
             if source_path.is_dir():
-                shutil.copytree(source_path, tmp_path)
+                if backup_path.is_dir() and not backup_path.is_symlink():
+                    shutil.copytree(backup_path, tmp_path, symlinks=True)
+                else:
+                    tmp_path.mkdir(parents=True, exist_ok=True)
+                entry_had_copy_failures = _copy_hot_directory_snapshot(source_path, tmp_path)
             elif source_path.is_file():
                 tmp_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source_path, tmp_path)
             else:
-                return
+                return False
 
-            if backup_path.exists():
+            if backup_path.exists() or backup_path.is_symlink():
                 backup_path.rename(old_path)
             tmp_path.rename(backup_path)
-            if old_path.exists():
-                if old_path.is_dir():
-                    shutil.rmtree(old_path, ignore_errors=True)
-                else:
-                    old_path.unlink(missing_ok=True)
-            return
+            if old_path.exists() or old_path.is_symlink():
+                _remove_path(old_path)
+            return entry_had_copy_failures
         except Exception as exc:
             last_exc = exc
-            if tmp_path.exists():
-                if tmp_path.is_dir():
-                    shutil.rmtree(tmp_path, ignore_errors=True)
-                else:
-                    tmp_path.unlink(missing_ok=True)
-            if old_path.exists() and not backup_path.exists():
+            if tmp_path.exists() or tmp_path.is_symlink():
+                _remove_path(tmp_path)
+            if (old_path.exists() or old_path.is_symlink()) and not backup_path.exists():
                 old_path.rename(backup_path)
             if attempt < attempts:
                 time.sleep(0.2 * attempt)
@@ -200,7 +279,13 @@ def snapshot_state_into_workspace() -> bool:
 
             backup_path = staging_dir / source_path.name
             try:
-                copy_state_entry_with_retry(source_path, backup_path)
+                entry_had_copy_failures = copy_state_entry_with_retry(source_path, backup_path)
+                if entry_had_copy_failures:
+                    had_copy_failures = True
+                    print(
+                        f"Warning: refreshed {source_path.name} with hot-file skips; "
+                        "previous backup versions preserved for skipped paths."
+                    )
                 copied_entry_names.add(source_path.name)
             except Exception as entry_exc:
                 skipped_entries.append((source_path.name, entry_exc))

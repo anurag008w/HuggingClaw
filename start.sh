@@ -199,7 +199,7 @@ if [ "$BROWSER_PLUGIN_MODE" = "remote" ]; then
 fi
 echo ""
 echo "  ╔══════════════════════════════════════╗"
-echo "  ║     🦞 HuggingClaw + 💻 JupyterLab    ║"
+echo "  ║     🦞 HuggingClaw + 💻 JupyterLab     ║"
 echo "  ╚══════════════════════════════════════╝"
 echo ""
 
@@ -1631,6 +1631,23 @@ export NPM_CONFIG_PREFIX="${NPM_CONFIG_PREFIX:-/home/node/.local}"
 export npm_config_prefix="$NPM_CONFIG_PREFIX"
 export PYTHONUSERBASE="${PYTHONUSERBASE:-/home/node/.local}"
 export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
+export HISTFILE="${HISTFILE:-/home/node/.bash_history}"
+export HISTSIZE="${HISTSIZE:-50000}"
+export HISTFILESIZE="${HISTFILESIZE:-100000}"
+mkdir -p "$(dirname "$HISTFILE")"
+touch "$HISTFILE" 2>/dev/null || true
+chmod 600 "$HISTFILE" 2>/dev/null || true
+shopt -s histappend 2>/dev/null || true
+_hc_history_sync_prompt() {
+  history -a
+  history -n
+}
+case ";${PROMPT_COMMAND:-};" in
+  *";_hc_history_sync_prompt;"*) ;;
+  ""|";") PROMPT_COMMAND="_hc_history_sync_prompt" ;;
+  *) PROMPT_COMMAND="_hc_history_sync_prompt; ${PROMPT_COMMAND}" ;;
+esac
+export PROMPT_COMMAND
 if [ -z "${PS1:-}" ] || [ "$PS1" = "$ " ]; then
   export PS1="\u@\h:\w\$ "
 fi
