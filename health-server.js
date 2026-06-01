@@ -595,6 +595,43 @@ function maskApiKey(value) {
   return key.length > 12 ? `${key.slice(0, 4)}...${key.slice(-6)}` : "***";
 }
 
+function modelProviderToRotatorProvider(model) {
+  const provider = String(model || "").split("/")[0].toLowerCase();
+  const aliases = {
+    google: "gemini",
+    gemini: "gemini",
+    "google-vertex": "gemini",
+    moonshot: "kimi-moonshot",
+    "kimi-coding": "kimi-moonshot",
+    qwen: "modelstudio",
+    mistralai: "mistral",
+    "x-ai": "xai",
+    "z-ai": "zai",
+    "z.ai": "zai",
+    zhipu: "zai",
+    "volcengine-plan": "volcengine",
+    "byteplus-plan": "byteplus",
+    "opencode-go": "opencode",
+  };
+  return aliases[provider] || provider;
+}
+
+function keyRotatorRuntimeSummary() {
+  const primary = LLM_MODEL || "";
+  const fallbackModels = String(process.env.LLM_FALLBACK_MODELS || "")
+    .split(/[\n\r,]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const routes = [primary, ...fallbackModels]
+    .filter(Boolean)
+    .map((model, idx) => ({
+      role: idx === 0 ? "primary" : "fallback",
+      model,
+      provider: modelProviderToRotatorProvider(model),
+    }));
+  return { primary, routes };
+}
+
 function providerKeySummary() {
   const providers = [
     { name: "gemini", env: ["GEMINI_API_KEYS", "GEMINI_API_KEY"], aliases: ["GOOGLE_API_KEYS", "GOOGLE_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEYS", "GOOGLE_GENERATIVE_AI_API_KEY", "GOOGLE_AI_API_KEYS", "GOOGLE_AI_API_KEY"] },
@@ -918,6 +955,7 @@ const server = http.createServer(async (req, res) => {
     return res.end(JSON.stringify({
       file: KEY_ROTATOR_EVENT_LOG_FILE,
       log: keyRotatorEventLogStatus(),
+      runtime: keyRotatorRuntimeSummary(),
       providers: providerKeySummary(),
       events: readKeyRotatorEvents(limit),
     }));

@@ -660,6 +660,14 @@ function matchProvider(hostname) {
   if (!hostname) return null;
   return providerState.find(p => p.hostname.test(hostname)) || null;
 }
+function resolveProviderFromHeaders(headers) {
+  const targetHost = uGetHeader(headers || [], 'x-target-host');
+  return targetHost ? matchProvider(targetHost) : null;
+}
+
+function resolveProviderForUrl(urlLike, headers) {
+  return matchProvider(resolveHostname(urlLike)) || resolveProviderFromHeaders(headers);
+}
 
 function setAuthHeader(headers, key) {
   if (!key) return headers;
@@ -1130,7 +1138,7 @@ function patchUndiciDispatch(proto, tag) {
         hostname = String(origin || '').replace(/^https?:\/\//, '').split(/[/:?]/)[0];
       }
 
-      const provider = matchProvider(hostname);
+      let provider = matchProvider(hostname) || resolveProviderFromHeaders(options.headers || []);
       if (provider) {
         const pathStr = options.path || '/';
         let model = provider.perModelLimits
@@ -1267,7 +1275,9 @@ function patchFetch() {
     const urlLike = typeof input === 'string' || input instanceof URL
       ? input
       : (input && typeof input.url === 'string' ? input.url : null);
-    const provider = matchProvider(resolveHostname(urlLike));
+    const inputHeaders = typeof Request !== 'undefined' && input instanceof Request ? input.headers : undefined;
+    const initHeaders = init && typeof init === 'object' ? init.headers : undefined;
+    const provider = resolveProviderForUrl(urlLike, initHeaders || inputHeaders);
     if (!provider) return await orig(input, init);
 
     // Extract model for per-model-limit providers (gemini etc.)
@@ -1430,7 +1440,8 @@ function patchHttpModule(mod) {
 
     try {
       const options  = args[0];
-      const provider = matchProvider(resolveHostname(options));
+      const optionHeaders = options && typeof options === 'object' ? options.headers : undefined;
+      const provider = resolveProviderForUrl(options, optionHeaders);
 
       if (provider) {
         // Extract model for per-model-limit providers from the request path.
