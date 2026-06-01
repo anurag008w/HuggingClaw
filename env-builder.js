@@ -142,7 +142,8 @@ const MODEL_CATALOGS = {
     "NVIDIA": [
       "nvidia/nemotron-3-super-120b-a12b",
       "nvidia/nemotron-4-340b-instruct",
-      "nvidia/llama-3.1-nemotron-70b-instruct"
+      "nvidia/llama-3.1-nemotron-70b-instruct",
+      "nvidia/stepfun-ai/step-3.7-flash"
     ],
     "KiloCode": [
       "kilocode/anthropic/claude-opus-4.7",
@@ -376,7 +377,8 @@ const MODEL_CATALOGS = {
   "NVIDIA_MODELS": [
     "nvidia/nemotron-3-super-120b-a12b",
     "nvidia/nemotron-4-340b-instruct",
-    "nvidia/llama-3.1-nemotron-70b-instruct"
+    "nvidia/llama-3.1-nemotron-70b-instruct",
+    "nvidia/stepfun-ai/step-3.7-flash"
   ],
   "KILOCODE_MODELS": [
     "kilocode/anthropic/claude-opus-4.7",
