@@ -49,17 +49,73 @@ const DEFAULT_PROXY_DOMAINS = [
 ];
 const PROXY_DOMAINS_RAW = (process.env.CLOUDFLARE_PROXY_DOMAINS || "").trim();
 const PROXY_ALL = PROXY_DOMAINS_RAW === "*";
+const EXTRA_PROXY_DOMAINS = PROXY_DOMAINS_RAW.split(",").map((d) => d.trim()).filter(Boolean);
+const AI_PROVIDER_DOMAINS = [
+  // googleapis.com is proxied by default for non-AI Google services, but these
+  // Gemini/Vertex hosts carry API keys and should stay direct unless explicitly
+  // listed in CLOUDFLARE_PROXY_DOMAINS (or wildcard mode is used).
+  "generativelanguage.googleapis.com",
+  "aiplatform.googleapis.com",
+  // Hugging Face inference/router calls may also carry HF tokens. Keep them
+  // direct by default, but allow explicit proxy opt-in for blocked deployments.
+  "huggingface.co",
+  "router.huggingface.co",
+  "api-inference.huggingface.co",
+];
 let BLOCKED_DOMAINS;
 if (PROXY_ALL) {
   BLOCKED_DOMAINS = [];
 } else {
-  const extra = PROXY_DOMAINS_RAW.split(",").map((d) => d.trim()).filter(Boolean);
   const seen = new Set(DEFAULT_PROXY_DOMAINS);
   BLOCKED_DOMAINS = [...DEFAULT_PROXY_DOMAINS];
-  for (const d of extra) {
+  for (const d of EXTRA_PROXY_DOMAINS) {
     if (!seen.has(d)) { BLOCKED_DOMAINS.push(d); seen.add(d); }
   }
 }
+
+const getHeaderValue = (headers, name) => {
+  const lower = String(name || "").toLowerCase();
+  if (!headers || !lower) return "";
+  if (Array.isArray(headers)) {
+    for (let i = 0; i < headers.length; i += 2) {
+      if (String(headers[i]).toLowerCase() === lower) return String(headers[i + 1] || "");
+    }
+    return "";
+  }
+  if (typeof headers.get === "function") {
+    try {
+      const value = headers.get(name) ?? headers.get(lower);
+      if (value != null) return String(value);
+    } catch (_) {}
+  }
+  if (headers && typeof headers === "object") {
+    for (const key of Object.keys(headers)) {
+      if (key.toLowerCase() === lower) return String(headers[key] || "");
+    }
+  }
+  return "";
+};
+
+const headersToObject = (headers) => {
+  const out = {};
+  if (!headers) return out;
+  if (Array.isArray(headers)) {
+    for (let i = 0; i < headers.length; i += 2) {
+      if (headers[i] != null) out[String(headers[i])] = headers[i + 1];
+    }
+    return out;
+  }
+  if (typeof headers.forEach === "function") {
+    try {
+      headers.forEach((value, key) => { out[String(key)] = value; });
+      return out;
+    } catch (_) {}
+  }
+  if (headers && typeof headers === "object") {
+    for (const key of Object.keys(headers)) out[key] = headers[key];
+  }
+  return out;
+};
 
 if (PROXY_URL) {
   try {
@@ -79,16 +135,19 @@ if (PROXY_URL) {
         normalized === "::1" ||
         normalized === "0.0.0.0" ||
         normalized === proxy.hostname ||
-        normalized.endsWith(".hf.space") ||
-        normalized.endsWith(".huggingface.co") ||
-        normalized === "huggingface.co";
+        normalized.endsWith(".hf.space");
 
-      const should = PROXY_ALL ? !isInternal : BLOCKED_DOMAINS.some(
-        (domain) =>
-          normalized === domain || normalized.endsWith(`.${domain}`),
+      if (isInternal) return false;
+
+      const matchesDomain = (domains) => domains.some(
+        (domain) => normalized === domain || normalized.endsWith(`.${domain}`),
       );
+      const explicitlyRequested = PROXY_ALL || matchesDomain(EXTRA_PROXY_DOMAINS);
+      if (!explicitlyRequested && matchesDomain(AI_PROVIDER_DOMAINS)) {
+        return false;
+      }
 
-      return should;
+      return PROXY_ALL || matchesDomain(BLOCKED_DOMAINS);
     };
 
     const patch = (original, originalModuleName) => {
@@ -123,8 +182,7 @@ if (PROXY_URL) {
 
         const shouldProxy = shouldProxyHost(hostname);
         const alreadyProxied = options._proxied;
-        const hasTargetHeader =
-          headers["x-target-host"] || headers["X-Target-Host"];
+        const hasTargetHeader = getHeaderValue(headers, "x-target-host");
 
         if (shouldProxy && !alreadyProxied && !hasTargetHeader) {
           if (DEBUG) {
@@ -143,7 +201,7 @@ if (PROXY_URL) {
           delete newOptions.agent;
 
           newOptions.headers = {
-            ...(options.headers || {}),
+            ...headersToObject(options.headers),
             host: proxy.host,
             "x-target-host": hostname,
           };
@@ -315,7 +373,7 @@ if (PROXY_URL) {
       if (!exports) return;
 
       const patchDispatch = (proto, name) => {
-        if (proto && proto.dispatch && !proto.dispatch._patched) {
+        if (proto && proto.dispatch && !proto.dispatch._cfProxyPatched) {
           const origDispatch = proto.dispatch;
           proto.dispatch = function(options, handler) {
             let origin = options.origin || this.origin;
@@ -362,6 +420,7 @@ if (PROXY_URL) {
             }
             return origDispatch.call(this, options, handler);
           };
+          proto.dispatch._cfProxyPatched = true;
           proto.dispatch._patched = true;
         }
       };
@@ -375,7 +434,7 @@ if (PROXY_URL) {
       if (exports.getGlobalDispatcher) {
         try {
           const globalDispatcher = exports.getGlobalDispatcher();
-          if (globalDispatcher && globalDispatcher.dispatch && !globalDispatcher.dispatch._patched) {
+          if (globalDispatcher && globalDispatcher.dispatch && !globalDispatcher.dispatch._cfProxyPatched) {
             patchDispatch(globalDispatcher, "GlobalDispatcherInstance");
           }
         } catch (e) {}
@@ -386,7 +445,7 @@ if (PROXY_URL) {
       if (exports.Pool && exports.Pool.prototype) patchDispatch(exports.Pool.prototype, "Pool");
       if (exports.Client && exports.Client.prototype) patchDispatch(exports.Client.prototype, "Client");
 
-      if (exports.fetch && !exports.fetch._patched) {
+      if (exports.fetch && !exports.fetch._cfProxyPatched) {
         const origFetch = exports.fetch;
         exports.fetch = async function patchedUndiciFetch(input, init) {
           let url;
@@ -452,16 +511,17 @@ if (PROXY_URL) {
 
           return origFetch(String(proxiedUrl), newInit);
         };
+        exports.fetch._cfProxyPatched = true;
         exports.fetch._patched = true;
       }
     };
 
     // FIX: WeakSet guard — each unique exports object is patched at most once.
     // Without this, the require hook fires on every cached require("undici") call
-    // and re-calls patchUndiciInstance. The _patched flag stops re-wrapping within
-    // one call, but the overhead was O(n_requires) per process boot. More critically,
-    // this was the other half of the mutual re-wrapping cycle with
-    // provider key rotator (which uses _kRotatorPatched instead of _patched).
+    // and re-calls patchUndiciInstance. The _cfProxyPatched flag stops
+    // Cloudflare re-wrapping within one call without treating the key rotator's
+    // _kRotatorPatched marker as a reason to skip proxying. The generic
+    // _patched marker is still set for older callers that only inspect it.
     const _cfProxySeen = new WeakSet();
     function patchUndiciOnce(exp) {
       if (!exp || typeof exp !== "object") return;
