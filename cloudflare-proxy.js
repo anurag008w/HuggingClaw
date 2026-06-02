@@ -73,6 +73,50 @@ if (PROXY_ALL) {
   }
 }
 
+const getHeaderValue = (headers, name) => {
+  const lower = String(name || "").toLowerCase();
+  if (!headers || !lower) return "";
+  if (Array.isArray(headers)) {
+    for (let i = 0; i < headers.length; i += 2) {
+      if (String(headers[i]).toLowerCase() === lower) return String(headers[i + 1] || "");
+    }
+    return "";
+  }
+  if (typeof headers.get === "function") {
+    try {
+      const value = headers.get(name) ?? headers.get(lower);
+      if (value != null) return String(value);
+    } catch (_) {}
+  }
+  if (headers && typeof headers === "object") {
+    for (const key of Object.keys(headers)) {
+      if (key.toLowerCase() === lower) return String(headers[key] || "");
+    }
+  }
+  return "";
+};
+
+const headersToObject = (headers) => {
+  const out = {};
+  if (!headers) return out;
+  if (Array.isArray(headers)) {
+    for (let i = 0; i < headers.length; i += 2) {
+      if (headers[i] != null) out[String(headers[i])] = headers[i + 1];
+    }
+    return out;
+  }
+  if (typeof headers.forEach === "function") {
+    try {
+      headers.forEach((value, key) => { out[String(key)] = value; });
+      return out;
+    } catch (_) {}
+  }
+  if (headers && typeof headers === "object") {
+    for (const key of Object.keys(headers)) out[key] = headers[key];
+  }
+  return out;
+};
+
 if (PROXY_URL) {
   try {
     const proxy = new URL(PROXY_URL);
@@ -138,8 +182,7 @@ if (PROXY_URL) {
 
         const shouldProxy = shouldProxyHost(hostname);
         const alreadyProxied = options._proxied;
-        const hasTargetHeader =
-          headers["x-target-host"] || headers["X-Target-Host"];
+        const hasTargetHeader = getHeaderValue(headers, "x-target-host");
 
         if (shouldProxy && !alreadyProxied && !hasTargetHeader) {
           if (DEBUG) {
@@ -158,7 +201,7 @@ if (PROXY_URL) {
           delete newOptions.agent;
 
           newOptions.headers = {
-            ...(options.headers || {}),
+            ...headersToObject(options.headers),
             host: proxy.host,
             "x-target-host": hostname,
           };
