@@ -2587,7 +2587,21 @@ function addCustomRow(key = '', val = '', enabled = false, tag = 'optional') {
     updateCounts();
   });
   row.querySelector(`[data-custom-remove="${id}"]`)?.addEventListener('click', () => {
-    row.remove();
+    const remaining = document.querySelectorAll('[data-custom-row]').length;
+    if (remaining <= 1) {
+      const keyInput = row.querySelector(`[data-ck="${id}"]`);
+      const valueInput = row.querySelector(`[data-cv="${id}"]`);
+      const tagInput = row.querySelector(`[data-ct="${id}"]`);
+      if (keyInput) keyInput.value = '';
+      if (valueInput) valueInput.value = '';
+      if (tagInput) tagInput.value = 'optional';
+      if (enabledInput) enabledInput.checked = false;
+      row.dataset.enabled = '0';
+      row.classList.remove('selected');
+      updateCustomRowMeta(row);
+    } else {
+      row.remove();
+    }
     refresh();
     filter();
   });

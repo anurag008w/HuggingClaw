@@ -788,11 +788,20 @@ body {
   line-height: 1.45;
 }
 
+#customRows.cards {
+  grid-template-columns: 1fr;
+}
+
+.custom-env-card {
+  width: 100%;
+  max-width: none;
+}
+
 .custom-env-card .card-top { margin-bottom: 12px; }
 
 .custom-card-grid {
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) minmax(220px, 1.4fr) minmax(130px, .7fr) auto;
+  grid-template-columns: minmax(160px, 1fr) minmax(200px, 1.4fr) minmax(120px, .65fr) max-content;
   gap: 8px;
   align-items: end;
 }
@@ -840,7 +849,8 @@ body {
   color: var(--red);
 }
 
-@media (max-width: 900px) {
+@media (max-width: 720px) {
+  .custom-env-toolbar { align-items: stretch; flex-direction: column; }
   .custom-card-grid { grid-template-columns: 1fr; }
   .custom-remove { width: 100%; }
 }
