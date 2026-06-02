@@ -1552,13 +1552,18 @@ function wrapUndiciHandler(handler, provider, key, inFlightToken, getModel) {
     try { return parseProviderErrorInfo(Buffer.concat(errorChunks).toString('utf8')); } catch (_) { return null; }
   };
   const handleHeadersStatus = (force = false) => {
-    if (statusHandled || !statusCode) return;
-    // Success is emitted immediately for observability. Ambiguous 4xx provider
-    // errors (notably Gemini/Google 403 quota) wait until onComplete so their
-    // JSON error body can decide model-scoped quota vs global auth suspension.
-    if (!force && statusNeedsErrorBodyForScope(statusCode)) return;
+    if (statusHandled || !statusCode) return false;
+    // Success and unambiguous failures are emitted as soon as headers arrive.
+    // Long/streaming LLM responses may keep the body open longer than the
+    // in-flight TTL, so waiting for onComplete can produce false
+    // inflight_timeout events even though the provider already accepted the
+    // request. Ambiguous 4xx provider errors (notably Gemini/Google 403 quota)
+    // still wait until onComplete so their JSON body can decide model-scoped
+    // quota vs global auth suspension.
+    if (!force && statusNeedsErrorBodyForScope(statusCode)) return false;
     statusHandled = true;
     try { handleStatus(provider, key, statusCode, currentModel(), retryAfterMs, currentErrorInfo()); } catch (_) {}
+    return true;
   };
   const settle = (fn) => {
     if (settled) return;
@@ -1572,7 +1577,11 @@ function wrapUndiciHandler(handler, provider, key, inFlightToken, getModel) {
         return function (sc, headers, resume, statusMessage) {
           statusCode = sc;
           retryAfterMs = parseRetryAfterMs(uGetHeader(headers, 'retry-after'));
-          handleHeadersStatus();
+          if (handleHeadersStatus()) {
+            // Header-level status accounting is complete; close the in-flight
+            // token now so successful streams do not later report timeouts.
+            settle(() => {});
+          }
           return target.onHeaders ? target.onHeaders.call(target, sc, headers, resume, statusMessage) : undefined;
         };
       }
