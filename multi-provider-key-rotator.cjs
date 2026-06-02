@@ -563,7 +563,7 @@ const providerState = PROVIDERS.map(p => {
 
   if (hasDedicated)
     debug(`[key-rotator] ${p.name}: ${keys.length} key${keys.length === 1 ? '' : 's'}`);
-  else if (!keys.length)
+  else if (!keys.length && VERBOSE_PICKS)
     debug(`[key-rotator] No keys for provider "${p.name}"`);
 
   // keyState: Map<keyString, {strikes, blacklistedUntil}>
