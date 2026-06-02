@@ -298,6 +298,7 @@ Optional tuning:
 - `KEY_PERM_SUSPEND_MS` (default `57600000`) — long suspend duration for exhausted/auth-invalid keys (**capped at 16h max**).
 - `KEY_FAILURE_DECAY_MS` (default `900000`) — recent-failure decay window used to deprioritize keys.
 - `KEY_MAX_INFLIGHT_PER_KEY` (default `3`) — soft concurrent request cap per key.
+- `OPENCLAW_PROVIDER_TIMEOUT_SECONDS` (default `300`, set `0` to disable) — injects provider-level `timeoutSeconds` into generated OpenClaw model providers so slow preview/thinking models are not aborted at the default ~120s idle window before the first reply chunk.
 - `KEY_INFLIGHT_TTL_MS` (default `30000`) — safety lease for picked keys with no provider headers/completion/error; stale leases are cleaned up without marking the key failed, so long streams/tasks do not rotate away just because bookkeeping timed out.
 - `KEY_TASK_AFFINITY_MS` (default `30000`) — short same-task affinity window for sequential non-sticky provider calls; sticky providers keep their stronger until-failure pin.
 - `KEY_TASK_AFFINITY_MAX_REUSES` (default `3`) — max extra same-key reuses per non-sticky affinity burst before normal round-robin resumes.

@@ -597,7 +597,7 @@ const FIELDS = [
     "ph": "900000",
     "tag": "advanced"
   },
-{
+  {
     "g": "Plugins",
     "icon": "🔄",
     "k": "KEY_MAX_INFLIGHT_PER_KEY",
@@ -606,7 +606,17 @@ const FIELDS = [
     "ph": "3",
     "tag": "advanced"
   },
-{
+  {
+    "g": "Plugins",
+    "icon": "⏱️",
+    "k": "OPENCLAW_PROVIDER_TIMEOUT_SECONDS",
+    "lbl": "OpenClaw provider timeoutSeconds (prevents 120s idle aborts)",
+    "type": "text",
+    "ph": "300",
+    "tag": "advanced",
+    "help": "Maps to models.providers.<id>.timeoutSeconds for configured providers. Raise for slow preview/thinking models; set 0 to use OpenClaw defaults."
+  },
+  {
     "g": "Plugins",
     "icon": "🔄",
     "k": "KEY_INFLIGHT_TTL_MS",

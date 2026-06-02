@@ -610,6 +610,19 @@ if [[ "${HUGGINGCLAW_ALLOW_CONFIG_SECRETS:-}" =~ ^(1|true|yes|on)$ ]]; then
 fi
 ENV_API_KEY_PROVIDERS='[]'
 
+# OpenClaw's model idle watchdog defaults/caps around 120s unless the provider
+# has models.providers.<id>.timeoutSeconds. Slow Gemini preview/thinking models
+# can exceed that before producing the first chunk, so HuggingClaw sets a safer
+# provider-level default while allowing users to override or disable it.
+OPENCLAW_PROVIDER_TIMEOUT_SECONDS="${OPENCLAW_PROVIDER_TIMEOUT_SECONDS:-${LLM_PROVIDER_TIMEOUT_SECONDS:-300}}"
+if [ -n "$OPENCLAW_PROVIDER_TIMEOUT_SECONDS" ] && ! [[ "$OPENCLAW_PROVIDER_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]]; then
+  echo "Warning: OPENCLAW_PROVIDER_TIMEOUT_SECONDS must be a whole number of seconds; disabling provider timeout injection."
+  OPENCLAW_PROVIDER_TIMEOUT_SECONDS=""
+fi
+if [ "$OPENCLAW_PROVIDER_TIMEOUT_SECONDS" = "0" ]; then
+  OPENCLAW_PROVIDER_TIMEOUT_SECONDS=""
+fi
+
 # Optional: dynamic custom OpenAI-compatible provider registration
 CUSTOM_PROVIDER_NAME="${CUSTOM_PROVIDER_NAME:-}"
 CUSTOM_BASE_URL="${CUSTOM_BASE_URL:-}"
@@ -662,6 +675,7 @@ if [ -n "$CUSTOM_PROVIDER_NAME" ] || [ -n "$CUSTOM_BASE_URL" ] || [ -n "$CUSTOM_
       --arg modelName "$CUSTOM_MODEL_NAME" \
       --argjson contextWindow "$CUSTOM_CONTEXT_WINDOW" \
       --argjson maxTokens "$CUSTOM_MAX_TOKENS" \
+      --arg providerTimeoutSeconds "$OPENCLAW_PROVIDER_TIMEOUT_SECONDS" \
       --argjson allowSecrets "$OPENCLAW_CONFIG_SECRETS_ALLOWED" \
       '.models.mode = "merge" |
        .models.providers[$provider] = ({
@@ -673,7 +687,9 @@ if [ -n "$CUSTOM_PROVIDER_NAME" ] || [ -n "$CUSTOM_BASE_URL" ] || [ -n "$CUSTOM_
            "contextWindow": $contextWindow,
            "maxTokens": $maxTokens
          }]
-       } + (if $allowSecrets and $apiKey != "" then {"apiKey": $apiKey} else {} end))' <<<"$CONFIG_JSON")
+       }
+       + (if $providerTimeoutSeconds != "" then {"timeoutSeconds": ($providerTimeoutSeconds | tonumber)} else {} end)
+       + (if $allowSecrets and $apiKey != "" then {"apiKey": $apiKey} else {} end))' <<<"$CONFIG_JSON")
 
     if [ "$OPENCLAW_CONFIG_SECRETS_ALLOWED" != "true" ] && [ -n "$CUSTOM_API_KEY" ]; then
       ENV_API_KEY_PROVIDERS=$(jq \
@@ -816,12 +832,14 @@ inject_provider_models_from_env() {
     --arg apiKey "$inject_api_key" \
     --arg baseUrl "$resolved_base_url" \
     --arg apiType "$api_type" \
+    --arg providerTimeoutSeconds "$OPENCLAW_PROVIDER_TIMEOUT_SECONDS" \
     '.models.mode = "merge"
      | .models.providers[$provider] = (
          (.models.providers[$provider] // {})
          + (if $apiKey  != "" then {apiKey:  $apiKey}  else {} end)
          + (if $baseUrl != "" then {baseUrl: $baseUrl} else {} end)
          + (if $apiType != "" then {api:     $apiType} else {} end)
+         + (if $providerTimeoutSeconds != "" then {timeoutSeconds: ($providerTimeoutSeconds | tonumber)} else {} end)
          + {models: $models}
        )' <<<"$CONFIG_JSON")
 

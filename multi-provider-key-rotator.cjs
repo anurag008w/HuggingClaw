@@ -876,12 +876,13 @@ function classifyRetryableFailure(status, errCode) {
   return false;
 }
 
-function isCallerAbortError(err, code) {
-  // OpenClaw's idle watchdog aborts the request after ~120s with
-  // AbortError("This operation was aborted"). That is a caller-side timeout,
-  // not evidence that the selected API key is bad. Do not blacklist/rotate the
-  // key for this shape; just let OpenClaw's same-model retry policy handle it.
-  return String(err?.name || '') === 'AbortError' && !code;
+function isCallerAbortError(err) {
+  // OpenClaw's idle watchdog/caller aborts arrive as AbortError, sometimes with
+  // a numeric DOMException code (for example 20). That numeric code is not a
+  // provider/network failure code, and the selected API key might still be
+  // perfectly healthy. Do not blacklist/rotate the key for this shape; just let
+  // OpenClaw's same-model retry policy handle it.
+  return String(err?.name || '') === 'AbortError';
 }
 
 function shouldRetryTransportError(err, code) {
@@ -1217,7 +1218,7 @@ function handleTransportError(p, key, err, model = null) {
     emitEvent('rate_limited', p, key, { model, name: name || 'Error', code, source: 'transport_error', message: message.slice(0, 240) });
     return;
   }
-  if (isCallerAbortError(err, code)) {
+  if (isCallerAbortError(err)) {
     debug(`[key-rotator] ${p.name}: caller abort ${name || 'AbortError'} on ${keySlot(p, key)}${keyMask(key)}${model ? ` model=${model}` : ''} — leaving key sticky/healthy`);
     emitEvent('transport_aborted', p, key, { model, name: name || 'AbortError', code, message: message.slice(0, 240), classifiedAs: 'caller_abort' });
     return;
