@@ -49,6 +49,7 @@ const verbosePickLog = (...a) => { if (LOG_LEVEL === 'debug' && VERBOSE_PICKS) c
 // keys and inflate the dashboard.
 const rotatorRequestContext = new AsyncLocalStorage();
 let rotatorSyncRequestDepth = 0;
+let rotatorRequestSeq = 0;
 const isInRotatorRequest = () => rotatorSyncRequestDepth > 0 || !!rotatorRequestContext.getStore()?.active;
 const runInRotatorRequest = (fn) => rotatorRequestContext.run({ active: true }, fn);
 const runInRotatorSyncRequest = (fn) => {
@@ -987,8 +988,9 @@ function removeInFlightToken(p, key, token) {
 
 function beginInFlight(p, key, model = null) {
   if (!p || !key) return null;
-  const token = { done: false, timer: null, model: model || null };
+  const token = { done: false, timer: null, model: model || null, requestId: `${Date.now().toString(36)}-${(++rotatorRequestSeq).toString(36)}` };
   p.inFlight.set(key, (p.inFlight.get(key) || 0) + 1);
+  emitEvent('request_started', p, key, { requestId: token.requestId, model: token.model || null, inflight: p.inFlight.get(key) || 0, ttlMs: INFLIGHT_TTL_MS });
   token.timer = setTimeout(() => {
     if (token.done) return;
     token.done = true;
@@ -997,10 +999,12 @@ function beginInFlight(p, key, model = null) {
     if (before > 0) {
       const next = decrementInFlight(p, key);
       // A timeout here only releases the safety lease.  It must not be treated
-      // as a key failure: one logical OpenClaw task can legitimately hold an
-      // upstream stream longer than the lease TTL, and rotating/blacklisting on
-      // a bookkeeping timeout can split that task across multiple API keys.
-      emitEvent('inflight_lease_expired', p, key, { model: token.model || null, inflightBefore: before, inflightAfter: next, ttlMs: INFLIGHT_TTL_MS, classifiedAs: 'lease_cleanup' });
+      // as a key failure or as a still-pending provider request: one logical
+      // OpenClaw task can be abandoned by a higher-level failover path, or keep
+      // streaming after another layer has stopped observing it. The manager treats
+      // this lease-cleanup event as a closed bookkeeping outcome while still
+      // showing it separately from success/rate/auth counters.
+      emitEvent('inflight_lease_expired', p, key, { requestId: token.requestId, model: token.model || null, inflightBefore: before, inflightAfter: next, ttlMs: INFLIGHT_TTL_MS, classifiedAs: 'lease_cleanup', closesPending: true });
     }
   }, INFLIGHT_TTL_MS);
   token.timer.unref?.();
@@ -1283,7 +1287,7 @@ function handleStatus(p, key, status, model, retryAfterMs, errorInfo, extra = {}
   }
 }
 
-function handleTransportError(p, key, err, model = null) {
+function handleTransportError(p, key, err, model = null, extra = {}) {
   if (!p || !key) return;
   // Node.js 18+ undici fetch throws TypeError: "fetch failed" where the actual
   // network error code lives in err.cause.code (e.g. ECONNRESET, ETIMEDOUT,
@@ -1301,7 +1305,7 @@ function handleTransportError(p, key, err, model = null) {
   const haystack = `${name} ${message}`.toLowerCase();
   if (isCallerAbortError(err)) {
     debug(`[key-rotator] ${p.name}: caller abort ${name || 'AbortError'} on ${keySlot(p, key)}${keyMask(key)}${model ? ` model=${model}` : ''} — leaving key sticky/healthy`);
-    emitEvent('transport_aborted', p, key, { model, name: name || 'AbortError', code, message: message.slice(0, 240), classifiedAs: 'caller_abort' });
+    emitEvent('transport_aborted', p, key, { model, ...extra, name: name || 'AbortError', code, message: message.slice(0, 240), classifiedAs: 'caller_abort' });
     return;
   }
 
@@ -1314,6 +1318,7 @@ function handleTransportError(p, key, err, model = null) {
       ...(name ? { name } : {}),
       ...(code ? { code } : {}),
       ...(message ? { message: message.slice(0, 240) } : {}),
+      ...extra,
     });
     return;
   }
@@ -1324,7 +1329,7 @@ function handleTransportError(p, key, err, model = null) {
     clearStickyKey(p, key, model);
     clearTaskAffinityKey(p, key, model);
     warn(`[key-rotator] ${p.name}: transport/failover quota signal ${name || 'Error'}${code ? ` code=${code}` : ''} on ${keySlot(p, key)}${keyMask(key)}${model ? ` model=${model}` : ''}`);
-    emitEvent('rate_limited', p, key, { model, name: name || 'Error', code, source: 'transport_error', message: message.slice(0, 240) });
+    emitEvent('rate_limited', p, key, { model, ...extra, name: name || 'Error', code, source: 'transport_error', message: message.slice(0, 240) });
     return;
   }
   const retryable = shouldRetryTransportError(err, code);
@@ -1333,7 +1338,7 @@ function handleTransportError(p, key, err, model = null) {
     clearStickyKey(p, key, model);
     clearTaskAffinityKey(p, key, model);
     warn(`[key-rotator] ${p.name}: retryable network ${name || 'Error'}${code ? ` code=${code}` : ''} on ${keySlot(p, key)}${keyMask(key)}${model ? ` model=${model}` : ''}`);
-    emitEvent('network_retryable', p, key, { model, name: name || 'Error', code });
+    emitEvent('network_retryable', p, key, { model, ...extra, name: name || 'Error', code });
   }
 }
 
@@ -1831,7 +1836,7 @@ function wrapUndiciHandler(handler, provider, key, inFlightToken, getModel) {
     if (!force && statusNeedsErrorBodyForScope(statusCode)) return false;
     statusHandled = true;
     clearBodyWaitTimer();
-    try { handleStatus(provider, key, statusCode, currentModel(), retryAfterMs, currentErrorInfo()); } catch (_) {}
+    try { handleStatus(provider, key, statusCode, currentModel(), retryAfterMs, currentErrorInfo(), { requestId: inFlightToken?.requestId }); } catch (_) {}
     return true;
   };
   const settle = (fn) => {
@@ -1889,7 +1894,7 @@ function wrapUndiciHandler(handler, provider, key, inFlightToken, getModel) {
           } finally {
             // User handlers may throw/rethrow; the rotator still owns the
             // in-flight token and transport error classification for this key.
-            settle(() => { if (!statusHandled) { try { handleTransportError(provider, key, err, currentModel()); } catch (_) {} } });
+            settle(() => { if (!statusHandled) { try { handleTransportError(provider, key, err, currentModel(), { requestId: inFlightToken?.requestId }); } catch (_) {} } });
           }
         };
       }
@@ -2181,7 +2186,7 @@ function patchFetch() {
           const retryAfterMs = parseRetryAfterMs(response.headers?.get?.('retry-after'));
           const errorInfo = await parseResponseErrorInfo(response);
           try { endInFlight(provider, usedKey, usedInFlight); } catch (_) {}
-          try { handleStatus(provider, usedKey, response.status, model, retryAfterMs, errorInfo); } catch (_) {}
+          try { handleStatus(provider, usedKey, response.status, model, retryAfterMs, errorInfo, { requestId: usedInFlight?.requestId }); } catch (_) {}
 
           const shouldRetry = attempt < maxAttempts && classifyRetryableFailure(response.status);
           if (shouldRetry) {
@@ -2199,7 +2204,7 @@ function patchFetch() {
         } catch (err) {
           lastErr = err;
           try { endInFlight(provider, usedKey, usedInFlight); } catch (_) {}
-          try { handleTransportError(provider, usedKey, err, model); } catch (_) {}
+          try { handleTransportError(provider, usedKey, err, model, { requestId: usedInFlight?.requestId }); } catch (_) {}
           // Node.js 18+ undici fetch: network errors are TypeError("fetch failed")
           // where the real code (ECONNRESET, ETIMEDOUT, ENOTFOUND …) is in
           // err.cause.code.  Check that first before falling back to err.code.
@@ -2392,7 +2397,7 @@ function patchHttpModule(mod) {
         statusHandled = true;
         const retryAfterMs = parseRetryAfterMs(res?.headers?.['retry-after']);
         try { endInFlight(usedProvider, usedKey, usedInFlight); } catch (_) {}
-        try { handleStatus(usedProvider, usedKey, res?.statusCode, usedModel, retryAfterMs, errorInfo); } catch (_) {}
+        try { handleStatus(usedProvider, usedKey, res?.statusCode, usedModel, retryAfterMs, errorInfo, { requestId: usedInFlight?.requestId }); } catch (_) {}
       };
       req.emit = function (event, ...rest) {
         if (event === 'response') {
@@ -2426,7 +2431,7 @@ function patchHttpModule(mod) {
       req.on('error', (err) => {
         try { endInFlight(usedProvider, usedKey, usedInFlight); } catch (_) {}
         if (!statusHandled) {
-          try { handleTransportError(usedProvider, usedKey, err, usedModel); } catch (_) {}
+          try { handleTransportError(usedProvider, usedKey, err, usedModel, { requestId: usedInFlight?.requestId }); } catch (_) {}
         }
       });
     }
