@@ -123,6 +123,10 @@ const ERROR_BODY_SNIFF_MAX_BYTES = Math.max(
   4 * 1024,
   Math.min(256 * 1024, parseInt(process.env.KEY_ERROR_BODY_SNIFF_MAX_BYTES || '', 10) || 64 * 1024),
 );
+const ERROR_BODY_WAIT_MS = Math.max(
+  250,
+  Math.min(10_000, parseInt(process.env.KEY_ERROR_BODY_WAIT_MS || '', 10) || 1500),
+);
 
 const USE_SUSPENDED_KEY_AS_LAST_RESORT = !/^(0|false|no|off)$/i.test(
   String(process.env.KEY_USE_SUSPENDED_AS_LAST_RESORT || 'true').trim(),
@@ -342,6 +346,22 @@ function normalizeErrorToken(value) {
   return String(value || '').trim().toLowerCase();
 }
 
+function retryDelayMsFromText(text) {
+  const raw = String(text || '');
+  if (!raw) return 0;
+  const retryIn = raw.match(/(?:retry|try again|retry-after|retry_after)[^0-9]{0,40}(\d+(?:\.\d+)?)\s*(ms|milliseconds?|s|sec|secs|seconds?|m|mins?|minutes?)?/i);
+  if (!retryIn) return 0;
+  const value = Number(retryIn[1]);
+  if (!Number.isFinite(value) || value < 0) return 0;
+  const unit = String(retryIn[2] || 's').toLowerCase();
+  const ms = unit.startsWith('m') && !unit.startsWith('ms') && !unit.startsWith('milli')
+    ? value * 60_000
+    : unit.startsWith('ms') || unit.startsWith('milli')
+      ? value
+      : value * 1000;
+  return Math.min(MAX_RETRY_AFTER_MS, Math.round(ms));
+}
+
 function parseProviderErrorInfo(text) {
   if (!text || typeof text !== 'string') return null;
   const info = { raw: text.slice(0, ERROR_BODY_SNIFF_MAX_BYTES) };
@@ -355,14 +375,19 @@ function parseProviderErrorInfo(text) {
       info.reason = err.reason ?? body.reason;
       info.message = err.message ?? body.message;
       if (!info.reason && Array.isArray(err.errors) && err.errors[0]) info.reason = err.errors[0].reason;
-      if (!info.reason && Array.isArray(err.details)) {
-        const quota = err.details.find(d => d && (d.reason || d.violations || d.quotaMetric));
-        if (quota) info.reason = quota.reason || quota.quotaMetric || 'quota_details';
+      if (Array.isArray(err.details)) {
+        if (!info.reason) {
+          const quota = err.details.find(d => d && (d.reason || d.violations || d.quotaMetric));
+          if (quota) info.reason = quota.reason || quota.quotaMetric || 'quota_details';
+        }
+        const retry = err.details.find(d => d && (d.retryDelay || d.retry_delay));
+        if (retry) info.retryAfterMs = retryDelayMsFromText(`retry in ${retry.retryDelay || retry.retry_delay}`);
       }
     }
   } catch (_) {
     info.message = text.slice(0, 512);
   }
+  if (!info.retryAfterMs) info.retryAfterMs = retryDelayMsFromText(info.message || text);
   return info;
 }
 
@@ -411,7 +436,54 @@ function providerErrorFields(errorInfo) {
   };
 }
 
+function extractStatusFromError(err) {
+  const direct = [
+    err?.status,
+    err?.statusCode,
+    err?.code,
+    err?.response?.status,
+    err?.response?.statusCode,
+    err?.cause?.status,
+    err?.cause?.statusCode,
+    err?.cause?.response?.status,
+    err?.cause?.response?.statusCode,
+  ];
+  for (const value of direct) {
+    if (typeof value === 'number' && value >= 100 && value <= 599) return value;
+    if (typeof value === 'string' && /^\d{3}$/.test(value.trim())) {
+      const n = Number(value.trim());
+      if (n >= 100 && n <= 599) return n;
+    }
+  }
+
+  const text = [
+    err?.message,
+    err?.cause?.message,
+    err?.stack,
+  ].filter(Boolean).join(' ');
+  const match = text.match(/(?:^|\D)([1-5]\d{2})\s*(?:status(?:\s+code)?|http|response|provider)/i)
+    || text.match(/(?:status(?:\s+code)?|http|response|provider)\D+([1-5]\d{2})(?:\D|$)/i)
+    || text.match(/^\s*(?:[A-Za-z][A-Za-z0-9_]*Error:\s*)?([1-5]\d{2})\b/)
+    || text.match(/\b([1-5]\d{2})\s+(?:RESOURCE_EXHAUSTED|UNAVAILABLE|INTERNAL|DEADLINE_EXCEEDED|PERMISSION_DENIED|UNAUTHENTICATED|INVALID_ARGUMENT|FAILED_PRECONDITION|NOT_FOUND|overloaded|too many|unauthori[sz]ed|forbidden|rate)/i);
+  return match ? Number(match[1]) : null;
+}
+
+function transportErrorInfo(err, status) {
+  const message = String(err?.message || err?.cause?.message || '').slice(0, 512);
+  const info = parseProviderErrorInfo(message) || { message };
+  if (!info.message) info.message = message;
+  if (typeof status === 'number') info.status = String(status);
+  if (err?.type) info.type = err.type;
+  if (err?.reason) info.reason = err.reason;
+  return info;
+}
+
 function statusNeedsErrorBodyForScope(status) {
+  // Wait for the body only where provider text can materially change key
+  // health classification (notably Google/Gemini 403 quota vs permission).
+  // 401/402/429/5xx are unambiguous from headers; handling them immediately
+  // avoids 30s lease-expiry noise when OpenClaw aborts/failover stops reading
+  // the error body.
   return status === 400 || status === 403 || status === 409 || status === 413 || status === 423 || status === 425 || status === 529;
 }
 
@@ -928,7 +1000,7 @@ function beginInFlight(p, key, model = null) {
       // as a key failure: one logical OpenClaw task can legitimately hold an
       // upstream stream longer than the lease TTL, and rotating/blacklisting on
       // a bookkeeping timeout can split that task across multiple API keys.
-      emitEvent('inflight_timeout', p, key, { model: token.model || null, inflightBefore: before, inflightAfter: next, ttlMs: INFLIGHT_TTL_MS, classifiedAs: 'lease_cleanup' });
+      emitEvent('inflight_lease_expired', p, key, { model: token.model || null, inflightBefore: before, inflightAfter: next, ttlMs: INFLIGHT_TTL_MS, classifiedAs: 'lease_cleanup' });
     }
   }, INFLIGHT_TTL_MS);
   token.timer.unref?.();
@@ -1147,10 +1219,11 @@ function setAuthHeader(headers, key) {
   return { authorization: val };
 }
 
-function handleStatus(p, key, status, model, retryAfterMs, errorInfo) {
+function handleStatus(p, key, status, model, retryAfterMs, errorInfo, extra = {}) {
   if (!p || !key) return;
+  retryAfterMs = retryAfterMs || errorInfo?.retryAfterMs || 0;
   const failureKind = classifyProviderFailure(p, status, errorInfo);
-  const errorFields = providerErrorFields(errorInfo);
+  const errorFields = { ...providerErrorFields(errorInfo), ...extra };
 
   if (failureKind === 'auth') {
     // Invalid/expired/unauthorized key — always a global (not model-scoped) blacklist.
@@ -1161,8 +1234,9 @@ function handleStatus(p, key, status, model, retryAfterMs, errorInfo) {
     ks.blacklistedUntil = Date.now() + PERM_SUSPEND_MS;
     clearStickyKey(p, key);
     clearTaskAffinityKey(p, key);
-    warn(`[key-rotator] ${p.name}: ${keySlot(p, key)}${keyMask(key)} auth-failed (${status}) — suspended for ${formatHours(PERM_SUSPEND_MS)} h`);
-    emitEvent('auth_failed', p, key, { status, suspendMs: PERM_SUSPEND_MS, ...errorFields });
+    const reason = errorFields.errorReason || errorFields.errorStatus || errorFields.errorType || errorFields.errorCode || errorFields.source;
+    warn(`[key-rotator] ${p.name}: ${keySlot(p, key)}${keyMask(key)} auth-failed (${status})${reason ? ` reason=${reason}` : ''}${model ? ` model=${model}` : ''} — suspended for ${formatHours(PERM_SUSPEND_MS)} h`);
+    emitEvent('auth_failed', p, key, { status, model, suspendMs: PERM_SUSPEND_MS, ...errorFields });
     return;
   }
 
@@ -1194,6 +1268,18 @@ function handleStatus(p, key, status, model, retryAfterMs, errorInfo) {
   if (status >= 200 && status < 400) {
     recordSuccess(p, key, model);
     emitEvent('success', p, key, { status, model });
+    return;
+  }
+
+  if (status >= 400) {
+    // Non-key failures (malformed request, missing model, unsupported feature,
+    // content/safety/request-size errors, etc.) still need an explicit outcome
+    // so the dashboard does not age a completed request into a fake transient.
+    // Do not blacklist or rotate on these: the selected API key may be healthy.
+    const eventType = status < 500 ? 'client_error' : 'provider_error';
+    const reason = errorFields.errorReason || errorFields.errorStatus || errorFields.errorType || errorFields.errorCode || errorFields.source;
+    warn(`[key-rotator] ${p.name}: ${eventType} status=${status}${reason ? ` reason=${reason}` : ''} on ${keySlot(p, key)}${keyMask(key)}${model ? ` model=${model}` : ''} (key not penalized)`);
+    emitEvent(eventType, p, key, { status, model, ...errorFields });
   }
 }
 
@@ -1202,13 +1288,36 @@ function handleTransportError(p, key, err, model = null) {
   // Node.js 18+ undici fetch throws TypeError: "fetch failed" where the actual
   // network error code lives in err.cause.code (e.g. ECONNRESET, ETIMEDOUT,
   // ENOTFOUND).  Fall back to err.cause.code so retryable network errors are
-  // correctly classified and transient blacklists are applied.
+  // correctly classified and transient blacklists are applied.  OpenClaw
+  // failover can also throw FailoverError("401 status code (no body)") instead
+  // of returning a Response; parse that embedded HTTP status so the selected
+  // key is marked auth/rate/transient correctly instead of becoming a stale
+  // pending pick on the dashboard.
   const code = (err?.code || err?.cause?.code)
     ? String(err.code || err.cause?.code).toUpperCase()
     : '';
   const name = String(err?.name || '');
   const message = String(err?.message || err?.cause?.message || '');
   const haystack = `${name} ${message}`.toLowerCase();
+  if (isCallerAbortError(err)) {
+    debug(`[key-rotator] ${p.name}: caller abort ${name || 'AbortError'} on ${keySlot(p, key)}${keyMask(key)}${model ? ` model=${model}` : ''} — leaving key sticky/healthy`);
+    emitEvent('transport_aborted', p, key, { model, name: name || 'AbortError', code, message: message.slice(0, 240), classifiedAs: 'caller_abort' });
+    return;
+  }
+
+  const embeddedStatus = extractStatusFromError(err);
+  if (embeddedStatus) {
+    const errorInfo = transportErrorInfo(err, embeddedStatus);
+    warn(`[key-rotator] ${p.name}: transport status=${embeddedStatus} ${name || 'Error'} on ${keySlot(p, key)}${keyMask(key)}${model ? ` model=${model}` : ''}${message ? ` message=${JSON.stringify(message.slice(0, 160))}` : ''}`);
+    handleStatus(p, key, embeddedStatus, model, 0, errorInfo, {
+      source: 'transport_error',
+      ...(name ? { name } : {}),
+      ...(code ? { code } : {}),
+      ...(message ? { message: message.slice(0, 240) } : {}),
+    });
+    return;
+  }
+
   const looksRateOrQuota = /rate.?limit|too.?many|quota|resource.?exhaust|usage.?limit|insufficient.?quota|capacity.?exceeded|tokens?.?per|requests?.?per|rate_limit|rate.?limited|userratelimit|dailylimit|limitexceeded/.test(haystack);
   if (looksRateOrQuota) {
     recordFailure(p, key, model, 0);
@@ -1216,11 +1325,6 @@ function handleTransportError(p, key, err, model = null) {
     clearTaskAffinityKey(p, key, model);
     warn(`[key-rotator] ${p.name}: transport/failover quota signal ${name || 'Error'}${code ? ` code=${code}` : ''} on ${keySlot(p, key)}${keyMask(key)}${model ? ` model=${model}` : ''}`);
     emitEvent('rate_limited', p, key, { model, name: name || 'Error', code, source: 'transport_error', message: message.slice(0, 240) });
-    return;
-  }
-  if (isCallerAbortError(err)) {
-    debug(`[key-rotator] ${p.name}: caller abort ${name || 'AbortError'} on ${keySlot(p, key)}${keyMask(key)}${model ? ` model=${model}` : ''} — leaving key sticky/healthy`);
-    emitEvent('transport_aborted', p, key, { model, name: name || 'AbortError', code, message: message.slice(0, 240), classifiedAs: 'caller_abort' });
     return;
   }
   const retryable = shouldRetryTransportError(err, code);
@@ -1691,6 +1795,7 @@ function wrapUndiciHandler(handler, provider, key, inFlightToken, getModel) {
   let settled = false;
   let statusHandled = false;
   let errorBytes = 0;
+  let bodyWaitTimer = null;
   const errorChunks = [];
   const currentModel = () => (typeof getModel === 'function' ? getModel() : null);
   const collectErrorBody = (chunk) => {
@@ -1708,6 +1813,12 @@ function wrapUndiciHandler(handler, provider, key, inFlightToken, getModel) {
     if (!errorChunks.length) return null;
     try { return parseProviderErrorInfo(Buffer.concat(errorChunks).toString('utf8')); } catch (_) { return null; }
   };
+  const clearBodyWaitTimer = () => {
+    if (bodyWaitTimer) {
+      clearTimeout(bodyWaitTimer);
+      bodyWaitTimer = null;
+    }
+  };
   const handleHeadersStatus = (force = false) => {
     if (statusHandled || !statusCode) return false;
     // Success and unambiguous failures are emitted as soon as headers arrive.
@@ -1719,12 +1830,14 @@ function wrapUndiciHandler(handler, provider, key, inFlightToken, getModel) {
     // quota vs global auth suspension.
     if (!force && statusNeedsErrorBodyForScope(statusCode)) return false;
     statusHandled = true;
+    clearBodyWaitTimer();
     try { handleStatus(provider, key, statusCode, currentModel(), retryAfterMs, currentErrorInfo()); } catch (_) {}
     return true;
   };
   const settle = (fn) => {
     if (settled) return;
     settled = true;
+    clearBodyWaitTimer();
     try { endInFlight(provider, key, inFlightToken); } catch (_) {}
     try { fn(); } catch (_) {}
   };
@@ -1736,8 +1849,17 @@ function wrapUndiciHandler(handler, provider, key, inFlightToken, getModel) {
           retryAfterMs = parseRetryAfterMs(uGetHeader(headers, 'retry-after'));
           if (handleHeadersStatus()) {
             // Header-level status accounting is complete; close the in-flight
-            // token now so successful streams do not later report timeouts.
+            // token now so successful streams do not later report lease expiry.
             settle(() => {});
+          } else if (statusNeedsErrorBodyForScope(statusCode) && !bodyWaitTimer) {
+            // Some OpenClaw failover paths stop reading an error response once a
+            // higher layer has enough information to throw.  Do not let an
+            // ambiguous 4xx wait for the 30s in-flight lease: give the provider
+            // body a short chance to arrive, then classify with whatever we saw.
+            bodyWaitTimer = setTimeout(() => {
+              settle(() => { handleHeadersStatus(true); });
+            }, ERROR_BODY_WAIT_MS);
+            bodyWaitTimer.unref?.();
           }
           return target.onHeaders ? target.onHeaders.call(target, sc, headers, resume, statusMessage) : undefined;
         };
@@ -2336,7 +2458,7 @@ if (hasProviderKeys) {
   patchUndici();         // covers OpenClaw gateway's bundled undici AI calls
   startDiagnostics();
 
-  debug(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:${formatHours(PERM_SUSPEND_MS)}h (cap 16h) max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} max-retry-after:${MAX_RETRY_AFTER_MS/1000}s max-key-wait:${MAX_KEY_WAIT_MS/1000}s diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'} log-level:${LOG_LEVEL} verbose-picks:${VERBOSE_PICKS ? 'on' : 'off'} suspended-last-resort:${USE_SUSPENDED_KEY_AS_LAST_RESORT ? 'on' : 'off'} per-model-providers:${providerState.filter(p => p.perModelLimits).map(p => p.name).join(',') || 'none'} model-from-body:on model-sniff-max:${REQUEST_MODEL_SNIFF_MAX_BYTES} error-sniff-max:${ERROR_BODY_SNIFF_MAX_BYTES} inflight-ttl:${INFLIGHT_TTL_MS}ms task-affinity:${TASK_AFFINITY_MS}ms/${TASK_AFFINITY_MAX_REUSES}reuses sticky-until-failure:${STICKY_UNTIL_FAILURE ? 'on' : 'off'} sticky-scope:${String(process.env.KEY_STICKY_SCOPE || 'auto').trim().toLowerCase() || 'auto'} sticky-providers:${[...STICKY_PROVIDER_SET].join(',') || 'none'} llm-fallback-providers:${LLM_FALLBACK_PROVIDER_SET ? [...LLM_FALLBACK_PROVIDER_SET].join(',') : 'all'}`);
+  debug(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:${formatHours(PERM_SUSPEND_MS)}h (cap 16h) max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} max-retry-after:${MAX_RETRY_AFTER_MS/1000}s max-key-wait:${MAX_KEY_WAIT_MS/1000}s diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'} log-level:${LOG_LEVEL} verbose-picks:${VERBOSE_PICKS ? 'on' : 'off'} suspended-last-resort:${USE_SUSPENDED_KEY_AS_LAST_RESORT ? 'on' : 'off'} per-model-providers:${providerState.filter(p => p.perModelLimits).map(p => p.name).join(',') || 'none'} model-from-body:on model-sniff-max:${REQUEST_MODEL_SNIFF_MAX_BYTES} error-sniff-max:${ERROR_BODY_SNIFF_MAX_BYTES} error-body-wait:${ERROR_BODY_WAIT_MS}ms inflight-ttl:${INFLIGHT_TTL_MS}ms task-affinity:${TASK_AFFINITY_MS}ms/${TASK_AFFINITY_MAX_REUSES}reuses sticky-until-failure:${STICKY_UNTIL_FAILURE ? 'on' : 'off'} sticky-scope:${String(process.env.KEY_STICKY_SCOPE || 'auto').trim().toLowerCase() || 'auto'} sticky-providers:${[...STICKY_PROVIDER_SET].join(',') || 'none'} llm-fallback-providers:${LLM_FALLBACK_PROVIDER_SET ? [...LLM_FALLBACK_PROVIDER_SET].join(',') : 'all'}`);
   emitEvent('rotator_loaded', null, null, {
     providers: providerState.filter(p => p.keys.length).map(p => ({ name: p.name, total: p.keys.length })),
     logLevel: LOG_LEVEL,
