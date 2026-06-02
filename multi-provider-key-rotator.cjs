@@ -1468,6 +1468,12 @@ function uGetHeader(headers, name) {
       if (String(headers[i]).toLowerCase() === lower) return String(headers[i + 1] || '');
     return '';
   }
+  if (headers && typeof headers.get === 'function') {
+    try {
+      const value = headers.get(name) ?? headers.get(lower);
+      if (value != null) return String(value);
+    } catch (_) {}
+  }
   if (headers && typeof headers === 'object') {
     for (const k of Object.keys(headers))
       if (k.toLowerCase() === lower) return String(headers[k] || '');
@@ -1494,6 +1500,17 @@ function uSetHeader(headers, name, value) {
     }
     if (!found) out.push(name, value);
     return out;
+  }
+  if (headers && typeof headers.set === 'function') {
+    try {
+      const out = typeof Headers !== 'undefined' && headers instanceof Headers
+        ? new Headers(headers)
+        : headers instanceof Map
+          ? new Map(headers)
+          : headers;
+      out.set(name, value);
+      return out;
+    } catch (_) {}
   }
   // Plain object: case-insensitive replace
   const out = {};
@@ -1694,13 +1711,9 @@ function patchUndiciDispatch(proto, tag) {
   };
 
   proto.dispatch._kRotatorPatched = true;
-  // FIX: Also set cloudflare-proxy's flag on rotatorDispatch so CF proxy doesn't
-  // re-wrap us on the next require() hook fire.  Without this, CF proxy sees
-  // _patched=undefined on rotatorDispatch → wraps again → rotator sees
-  // _kRotatorPatched=undefined on the new cfDispatch → wraps again → infinite
-  // mutual re-wrapping that produces hundreds of "dispatch patched" log entries
-  // on startup and builds an ever-growing call chain on every undici require.
-  proto.dispatch._patched = true;
+  // Do not set cloudflare-proxy's own _cfProxyPatched marker here: the proxy
+  // must still be able to wrap this dispatch if it loads after the rotator.
+  // Cloudflare uses a WeakSet plus _cfProxyPatched to avoid re-wrapping.
   debug(`[key-rotator] undici (${tag}) dispatch patched`);
 }
 
@@ -1979,10 +1992,10 @@ function patchHttpModule(mod) {
             const existingHeaders = (typeof options === 'object' && !(options instanceof URL) && options.headers)
               ? options.headers
               : (hasOptionsArg ? args[1].headers : undefined);
-            const authVal = existingHeaders?.['authorization'] || existingHeaders?.['Authorization'] || '';
+            const authVal = uGetHeader(existingHeaders || {}, 'authorization');
             const needsBearer = isGeminiOpenAICompatPath(u.pathname) || String(authVal).toLowerCase().startsWith('bearer ');
             const patchedHeaders = needsBearer
-              ? setAuthHeader(typeof existingHeaders === 'object' ? { ...existingHeaders } : existingHeaders, key)
+              ? setAuthHeader(existingHeaders, key)
               : existingHeaders;
             if (typeof options === 'object' && !(options instanceof URL)) {
               args[0] = { ...options, path:`${u.pathname}${u.search}`, headers: patchedHeaders };
@@ -2141,7 +2154,6 @@ function patchHttpModule(mod) {
       return req;
     };
     Object.defineProperty(mod.get, '_kRotatorPatched', { value: true });
-    Object.defineProperty(mod.get, '_patched', { value: true });
   }
 }
 

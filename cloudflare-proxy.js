@@ -315,7 +315,7 @@ if (PROXY_URL) {
       if (!exports) return;
 
       const patchDispatch = (proto, name) => {
-        if (proto && proto.dispatch && !proto.dispatch._patched) {
+        if (proto && proto.dispatch && !proto.dispatch._cfProxyPatched) {
           const origDispatch = proto.dispatch;
           proto.dispatch = function(options, handler) {
             let origin = options.origin || this.origin;
@@ -362,6 +362,7 @@ if (PROXY_URL) {
             }
             return origDispatch.call(this, options, handler);
           };
+          proto.dispatch._cfProxyPatched = true;
           proto.dispatch._patched = true;
         }
       };
@@ -375,7 +376,7 @@ if (PROXY_URL) {
       if (exports.getGlobalDispatcher) {
         try {
           const globalDispatcher = exports.getGlobalDispatcher();
-          if (globalDispatcher && globalDispatcher.dispatch && !globalDispatcher.dispatch._patched) {
+          if (globalDispatcher && globalDispatcher.dispatch && !globalDispatcher.dispatch._cfProxyPatched) {
             patchDispatch(globalDispatcher, "GlobalDispatcherInstance");
           }
         } catch (e) {}
@@ -386,7 +387,7 @@ if (PROXY_URL) {
       if (exports.Pool && exports.Pool.prototype) patchDispatch(exports.Pool.prototype, "Pool");
       if (exports.Client && exports.Client.prototype) patchDispatch(exports.Client.prototype, "Client");
 
-      if (exports.fetch && !exports.fetch._patched) {
+      if (exports.fetch && !exports.fetch._cfProxyPatched) {
         const origFetch = exports.fetch;
         exports.fetch = async function patchedUndiciFetch(input, init) {
           let url;
@@ -452,16 +453,17 @@ if (PROXY_URL) {
 
           return origFetch(String(proxiedUrl), newInit);
         };
+        exports.fetch._cfProxyPatched = true;
         exports.fetch._patched = true;
       }
     };
 
     // FIX: WeakSet guard — each unique exports object is patched at most once.
     // Without this, the require hook fires on every cached require("undici") call
-    // and re-calls patchUndiciInstance. The _patched flag stops re-wrapping within
-    // one call, but the overhead was O(n_requires) per process boot. More critically,
-    // this was the other half of the mutual re-wrapping cycle with
-    // provider key rotator (which uses _kRotatorPatched instead of _patched).
+    // and re-calls patchUndiciInstance. The _cfProxyPatched flag stops
+    // Cloudflare re-wrapping within one call without treating the key rotator's
+    // _kRotatorPatched marker as a reason to skip proxying. The generic
+    // _patched marker is still set for older callers that only inspect it.
     const _cfProxySeen = new WeakSet();
     function patchUndiciOnce(exp) {
       if (!exp || typeof exp !== "object") return;
