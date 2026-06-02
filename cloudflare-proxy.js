@@ -49,14 +49,21 @@ const DEFAULT_PROXY_DOMAINS = [
 ];
 const PROXY_DOMAINS_RAW = (process.env.CLOUDFLARE_PROXY_DOMAINS || "").trim();
 const PROXY_ALL = PROXY_DOMAINS_RAW === "*";
+const EXTRA_PROXY_DOMAINS = PROXY_DOMAINS_RAW.split(",").map((d) => d.trim()).filter(Boolean);
+const AI_PROVIDER_DOMAINS = [
+  // googleapis.com is proxied by default for non-AI Google services, but these
+  // Gemini/Vertex hosts carry API keys and should stay direct unless explicitly
+  // listed in CLOUDFLARE_PROXY_DOMAINS (or wildcard mode is used).
+  "generativelanguage.googleapis.com",
+  "aiplatform.googleapis.com",
+];
 let BLOCKED_DOMAINS;
 if (PROXY_ALL) {
   BLOCKED_DOMAINS = [];
 } else {
-  const extra = PROXY_DOMAINS_RAW.split(",").map((d) => d.trim()).filter(Boolean);
   const seen = new Set(DEFAULT_PROXY_DOMAINS);
   BLOCKED_DOMAINS = [...DEFAULT_PROXY_DOMAINS];
-  for (const d of extra) {
+  for (const d of EXTRA_PROXY_DOMAINS) {
     if (!seen.has(d)) { BLOCKED_DOMAINS.push(d); seen.add(d); }
   }
 }
@@ -83,12 +90,17 @@ if (PROXY_URL) {
         normalized.endsWith(".huggingface.co") ||
         normalized === "huggingface.co";
 
-      const should = PROXY_ALL ? !isInternal : BLOCKED_DOMAINS.some(
-        (domain) =>
-          normalized === domain || normalized.endsWith(`.${domain}`),
-      );
+      if (isInternal) return false;
 
-      return should;
+      const matchesDomain = (domains) => domains.some(
+        (domain) => normalized === domain || normalized.endsWith(`.${domain}`),
+      );
+      const explicitlyRequested = PROXY_ALL || matchesDomain(EXTRA_PROXY_DOMAINS);
+      if (!explicitlyRequested && matchesDomain(AI_PROVIDER_DOMAINS)) {
+        return false;
+      }
+
+      return PROXY_ALL || matchesDomain(BLOCKED_DOMAINS);
     };
 
     const patch = (original, originalModuleName) => {
