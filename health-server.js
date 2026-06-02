@@ -595,6 +595,12 @@ function maskApiKey(value) {
   return key.length > 12 ? `${key.slice(0, 4)}...${key.slice(-6)}` : "***";
 }
 
+function keyFingerprint(value) {
+  const key = String(value || "");
+  if (!key) return null;
+  return crypto.createHash("sha256").update(key).digest("hex").slice(0, 12);
+}
+
 function modelProviderToRotatorProvider(model) {
   const provider = String(model || "").split("/")[0].toLowerCase();
   const aliases = {
@@ -716,7 +722,7 @@ function providerKeySummary() {
       total: keys.length,
       env: used.slice(0, 2).join(", "),
       aliases: used.length > 2 ? `${used.length - 2} more envs` : "",
-      keys: keys.map((key, idx) => ({ slot: idx + 1, total: keys.length, key: maskApiKey(key) })),
+      keys: keys.map((key, idx) => ({ slot: idx + 1, total: keys.length, key: maskApiKey(key), kid: keyFingerprint(key) })),
     };
   }).filter((p) => p.total > 0);
 }
