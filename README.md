@@ -173,6 +173,8 @@ To use WhatsApp, enable the channel and scan the QR code from the Control UI (**
 | :--- | :--- | :--- |
 | `WHATSAPP_ENABLED` | `false` | Enable WhatsApp pairing support |
 
+When `WHATSAPP_ENABLED=true`, startup verifies the official OpenClaw WhatsApp runtime before launching the gateway. It uses OpenClaw's documented install path (`openclaw plugins install clawhub:@openclaw/whatsapp`, with npm/alias fallbacks) and preserves the saved WhatsApp channel/plugin settings instead of removing them when a download needs to be retried.
+
 ## 💾 Workspace Backup *(Optional)*
 
 HuggingClaw automatically syncs your workspace (chats, settings, sessions) to a private HF Dataset named `huggingclaw-backup`.
@@ -228,8 +230,8 @@ HUGGINGCLAW_RUN=base64:<paste-output-here>
 How it works:
 
 1. `HUGGINGCLAW_RUN` is run as a full bash script on every boot before the OpenClaw gateway launches, so multi-line commands, `if`, loops, functions, and heredocs work. Long installs will delay gateway startup.
-2. Startup scripts load the same HuggingClaw shell wrappers as the interactive shell, so `apt install ...`, `pip install ...`, `npm install -g ...`, and `openclaw plugins install ...` behave consistently.
-3. OpenClaw plugins installed at startup are synced into `plugins.allow` before the gateway launches, so the gateway can load them instead of reporting them as not installed.
+2. Startup scripts run in a clean non-login shell and do **not** load the interactive HuggingClaw shell wrappers, so commands in `HUGGINGCLAW_RUN`/`workspace/startup.sh` execute exactly as written.
+3. For repeatable package installs, prefer the dedicated `HUGGINGCLAW_APT_PACKAGES`, `HUGGINGCLAW_PIP_PACKAGES`, `HUGGINGCLAW_NPM_PACKAGES`, and `HUGGINGCLAW_OPENCLAW_PLUGINS` variables; OpenClaw plugins installed this way are synced into `plugins.allow` before the gateway launches.
 4. If you install from the OpenClaw shell manually, HuggingClaw records only successful install commands in `/home/node/.openclaw/workspace/startup.sh` for replay. Failed or dummy commands are not saved by the wrapper.
 5. Package files are not persisted; commands are replayed to reconstruct them after restart.
 
@@ -296,7 +298,9 @@ Optional tuning:
 - `KEY_PERM_SUSPEND_MS` (default `57600000`) — long suspend duration for exhausted/auth-invalid keys (**capped at 16h max**).
 - `KEY_FAILURE_DECAY_MS` (default `900000`) — recent-failure decay window used to deprioritize keys.
 - `KEY_MAX_INFLIGHT_PER_KEY` (default `3`) — soft concurrent request cap per key.
-- `KEY_INFLIGHT_TTL_MS` (default `30000`) — safety lease for picked keys with no provider headers/completion/error; stale picks are marked transient so sticky keys can rotate.
+- `KEY_INFLIGHT_TTL_MS` (default `30000`) — safety lease for picked keys with no provider headers/completion/error; stale leases are cleaned up without marking the key failed, so long streams/tasks do not rotate away just because bookkeeping timed out.
+- `KEY_TASK_AFFINITY_MS` (default `30000`) — short same-task affinity window for sequential non-sticky provider calls; sticky providers keep their stronger until-failure pin.
+- `KEY_TASK_AFFINITY_MAX_REUSES` (default `3`) — max extra same-key reuses per non-sticky affinity burst before normal round-robin resumes.
 - `KEY_MODEL_SNIFF_MAX_BYTES` (default `262144`) — max request-body bytes to inspect for model names on streaming OpenAI-compatible Gemini calls.
 - `KEY_ERROR_BODY_SNIFF_MAX_BYTES` (default `65536`) — max error-response bytes to inspect so provider quota/rate bodies such as 403 quota errors are scoped correctly instead of being treated as permanent auth failures.
 - `KEY_STICKY_UNTIL_FAILURE` (default `true`) — keep sticky providers on one key until that key fails/exhausts.

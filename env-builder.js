@@ -614,7 +614,27 @@ const FIELDS = [
     "type": "text",
     "ph": "30000",
     "tag": "advanced",
-    "help": "Marks picked keys stale if no provider headers/completion/error are observed. Default: 30 seconds."
+    "help": "Releases stale in-flight bookkeeping if no provider headers/completion/error are observed. Does not mark the key failed by itself. Default: 30 seconds."
+  },
+{
+    "g": "Plugins",
+    "icon": "🔄",
+    "k": "KEY_TASK_AFFINITY_MS",
+    "lbl": "Same-task key affinity window (ms)",
+    "type": "text",
+    "ph": "30000",
+    "tag": "advanced",
+    "help": "Sequential non-sticky requests for the same provider/model bucket can reuse the last healthy key during this short idle window. Set 0 for pure round-robin."
+  },
+{
+    "g": "Plugins",
+    "icon": "🔄",
+    "k": "KEY_TASK_AFFINITY_MAX_REUSES",
+    "lbl": "Same-task max key reuses per burst",
+    "type": "text",
+    "ph": "3",
+    "tag": "advanced",
+    "help": "Maximum extra same-key reuses per non-sticky affinity burst before normal round-robin resumes. Default: 3."
   },
 {
     "g": "Plugins",

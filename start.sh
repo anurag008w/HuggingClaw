@@ -2048,9 +2048,9 @@ if [ -f "$EXISTING_CONFIG" ]; then
     while IFS= read -r pkg; do
       [ -z "$pkg" ] && continue
       # Try short name first, then @openclaw/ prefix
-      if openclaw plugins install "$pkg" 2>/dev/null; then
+      if HUGGINGCLAW_CAPTURE_DISABLE=1 hc_env_without_gateway_preloads openclaw plugins install "$pkg" 2>/dev/null; then
         echo "  Installed: $pkg"
-      elif openclaw plugins install "@openclaw/$pkg" 2>/dev/null; then
+      elif HUGGINGCLAW_CAPTURE_DISABLE=1 hc_env_without_gateway_preloads openclaw plugins install "@openclaw/$pkg" 2>/dev/null; then
         echo "  Installed: @openclaw/$pkg"
       else
         echo "  Warning: could not install $pkg"
@@ -2073,7 +2073,11 @@ hc_run_startup_command() {
 
   echo "[startup:${source_label}] $command_text"
   set +e
-  HUGGINGCLAW_CAPTURE_DISABLE=1 hc_env_without_gateway_preloads bash -lc "$command_text"
+  # Run boot commands in a clean non-login shell.  Do not source ~/.bashrc:
+  # those interactive wrappers are only for commands typed by users later in
+  # the terminal, and replaying workspace/startup.sh through them can change
+  # command semantics or re-capture already-saved commands.
+  HUGGINGCLAW_CAPTURE_DISABLE=1 hc_env_without_gateway_preloads bash --noprofile --norc -c "$command_text"
   local rc=$?
   set -e
   if [ "$rc" -eq 0 ]; then
@@ -2094,18 +2098,17 @@ hc_run_startup_script() {
   local script_file
   script_file=$(mktemp "/tmp/huggingclaw-startup-${source_label//[^A-Za-z0-9_.-]/_}.XXXXXX.sh")
   {
-    # Load HuggingClaw's install wrappers for env-provided scripts too, so
-    # `apt install`, `pip install`, `npm install -g`, and OpenClaw plugin
-    # installs behave the same way as they do in the interactive shell.
+    # Keep boot scripts raw and deterministic. Interactive install-capture
+    # wrappers live in ~/.bashrc for terminal sessions only; startup scripts
+    # should not be wrapped because they are already explicit boot commands.
     echo 'export HUGGINGCLAW_CAPTURE_DISABLE=1'
-    echo '[ -f /home/node/.bashrc ] && . /home/node/.bashrc'
     printf '%s\n' "$script_text"
   } > "$script_file"
   chmod 700 "$script_file"
 
   echo "[startup:${source_label}] running script (${script_file})"
   set +e
-  hc_env_without_gateway_preloads bash "$script_file"
+  hc_env_without_gateway_preloads bash --noprofile --norc "$script_file"
   local rc=$?
   set -e
   rm -f "$script_file"
@@ -2212,7 +2215,7 @@ if [ -n "${HUGGINGCLAW_APT_PACKAGES:-}" ]; then
   _HC_APT_NORM=$(printf '%s' "$HUGGINGCLAW_APT_PACKAGES" | tr ',\n\r' '   ' | tr -s ' ')
   read -r -a HC_APT_PACKAGES <<< "$_HC_APT_NORM"
   if command -v sudo >/dev/null 2>&1; then
-    if sudo apt-get update && sudo apt-get install -y "${HC_APT_PACKAGES[@]}"; then
+    if HUGGINGCLAW_CAPTURE_DISABLE=1 sudo apt-get update && HUGGINGCLAW_CAPTURE_DISABLE=1 sudo apt-get install -y "${HC_APT_PACKAGES[@]}"; then
       echo "HUGGINGCLAW_APT_PACKAGES install complete."
     else
       HC_STARTUP_FAILURES=$((HC_STARTUP_FAILURES + 1))
@@ -2227,7 +2230,7 @@ if [ -n "${HUGGINGCLAW_PIP_PACKAGES:-}" ]; then
   echo "Installing Python packages from HUGGINGCLAW_PIP_PACKAGES..."
   _HC_PIP_NORM=$(printf '%s' "$HUGGINGCLAW_PIP_PACKAGES" | tr ',\n\r' '   ' | tr -s ' ')
   read -r -a HC_PIP_PACKAGES <<< "$_HC_PIP_NORM"
-  if hc_env_without_gateway_preloads python3 -m pip install --user --break-system-packages "${HC_PIP_PACKAGES[@]}"; then
+  if HUGGINGCLAW_CAPTURE_DISABLE=1 hc_env_without_gateway_preloads python3 -m pip install --user --break-system-packages "${HC_PIP_PACKAGES[@]}"; then
     echo "HUGGINGCLAW_PIP_PACKAGES install complete."
   else
     HC_STARTUP_FAILURES=$((HC_STARTUP_FAILURES + 1))
@@ -2238,7 +2241,7 @@ if [ -n "${HUGGINGCLAW_NPM_PACKAGES:-}" ]; then
   echo "Installing global npm packages from HUGGINGCLAW_NPM_PACKAGES..."
   _HC_NPM_NORM=$(printf '%s' "$HUGGINGCLAW_NPM_PACKAGES" | tr ',\n\r' '   ' | tr -s ' ')
   read -r -a HC_NPM_PACKAGES <<< "$_HC_NPM_NORM"
-  if hc_env_without_gateway_preloads npm install -g "${HC_NPM_PACKAGES[@]}"; then
+  if HUGGINGCLAW_CAPTURE_DISABLE=1 hc_env_without_gateway_preloads npm install -g "${HC_NPM_PACKAGES[@]}"; then
     echo "HUGGINGCLAW_NPM_PACKAGES install complete."
   else
     HC_STARTUP_FAILURES=$((HC_STARTUP_FAILURES + 1))
@@ -2249,7 +2252,7 @@ if [ -n "${HUGGINGCLAW_OPENCLAW_PLUGINS:-}" ]; then
   echo "Installing OpenClaw plugins from HUGGINGCLAW_OPENCLAW_PLUGINS..."
   _HC_PLUGINS_NORM=$(printf '%s' "$HUGGINGCLAW_OPENCLAW_PLUGINS" | tr ',\n\r' '   ' | tr -s ' ')
   read -r -a HC_OPENCLAW_PLUGINS <<< "$_HC_PLUGINS_NORM"
-  if hc_env_without_gateway_preloads openclaw plugins install "${HC_OPENCLAW_PLUGINS[@]}"; then
+  if HUGGINGCLAW_CAPTURE_DISABLE=1 hc_env_without_gateway_preloads openclaw plugins install "${HC_OPENCLAW_PLUGINS[@]}"; then
     echo "HUGGINGCLAW_OPENCLAW_PLUGINS install complete."
   else
     HC_STARTUP_FAILURES=$((HC_STARTUP_FAILURES + 1))
@@ -2259,7 +2262,7 @@ fi
 
 # ── Fix config before running startup commands ──
 if [ "${AUTO_DOCTOR:-false}" = "true" ]; then
-  openclaw doctor --fix || true
+  HUGGINGCLAW_CAPTURE_DISABLE=1 hc_env_without_gateway_preloads openclaw doctor --fix || true
 fi
 
 # ── Arbitrary startup commands from HF Variables/Secrets ──
@@ -2340,6 +2343,33 @@ hc_openclaw_maintenance_with_optional_config() {
   fi
 }
 
+whatsapp_runtime_dir_has_dist() {
+  local dir="${1:-}"
+  [ -n "$dir" ] && [ -d "$dir" ] || return 1
+  # Official @openclaw/whatsapp currently ships dist/setup-entry.js and
+  # dist/index.js, but accept equivalent JS/MJS/CJS builds and package.json
+  # entrypoints so a harmless packaging extension does not look "broken".
+  local has_setup_entry="false"
+  local has_index_entry="false"
+  if find "$dir/dist" -maxdepth 1 -type f \( -name 'setup-entry.js' -o -name 'setup-entry.mjs' -o -name 'setup-entry.cjs' \) 2>/dev/null | grep -q .; then
+    has_setup_entry="true"
+  fi
+  if find "$dir/dist" -maxdepth 1 -type f \( -name 'index.js' -o -name 'index.mjs' -o -name 'index.cjs' \) 2>/dev/null | grep -q .; then
+    has_index_entry="true"
+  fi
+  if [ "$has_setup_entry" = "true" ] && [ "$has_index_entry" = "true" ]; then
+    return 0
+  fi
+  if [ -f "$dir/openclaw.plugin.json" ] || [ -f "$dir/package.json" ]; then
+    local main_file
+    main_file=$(jq -r '(.main // .module // .exports["."] // .exports.import // .exports.require // empty)' "$dir/package.json" 2>/dev/null | head -n 1 || true)
+    if [ -n "$main_file" ] && [ -f "$dir/$main_file" ]; then
+      return 0
+    fi
+  fi
+  return 1
+}
+
 whatsapp_plugin_runtime_ok() {
   # Check both the bare and scoped install paths that OpenClaw uses across
   # stable/beta releases.  The scoped path (@openclaw/whatsapp) is used when
@@ -2348,7 +2378,7 @@ whatsapp_plugin_runtime_ok() {
   local ext_dir_scoped="/home/node/.openclaw/extensions/@openclaw/whatsapp"
 
   for dir in "$ext_dir" "$ext_dir_scoped"; do
-    if [ -f "$dir/dist/setup-entry.js" ] && [ -f "$dir/dist/index.js" ]; then
+    if whatsapp_runtime_dir_has_dist "$dir"; then
       return 0
     fi
   done
@@ -2365,20 +2395,19 @@ whatsapp_plugin_runtime_ok() {
   # runtime was healthy, letting the gateway start with `enabled=true` and
   # missing dist files → crash loop.
   if command -v openclaw >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
-    local inspect_json
-    inspect_json=$(hc_openclaw_maintenance plugins inspect whatsapp --runtime --json 2>/dev/null) || true
-    if [ -n "$inspect_json" ]; then
-      local root_dir
-      root_dir=$(printf '%s' "$inspect_json" \
-        | jq -r '(.rootDir // .root // .dir // .path // empty)' 2>/dev/null || true)
-      if [ -n "$root_dir" ] && \
-         [ -f "$root_dir/dist/setup-entry.js" ] && \
-         [ -f "$root_dir/dist/index.js" ]; then
-        return 0
+    local inspect_id inspect_json root_dir
+    for inspect_id in whatsapp @openclaw/whatsapp clawhub:@openclaw/whatsapp; do
+      inspect_json=$(hc_openclaw_maintenance plugins inspect "$inspect_id" --runtime --json 2>/dev/null) || true
+      if [ -n "$inspect_json" ]; then
+        root_dir=$(printf '%s' "$inspect_json" \
+          | jq -r '(.rootDir // .root // .dir // .path // .runtime.rootDir // .runtime.root // .runtime.dir // .runtime.path // empty)' 2>/dev/null \
+          | head -n 1 || true)
+        if whatsapp_runtime_dir_has_dist "$root_dir"; then
+          return 0
+        fi
       fi
-    fi
+    done
   fi
-
   return 1
 }
 
@@ -2403,8 +2432,17 @@ install_whatsapp_plugin_runtime() {
   local config="/home/node/.openclaw/openclaw.json"
   local install_config=""
   if [ -f "$config" ]; then
-    install_config="$(mktemp)"
-    cp "$config" "$install_config" 2>/dev/null || install_config=""
+    # Keep the temporary installer config inside the real OpenClaw home. Some
+    # OpenClaw builds derive managed plugin roots from OPENCLAW_CONFIG_PATH;
+    # a /tmp config can download the plugin into /tmp instead of
+    # /home/node/.openclaw, making the official install appear successful while
+    # the gateway still cannot find the runtime.
+    mkdir -p /home/node/.openclaw
+    install_config="$(mktemp /home/node/.openclaw/.whatsapp-install-config.XXXXXX.json)"
+    if ! cp "$config" "$install_config" 2>/dev/null; then
+      rm -f "$install_config" 2>/dev/null || true
+      install_config=""
+    fi
     if [ -n "$install_config" ] && [ -f "$install_config" ]; then
       # Use a temporary installer-only config so the user's real WhatsApp
       # channel settings (dmPolicy/allowFrom/group rules/session choices) are
@@ -2437,6 +2475,8 @@ install_whatsapp_plugin_runtime() {
     installed_ok=true
   elif hc_openclaw_maintenance_with_optional_config "$install_config" plugins install "@openclaw/whatsapp" >> /tmp/openclaw-whatsapp-plugin-install.log 2>&1; then
     installed_ok=true
+  elif hc_openclaw_maintenance_with_optional_config "$install_config" plugins install "whatsapp" >> /tmp/openclaw-whatsapp-plugin-install.log 2>&1; then
+    installed_ok=true
   else
     # If an install record already exists but its payload is broken/missing,
     # OpenClaw's documented path is update/repair rather than blind reinstall.
@@ -2445,12 +2485,14 @@ install_whatsapp_plugin_runtime() {
       installed_ok=true
     elif hc_openclaw_maintenance_with_optional_config "$install_config" plugins update @openclaw/whatsapp >> /tmp/openclaw-whatsapp-plugin-install.log 2>&1; then
       installed_ok=true
+    elif hc_openclaw_maintenance_with_optional_config "$install_config" plugins update clawhub:@openclaw/whatsapp >> /tmp/openclaw-whatsapp-plugin-install.log 2>&1; then
+      installed_ok=true
     fi
   fi
 
   if [ "$installed_ok" != "true" ]; then
     rm -f "$install_config" 2>/dev/null || true
-    echo "Warning: failed to install/update @openclaw/whatsapp; see /tmp/openclaw-whatsapp-plugin-install.log. WhatsApp will stay configured but disabled for this boot so the saved channel settings are preserved." >&2
+    echo "Warning: failed to install/update @openclaw/whatsapp; see /tmp/openclaw-whatsapp-plugin-install.log. WHATSAPP_ENABLED=true is preserved; not removing or disabling the saved WhatsApp plugin/channel config." >&2
     return 1
   fi
 
@@ -2461,13 +2503,13 @@ install_whatsapp_plugin_runtime() {
           .plugins.installs = ((.plugins.installs // {}) + ($installed[0].plugins.installs // {}))
           | .plugins.entries.whatsapp = (($installed[0].plugins.entries.whatsapp // {}) + (.plugins.entries.whatsapp // {}) + {"enabled": true})
           | .channels.whatsapp = (.channels.whatsapp // {"dmPolicy": "pairing"})
-          | .plugins.allow = (((.plugins.allow // []) + ["whatsapp"]) | unique)
+          | .plugins.allow = (((.plugins.allow // []) + ["whatsapp", "@openclaw/whatsapp"]) | unique)
         ' "$config" > "$config.tmp" 2>/dev/null && mv "$config.tmp" "$config" || rm -f "$config.tmp"
       else
         jq '
           .plugins.entries.whatsapp.enabled = true
           | .channels.whatsapp = (.channels.whatsapp // {"dmPolicy": "pairing"})
-          | .plugins.allow = (((.plugins.allow // []) + ["whatsapp"]) | unique)
+          | .plugins.allow = (((.plugins.allow // []) + ["whatsapp", "@openclaw/whatsapp"]) | unique)
         ' "$config" > "$config.tmp" 2>/dev/null && mv "$config.tmp" "$config" || rm -f "$config.tmp"
       fi
     fi
@@ -2477,7 +2519,7 @@ install_whatsapp_plugin_runtime() {
   fi
 
   rm -f "$install_config" 2>/dev/null || true
-  echo "Warning: @openclaw/whatsapp install/update completed but OpenClaw still reports the runtime as unavailable; WhatsApp will stay configured but disabled for this boot so the saved channel settings are preserved." >&2
+  echo "Warning: @openclaw/whatsapp install/update completed but OpenClaw still reports the runtime as unavailable. WHATSAPP_ENABLED=true is preserved; not removing or disabling the saved WhatsApp plugin/channel config." >&2
   return 1
 }
 repair_broken_whatsapp_plugin_entry() {
@@ -2490,13 +2532,17 @@ repair_broken_whatsapp_plugin_entry() {
     return 0
   fi
 
-  echo "Warning: WhatsApp plugin is enabled but its runtime files are missing/incompatible; disabling WhatsApp plugin for this boot so gateway can start." >&2
-  echo "         Fix by using stable OpenClaw for WhatsApp or reinstalling the official whatsapp plugin, then re-enable WHATSAPP_ENABLED." >&2
+  if [ "$WHATSAPP_ENABLED_NORMALIZED" = "true" ]; then
+    echo "Warning: WhatsApp plugin is enabled but its runtime files are still missing/incompatible after install attempts." >&2
+    echo "         WHATSAPP_ENABLED=true is set, so HuggingClaw will NOT disable WhatsApp or remove plugin allow entries; check /tmp/openclaw-whatsapp-plugin-install.log for the real install blocker." >&2
+    return 0
+  fi
+
+  echo "Warning: WhatsApp plugin is enabled in saved config but WHATSAPP_ENABLED is not true and runtime files are missing/incompatible; disabling only for this boot so gateway can start." >&2
 
   local patched
   patched=$(jq '
     .plugins.entries.whatsapp.enabled = false
-    | .plugins.allow = ((.plugins.allow // []) | map(select(. != "whatsapp" and . != "@openclaw/whatsapp" and . != "clawhub:@openclaw/whatsapp")))
   ' "$config" 2>/dev/null) || {
     echo "Warning: could not patch broken WhatsApp plugin entry; gateway may still reject config." >&2
     return 0
@@ -2675,7 +2721,7 @@ while true; do
   fi
 
   if [ "${AUTO_DOCTOR:-false}" = "true" ]; then
-    openclaw doctor --fix || true
+    HUGGINGCLAW_CAPTURE_DISABLE=1 hc_env_without_gateway_preloads openclaw doctor --fix || true
   fi
   echo "Launching OpenClaw gateway on port ${GATEWAY_PORT}..."
 
