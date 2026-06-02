@@ -612,9 +612,9 @@ const FIELDS = [
     "k": "KEY_INFLIGHT_TTL_MS",
     "lbl": "Key rotation in-flight safety lease (ms)",
     "type": "text",
-    "ph": "300000",
+    "ph": "30000",
     "tag": "advanced",
-    "help": "Clears stale in-flight counters if a streaming/undici request never completes cleanly. Default: 5 minutes."
+    "help": "Marks picked keys stale if no provider headers/completion/error are observed. Default: 30 seconds."
   },
 {
     "g": "Plugins",
@@ -655,6 +655,16 @@ const FIELDS = [
     "ph": "gemini",
     "tag": "advanced",
     "help": "Provider names that should reuse one key until failure/quota exhaustion. Default: gemini."
+  },
+  {
+    "g": "Plugins",
+    "icon": "🔄",
+    "k": "KEY_STICKY_SCOPE",
+    "lbl": "Sticky key scope (auto/provider/model)",
+    "type": "text",
+    "ph": "auto",
+    "tag": "advanced",
+    "help": "Default auto uses per-model sticky buckets for Gemini/per-model providers and provider-level buckets for others."
   },
 {
     "g": "Plugins",
