@@ -56,6 +56,11 @@ const AI_PROVIDER_DOMAINS = [
   // listed in CLOUDFLARE_PROXY_DOMAINS (or wildcard mode is used).
   "generativelanguage.googleapis.com",
   "aiplatform.googleapis.com",
+  // Hugging Face inference/router calls may also carry HF tokens. Keep them
+  // direct by default, but allow explicit proxy opt-in for blocked deployments.
+  "huggingface.co",
+  "router.huggingface.co",
+  "api-inference.huggingface.co",
 ];
 let BLOCKED_DOMAINS;
 if (PROXY_ALL) {
@@ -86,9 +91,7 @@ if (PROXY_URL) {
         normalized === "::1" ||
         normalized === "0.0.0.0" ||
         normalized === proxy.hostname ||
-        normalized.endsWith(".hf.space") ||
-        normalized.endsWith(".huggingface.co") ||
-        normalized === "huggingface.co";
+        normalized.endsWith(".hf.space");
 
       if (isInternal) return false;
 
