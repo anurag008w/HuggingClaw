@@ -15,6 +15,9 @@
  *   LLM_API_KEY_FALLBACK_ENABLED true/false            (default true)
  *   KEY_ROTATOR_LOG_LEVEL      info/debug/silent       (default info)
  *   KEY_ROTATOR_VERBOSE_PICKS  true/false              (default false)
+ *     Verbose pick diagnostics are written to stdout so HF/Space logs do not
+ *     label normal rotation decisions as process errors. Real warnings/errors
+ *     still use stderr.
  */
 
 const http  = require('node:http');
@@ -35,6 +38,7 @@ const LOG_LEVEL = RAW_LOG_LEVEL || (
 const log  = (...a) => { if (LOG_LEVEL !== 'silent') console.error(...a); };
 const warn = (...a) => { if (LOG_LEVEL !== 'silent') console.warn(...a); };
 const debug = (...a) => { if (LOG_LEVEL === 'debug') console.error(...a); };
+const verbosePickLog = (...a) => { if (LOG_LEVEL === 'debug' && VERBOSE_PICKS) console.log(...a); };
 
 // Prevent one logical request from being rotated multiple times when transports
 // are stacked (global fetch → undici dispatch → node:http, or nested undici
@@ -443,8 +447,10 @@ function getKeyExpiry(p, key, model) {
   return expiry;
 }
 
-function stickyBucket(model) {
-  return model || '__default__';
+function stickyBucketForProvider(p, model) {
+  const rawScope = String(process.env.KEY_STICKY_SCOPE || 'provider').trim().toLowerCase();
+  const scope = rawScope === 'model' || rawScope === 'per-model' ? 'model' : 'provider';
+  return scope === 'provider' ? '__provider__' : (model || '__default__');
 }
 
 function isStickyProvider(p) {
@@ -453,18 +459,18 @@ function isStickyProvider(p) {
 
 function rememberStickyKey(p, model, key) {
   if (!isStickyProvider(p) || !key) return;
-  p.stickyKeys.set(stickyBucket(model), key);
+  p.stickyKeys.set(stickyBucketForProvider(p, model), key);
 }
 
 function clearStickyKey(p, key, model) {
   if (!p?.stickyKeys || !key) return;
   if (model) {
-    const bucket = stickyBucket(model);
+    const bucket = stickyBucketForProvider(p, model);
     if (p.stickyKeys.get(bucket) === key) p.stickyKeys.delete(bucket);
     // Also clear the ambiguous fallback bucket if this key was selected before
     // a Gemini OpenAI-compatible request body revealed its model.  Do not clear
     // other model buckets: Gemini quota failures are model-scoped.
-    const fallbackBucket = stickyBucket(null);
+    const fallbackBucket = stickyBucketForProvider(p, null);
     if (p.stickyKeys.get(fallbackBucket) === key) p.stickyKeys.delete(fallbackBucket);
     return;
   }
@@ -475,9 +481,58 @@ function clearStickyKey(p, key, model) {
 
 function promoteStickyKeyModel(p, key, fromModel, toModel) {
   if (!isStickyProvider(p) || !key || !toModel) return;
-  const fromBucket = stickyBucket(fromModel);
+  const fromBucket = stickyBucketForProvider(p, fromModel);
   if (p.stickyKeys.get(fromBucket) === key) p.stickyKeys.delete(fromBucket);
   rememberStickyKey(p, toModel, key);
+}
+
+
+function modelProviderToRotatorProviderName(model) {
+  const provider = String(model || '').split('/')[0].toLowerCase();
+  const aliases = {
+    google: 'gemini',
+    gemini: 'gemini',
+    'google-vertex': 'gemini',
+    moonshot: 'kimi-moonshot',
+    'kimi-coding': 'kimi-moonshot',
+    qwen: 'modelstudio',
+    dashscope: 'modelstudio',
+    modelstudio: 'modelstudio',
+    mistralai: 'mistral',
+    'x-ai': 'xai',
+    'z-ai': 'zai',
+    'z.ai': 'zai',
+    zhipu: 'zai',
+    bigmodel: 'zai',
+    'volcengine-plan': 'volcengine',
+    'byteplus-plan': 'byteplus',
+    'opencode-go': 'opencode',
+    'github-copilot': 'github-copilot',
+    'vercel-ai-gateway': 'vercel-ai-gateway',
+  };
+  return aliases[provider] || provider;
+}
+
+function configuredRouteProviderNames() {
+  const explicit = String(process.env.KEY_LLM_FALLBACK_PROVIDERS || '').trim();
+  if (explicit) {
+    const values = explicit.split(/[\n\r,\s]+/).map(s => s.trim().toLowerCase()).filter(Boolean);
+    if (values.includes('*') || values.includes('all')) return null;
+    return new Set(values.map(modelProviderToRotatorProviderName));
+  }
+
+  const models = [process.env.LLM_MODEL || '', ...String(process.env.LLM_FALLBACK_MODELS || '')
+    .split(/[\n\r,]+/)
+    .map(s => s.trim())]
+    .filter(Boolean);
+  if (!models.length) return null;
+  return new Set(models.map(modelProviderToRotatorProviderName).filter(Boolean));
+}
+
+const LLM_FALLBACK_PROVIDER_SET = configuredRouteProviderNames();
+function shouldUseLlmFallbackForProvider(p) {
+  if (!p || p.name === 'synthetic') return false;
+  return !LLM_FALLBACK_PROVIDER_SET || LLM_FALLBACK_PROVIDER_SET.has(String(p.name || '').toLowerCase());
 }
 
 const providerState = PROVIDERS.map(p => {
@@ -505,14 +560,15 @@ const providerState = PROVIDERS.map(p => {
     ...extraKeys,
   );
   const hasDedicated = dedicatedKeys.length > 0;
+  const useLlmFallback = !hasDedicated && llmFallbackEnabled && shouldUseLlmFallbackForProvider(p);
   const keys = hasDedicated
     ? dedicatedKeys
-    : (llmFallbackEnabled ? normalizeKeys(process.env.LLM_API_KEY || '') : []);
+    : (useLlmFallback ? normalizeKeys(process.env.LLM_API_KEY || '') : []);
 
   if (hasDedicated)
     debug(`[key-rotator] ${p.name}: ${keys.length} key${keys.length === 1 ? '' : 's'}`);
   else if (!keys.length)
-    debug(`[key-rotator] No keys for provider "${p.name}"`);
+    verbosePickLog(`[key-rotator] No keys for provider "${p.name}"`);
 
   // keyState: Map<keyString, {strikes, blacklistedUntil}>
   const keyState = new Map(keys.map(k => [k, makeKeyState()]));
@@ -545,7 +601,7 @@ const fallbackCount = providerState.filter(p => {
       p.extraEnvSingular,
     ),
   );
-  return ded.length === 0 && p.keys.length > 0;
+  return ded.length === 0 && p.keys.length > 0 && shouldUseLlmFallbackForProvider(p);
 }).length;
 if (fallbackCount > 0)
   debug(`[key-rotator] ${fallbackCount} provider(s) using LLM_API_KEY fallback`);
@@ -815,10 +871,10 @@ function nextKey(p, model) {
   const total = p.keys.length;
 
   if (isStickyProvider(p)) {
-    const stickyKey = p.stickyKeys.get(stickyBucket(model));
+    const stickyKey = p.stickyKeys.get(stickyBucketForProvider(p, model));
     if (stickyKey && p.keys.includes(stickyKey) && isActive(p, stickyKey, model)) {
       const inflight = p.inFlight.get(stickyKey) || 0;
-      if (VERBOSE_PICKS) debug(`[key-rotator] ${p.name}: sticky picked ${keySlot(p, stickyKey)}${keyMask(stickyKey)}${model ? ` model=${model}` : ''} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
+      verbosePickLog(`[key-rotator] ${p.name}: sticky picked ${keySlot(p, stickyKey)}${keyMask(stickyKey)}${model ? ` model=${model}` : ''} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
       if (inflight >= MAX_INFLIGHT_PER_KEY) {
         warn(`[key-rotator] ${p.name}: sticky key saturated, still reusing ${keySlot(p, stickyKey)}${keyMask(stickyKey)}${model ? ` model=${model}` : ''} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY} until it fails/exhausts`);
         emitEvent('sticky_saturated_reuse', p, stickyKey, { model, inflight: inflight + 1, maxInflight: MAX_INFLIGHT_PER_KEY });
@@ -843,7 +899,7 @@ function nextKey(p, model) {
       if (inflight < MAX_INFLIGHT_PER_KEY) {
         p.idx = (i + 1) % total;   // next call starts AFTER the key we just picked
         rememberStickyKey(p, model, key);
-        if (VERBOSE_PICKS) debug(`[key-rotator] ${p.name}: picked ${keySlot(p, key)}${keyMask(key)}${model ? ` model=${model}` : ''}${isStickyProvider(p) ? ' (sticky until failure)' : ''} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
+        verbosePickLog(`[key-rotator] ${p.name}: picked ${keySlot(p, key)}${keyMask(key)}${model ? ` model=${model}` : ''}${isStickyProvider(p) ? ' (sticky until failure)' : ''} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
         emitEvent('pick', p, key, { model, inflight: inflight + 1, maxInflight: MAX_INFLIGHT_PER_KEY, sticky: isStickyProvider(p) });
         return { key, waitMs: 0 };
       }
@@ -1416,6 +1472,12 @@ function uGetHeader(headers, name) {
       if (String(headers[i]).toLowerCase() === lower) return String(headers[i + 1] || '');
     return '';
   }
+  if (headers && typeof headers.get === 'function') {
+    try {
+      const value = headers.get(name) ?? headers.get(lower);
+      if (value != null) return String(value);
+    } catch (_) {}
+  }
   if (headers && typeof headers === 'object') {
     for (const k of Object.keys(headers))
       if (k.toLowerCase() === lower) return String(headers[k] || '');
@@ -1442,6 +1504,17 @@ function uSetHeader(headers, name, value) {
     }
     if (!found) out.push(name, value);
     return out;
+  }
+  if (headers && typeof headers.set === 'function') {
+    try {
+      const out = typeof Headers !== 'undefined' && headers instanceof Headers
+        ? new Headers(headers)
+        : headers instanceof Map
+          ? new Map(headers)
+          : headers;
+      out.set(name, value);
+      return out;
+    } catch (_) {}
   }
   // Plain object: case-insensitive replace
   const out = {};
@@ -1483,13 +1556,18 @@ function wrapUndiciHandler(handler, provider, key, inFlightToken, getModel) {
     try { return parseProviderErrorInfo(Buffer.concat(errorChunks).toString('utf8')); } catch (_) { return null; }
   };
   const handleHeadersStatus = (force = false) => {
-    if (statusHandled || !statusCode) return;
-    // Success is emitted immediately for observability. Ambiguous 4xx provider
-    // errors (notably Gemini/Google 403 quota) wait until onComplete so their
-    // JSON error body can decide model-scoped quota vs global auth suspension.
-    if (!force && statusNeedsErrorBodyForScope(statusCode)) return;
+    if (statusHandled || !statusCode) return false;
+    // Success and unambiguous failures are emitted as soon as headers arrive.
+    // Long/streaming LLM responses may keep the body open longer than the
+    // in-flight TTL, so waiting for onComplete can produce false
+    // inflight_timeout events even though the provider already accepted the
+    // request. Ambiguous 4xx provider errors (notably Gemini/Google 403 quota)
+    // still wait until onComplete so their JSON body can decide model-scoped
+    // quota vs global auth suspension.
+    if (!force && statusNeedsErrorBodyForScope(statusCode)) return false;
     statusHandled = true;
     try { handleStatus(provider, key, statusCode, currentModel(), retryAfterMs, currentErrorInfo()); } catch (_) {}
+    return true;
   };
   const settle = (fn) => {
     if (settled) return;
@@ -1503,7 +1581,11 @@ function wrapUndiciHandler(handler, provider, key, inFlightToken, getModel) {
         return function (sc, headers, resume, statusMessage) {
           statusCode = sc;
           retryAfterMs = parseRetryAfterMs(uGetHeader(headers, 'retry-after'));
-          handleHeadersStatus();
+          if (handleHeadersStatus()) {
+            // Header-level status accounting is complete; close the in-flight
+            // token now so successful streams do not later report timeouts.
+            settle(() => {});
+          }
           return target.onHeaders ? target.onHeaders.call(target, sc, headers, resume, statusMessage) : undefined;
         };
       }
@@ -1642,13 +1724,9 @@ function patchUndiciDispatch(proto, tag) {
   };
 
   proto.dispatch._kRotatorPatched = true;
-  // FIX: Also set cloudflare-proxy's flag on rotatorDispatch so CF proxy doesn't
-  // re-wrap us on the next require() hook fire.  Without this, CF proxy sees
-  // _patched=undefined on rotatorDispatch → wraps again → rotator sees
-  // _kRotatorPatched=undefined on the new cfDispatch → wraps again → infinite
-  // mutual re-wrapping that produces hundreds of "dispatch patched" log entries
-  // on startup and builds an ever-growing call chain on every undici require.
-  proto.dispatch._patched = true;
+  // Do not set cloudflare-proxy's own _cfProxyPatched marker here: the proxy
+  // must still be able to wrap this dispatch if it loads after the rotator.
+  // Cloudflare uses a WeakSet plus _cfProxyPatched to avoid re-wrapping.
   debug(`[key-rotator] undici (${tag}) dispatch patched`);
 }
 
@@ -1927,10 +2005,10 @@ function patchHttpModule(mod) {
             const existingHeaders = (typeof options === 'object' && !(options instanceof URL) && options.headers)
               ? options.headers
               : (hasOptionsArg ? args[1].headers : undefined);
-            const authVal = existingHeaders?.['authorization'] || existingHeaders?.['Authorization'] || '';
+            const authVal = uGetHeader(existingHeaders || {}, 'authorization');
             const needsBearer = isGeminiOpenAICompatPath(u.pathname) || String(authVal).toLowerCase().startsWith('bearer ');
             const patchedHeaders = needsBearer
-              ? setAuthHeader(typeof existingHeaders === 'object' ? { ...existingHeaders } : existingHeaders, key)
+              ? setAuthHeader(existingHeaders, key)
               : existingHeaders;
             if (typeof options === 'object' && !(options instanceof URL)) {
               args[0] = { ...options, path:`${u.pathname}${u.search}`, headers: patchedHeaders };
@@ -2089,7 +2167,6 @@ function patchHttpModule(mod) {
       return req;
     };
     Object.defineProperty(mod.get, '_kRotatorPatched', { value: true });
-    Object.defineProperty(mod.get, '_patched', { value: true });
   }
 }
 
@@ -2104,7 +2181,7 @@ if (hasProviderKeys) {
   patchUndici();         // covers OpenClaw gateway's bundled undici AI calls
   startDiagnostics();
 
-  debug(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:${formatHours(PERM_SUSPEND_MS)}h (cap 16h) max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} max-retry-after:${MAX_RETRY_AFTER_MS/1000}s max-key-wait:${MAX_KEY_WAIT_MS/1000}s diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'} log-level:${LOG_LEVEL} verbose-picks:${VERBOSE_PICKS ? 'on' : 'off'} suspended-last-resort:${USE_SUSPENDED_KEY_AS_LAST_RESORT ? 'on' : 'off'} per-model-providers:${providerState.filter(p => p.perModelLimits).map(p => p.name).join(',') || 'none'} model-from-body:on model-sniff-max:${REQUEST_MODEL_SNIFF_MAX_BYTES} error-sniff-max:${ERROR_BODY_SNIFF_MAX_BYTES} inflight-ttl:${INFLIGHT_TTL_MS}ms sticky-until-failure:${STICKY_UNTIL_FAILURE ? 'on' : 'off'} sticky-providers:${[...STICKY_PROVIDER_SET].join(',') || 'none'}`);
+  debug(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:${formatHours(PERM_SUSPEND_MS)}h (cap 16h) max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} max-retry-after:${MAX_RETRY_AFTER_MS/1000}s max-key-wait:${MAX_KEY_WAIT_MS/1000}s diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'} log-level:${LOG_LEVEL} verbose-picks:${VERBOSE_PICKS ? 'on' : 'off'} suspended-last-resort:${USE_SUSPENDED_KEY_AS_LAST_RESORT ? 'on' : 'off'} per-model-providers:${providerState.filter(p => p.perModelLimits).map(p => p.name).join(',') || 'none'} model-from-body:on model-sniff-max:${REQUEST_MODEL_SNIFF_MAX_BYTES} error-sniff-max:${ERROR_BODY_SNIFF_MAX_BYTES} inflight-ttl:${INFLIGHT_TTL_MS}ms sticky-until-failure:${STICKY_UNTIL_FAILURE ? 'on' : 'off'} sticky-scope:${String(process.env.KEY_STICKY_SCOPE || 'provider').trim().toLowerCase() || 'provider'} sticky-providers:${[...STICKY_PROVIDER_SET].join(',') || 'none'} llm-fallback-providers:${LLM_FALLBACK_PROVIDER_SET ? [...LLM_FALLBACK_PROVIDER_SET].join(',') : 'all'}`);
   emitEvent('rotator_loaded', null, null, {
     providers: providerState.filter(p => p.keys.length).map(p => ({ name: p.name, total: p.keys.length })),
     logLevel: LOG_LEVEL,
@@ -2113,7 +2190,9 @@ if (hasProviderKeys) {
     modelSniffMaxBytes: REQUEST_MODEL_SNIFF_MAX_BYTES,
     errorBodySniffMaxBytes: ERROR_BODY_SNIFF_MAX_BYTES,
     stickyUntilFailure: STICKY_UNTIL_FAILURE,
+    stickyScope: String(process.env.KEY_STICKY_SCOPE || 'provider').trim().toLowerCase() || 'provider',
     stickyProviders: [...STICKY_PROVIDER_SET],
+    llmFallbackProviders: LLM_FALLBACK_PROVIDER_SET ? [...LLM_FALLBACK_PROVIDER_SET] : ['*'],
   });
 } else {
   debug('[key-rotator] skipped — no provider keys configured');

@@ -621,6 +621,28 @@ function modelProviderToRotatorProvider(model) {
   return aliases[provider] || provider;
 }
 
+
+function configuredRouteProviderNames() {
+  const explicit = String(process.env.KEY_LLM_FALLBACK_PROVIDERS || "").trim();
+  if (explicit) {
+    const values = explicit.split(/[\n\r,\s]+/).map((v) => v.trim().toLowerCase()).filter(Boolean);
+    if (values.includes("*") || values.includes("all")) return null;
+    return new Set(values.map(modelProviderToRotatorProvider));
+  }
+  const models = [LLM_MODEL || "", ...String(process.env.LLM_FALLBACK_MODELS || "")
+    .split(/[\n\r,]+/)
+    .map((s) => s.trim())]
+    .filter(Boolean);
+  if (!models.length) return null;
+  return new Set(models.map(modelProviderToRotatorProvider).filter(Boolean));
+}
+
+function shouldShowLlmFallbackProvider(name) {
+  if (name === "synthetic") return false;
+  const routeProviders = configuredRouteProviderNames();
+  return !routeProviders || routeProviders.has(String(name || "").toLowerCase());
+}
+
 function keyRotatorRuntimeSummary() {
   const primary = LLM_MODEL || "";
   const fallbackModels = String(process.env.LLM_FALLBACK_MODELS || "")
@@ -681,11 +703,11 @@ function providerKeySummary() {
       if (vals.length) used.push(name);
       for (const val of vals) if (!seen.has(val)) { seen.add(val); keys.push(val); }
     }
-    // Keep /key-rotator aligned with multi-provider-key-rotator.cjs: when a
-    // provider has no dedicated pool and fallback is enabled, the rotator uses
-    // LLM_API_KEY for that provider. Show that fallback pool instead of making
-    // the dashboard look disconnected or empty.
-    if (!keys.length && fallbackKeys.length) {
+    // Keep /key-rotator aligned with multi-provider-key-rotator.cjs: show
+    // LLM_API_KEY fallback only for providers on the active OpenClaw route
+    // (or KEY_LLM_FALLBACK_PROVIDERS), so unrelated providers do not appear
+    // as dummy configured sessions.
+    if (!keys.length && fallbackKeys.length && shouldShowLlmFallbackProvider(p.name)) {
       used.push("LLM_API_KEY fallback");
       for (const val of fallbackKeys) if (!seen.has(val)) { seen.add(val); keys.push(val); }
     }
