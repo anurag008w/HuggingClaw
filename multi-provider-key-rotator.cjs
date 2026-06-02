@@ -112,7 +112,7 @@ const EVENT_LOG_FILE = process.env.KEY_ROTATOR_EVENT_LOG_FILE || '/tmp/huggingcl
 const EVENT_LOG_MAX_BYTES = Math.max(64 * 1024, parseInt(process.env.KEY_ROTATOR_EVENT_LOG_MAX_BYTES || '', 10) || 1024 * 1024);
 const INFLIGHT_TTL_MS = Math.max(
   30_000,
-  Math.min(30 * 60_000, parseInt(process.env.KEY_INFLIGHT_TTL_MS || '', 10) || 5 * 60_000),
+  Math.min(30 * 60_000, parseInt(process.env.KEY_INFLIGHT_TTL_MS || '', 10) || 30_000),
 );
 const REQUEST_MODEL_SNIFF_MAX_BYTES = Math.max(
   16 * 1024,
@@ -141,6 +141,7 @@ const STICKY_PROVIDER_SET = new Set(
     .map(s => s.trim().toLowerCase())
     .filter(Boolean),
 );
+const UNKNOWN_MODEL_SCOPE = '__unknown_model__';
 
 // Maximum ms to respect from a Retry-After header.
 // Old cap was 10s — too low for Gemini/Google which often returns 60s+.
@@ -440,17 +441,27 @@ function isGeminiOpenAICompatPath(pathOrUrl) {
  */
 function getKeyExpiry(p, key, model) {
   let expiry = p.keyState.get(key)?.blacklistedUntil ?? 0;
-  if (p.modelKeyState && model) {
-    const mks = p.modelKeyState.get(`${key}:${model}`);
+  if (p.modelKeyState) {
+    const mks = p.modelKeyState.get(`${key}:${scopedModelKey(model)}`);
     if (mks && mks.blacklistedUntil > expiry) expiry = mks.blacklistedUntil;
   }
   return expiry;
 }
 
 function stickyBucketForProvider(p, model) {
-  const rawScope = String(process.env.KEY_STICKY_SCOPE || 'provider').trim().toLowerCase();
-  const scope = rawScope === 'model' || rawScope === 'per-model' ? 'model' : 'provider';
-  return scope === 'provider' ? '__provider__' : (model || '__default__');
+  const rawScope = String(process.env.KEY_STICKY_SCOPE || '').trim().toLowerCase();
+  const scope = rawScope === 'provider'
+    ? 'provider'
+    : rawScope === 'model' || rawScope === 'per-model'
+      ? 'model'
+      : p?.perModelLimits
+        ? 'model'
+        : 'provider';
+  return scope === 'provider' ? '__provider__' : (model || UNKNOWN_MODEL_SCOPE);
+}
+
+function scopedModelKey(model) {
+  return model || UNKNOWN_MODEL_SCOPE;
 }
 
 function isStickyProvider(p) {
@@ -464,14 +475,17 @@ function rememberStickyKey(p, model, key) {
 
 function clearStickyKey(p, key, model) {
   if (!p?.stickyKeys || !key) return;
-  if (model) {
+  const hasScopedModelArg = arguments.length >= 3;
+  if (hasScopedModelArg) {
     const bucket = stickyBucketForProvider(p, model);
     if (p.stickyKeys.get(bucket) === key) p.stickyKeys.delete(bucket);
     // Also clear the ambiguous fallback bucket if this key was selected before
     // a Gemini OpenAI-compatible request body revealed its model.  Do not clear
     // other model buckets: Gemini quota failures are model-scoped.
-    const fallbackBucket = stickyBucketForProvider(p, null);
-    if (p.stickyKeys.get(fallbackBucket) === key) p.stickyKeys.delete(fallbackBucket);
+    if (model) {
+      const fallbackBucket = stickyBucketForProvider(p, null);
+      if (p.stickyKeys.get(fallbackBucket) === key) p.stickyKeys.delete(fallbackBucket);
+    }
     return;
   }
   for (const [bucket, stickyKey] of p.stickyKeys) {
@@ -632,14 +646,15 @@ function isActive(p, key, model) {
   }
 
   // ── Per-model check (gemini etc.) ──────────────────────────────────────────
-  if (p.modelKeyState && model) {
-    const mKey = `${key}:${model}`;
+  if (p.modelKeyState) {
+    const scopedModel = scopedModelKey(model);
+    const mKey = `${key}:${scopedModel}`;
     const mks  = p.modelKeyState.get(mKey);
     if (mks && mks.blacklistedUntil !== 0) {
-      if (Date.now() < mks.blacklistedUntil) return false;   // blocked for this model
+      if (Date.now() < mks.blacklistedUntil) return false;   // blocked for this model/unknown-model scope
       mks.blacklistedUntil = 0;
       if (mks.strikes > 0) mks.strikes -= 1;
-      debug(`[key-rotator] ${p.name}: ${keySlot(p, key)}${keyMask(key)} back in pool for model=${model} (strikes now ${mks.strikes})`);
+      debug(`[key-rotator] ${p.name}: ${keySlot(p, key)}${keyMask(key)} back in pool for model=${model || 'unknown'} (strikes now ${mks.strikes})`);
     }
   }
 
@@ -668,8 +683,9 @@ function recordFailure(p, key, model, retryAfterMs) {
   // our exponential cooldown.  This prevents hammering a key before its quota resets.
   const serverHintMs = (typeof retryAfterMs === 'number' && retryAfterMs > 0) ? retryAfterMs : 0;
 
-  if (p.modelKeyState && model) {
-    const mKey = `${key}:${model}`;
+  if (p.modelKeyState) {
+    const scopedModel = scopedModelKey(model);
+    const mKey = `${key}:${scopedModel}`;
     let mks = p.modelKeyState.get(mKey);
     if (!mks) { mks = makeKeyState(); p.modelKeyState.set(mKey, mks); }
 
@@ -689,9 +705,9 @@ function recordFailure(p, key, model, retryAfterMs) {
     // ★ Set blacklistedUntil FIRST so it is always written even if the log below throws.
     mks.blacklistedUntil = Math.max(mks.blacklistedUntil || 0, Date.now() + cooldown);
     if (isPerm)
-      warn(`[key-rotator] ${p.name}: ${keySlot(p, key)}${keyMask(key)} model=${model} hit ${MAX_STRIKES} strikes — suspended for ${formatHours(PERM_SUSPEND_MS)}h (quota likely exhausted for this model)`);
+      warn(`[key-rotator] ${p.name}: ${keySlot(p, key)}${keyMask(key)} model=${model || 'unknown'} hit ${MAX_STRIKES} strikes — suspended for ${formatHours(PERM_SUSPEND_MS)}h (quota likely exhausted for this model)`);
     else
-      debug(`[key-rotator] ${p.name}: ${keySlot(p, key)}${keyMask(key)} model=${model} strike ${mks.strikes}/${MAX_STRIKES} — backoff ${Math.round(cooldown / 1000)}s${serverHintMs > 0 ? ` (server-hint ${Math.round(serverHintMs/1000)}s)` : ''}`);
+      debug(`[key-rotator] ${p.name}: ${keySlot(p, key)}${keyMask(key)} model=${model || 'unknown'} strike ${mks.strikes}/${MAX_STRIKES} — backoff ${Math.round(cooldown / 1000)}s${serverHintMs > 0 ? ` (server-hint ${Math.round(serverHintMs/1000)}s)` : ''}`);
     return;
   }
 
@@ -725,15 +741,18 @@ function recordFailure(p, key, model, retryAfterMs) {
  * Called on transient retryable failures (non-quota/rate):
  * applies short cooldown without incrementing strikes.
  */
-function recordTransientFailure(p, key) {
-  let ks = p.keyState.get(key);
-  if (!ks) { ks = makeKeyState(); p.keyState.set(key, ks); }
+function recordTransientFailure(p, key, model = null) {
+  if (!p || !key) return;
+  const stateMap = p.modelKeyState ? p.modelKeyState : p.keyState;
+  const stateKey = p.modelKeyState ? `${key}:${scopedModelKey(model)}` : key;
+  let ks = stateMap.get(stateKey);
+  if (!ks) { ks = makeKeyState(); stateMap.set(stateKey, ks); }
   ks.lastFailureAt = Date.now();
   const jitter = 1 + ((Math.random() * 2 - 1) * (COOLDOWN_JITTER_PCT / 100));
   const cooldown = Math.max(1000, Math.round(BASE_COOLDOWN_MS * jitter));
   ks.blacklistedUntil = Math.max(ks.blacklistedUntil || 0, Date.now() + cooldown);
   const secs = Math.round(cooldown / 1000);
-  debug(`[key-rotator] ${p.name}: ${keySlot(p, key)}${keyMask(key)} transient backoff ${secs}s (strikes unchanged)`);
+  debug(`[key-rotator] ${p.name}: ${keySlot(p, key)}${keyMask(key)} transient backoff ${secs}s${p.modelKeyState ? ` model=${model || 'unknown'}` : ''} (strikes unchanged)`);
 }
 
 /**
@@ -754,15 +773,17 @@ function recordSuccess(p, key, model) {
     }
   }
 
-  // Also clear model-specific state on success
-  if (p.modelKeyState && model) {
-    const mKey = `${key}:${model}`;
+  // Also clear model-specific state on success.  If model is still unknown,
+  // clear only the unknown-model scope; never clear other Gemini model buckets.
+  if (p.modelKeyState) {
+    const scopedModel = scopedModelKey(model);
+    const mKey = `${key}:${scopedModel}`;
     const mks  = p.modelKeyState.get(mKey);
     if (mks && (mks.strikes > 0 || mks.blacklistedUntil > 0)) {
       mks.strikes = 0;
       mks.lastFailureAt = 0;
       mks.blacklistedUntil = 0;
-      debug(`[key-rotator] ${p.name}: ${keySlot(p, key)}${keyMask(key)} model=${model} recovered — strikes reset`);
+      debug(`[key-rotator] ${p.name}: ${keySlot(p, key)}${keyMask(key)} model=${model || 'unknown'} recovered — strikes reset`);
     }
   }
 }
@@ -802,9 +823,9 @@ function removeInFlightToken(p, key, token) {
   else p.inFlightTimers.delete(key);
 }
 
-function beginInFlight(p, key) {
+function beginInFlight(p, key, model = null) {
   if (!p || !key) return null;
-  const token = { done: false, timer: null };
+  const token = { done: false, timer: null, model: model || null };
   p.inFlight.set(key, (p.inFlight.get(key) || 0) + 1);
   token.timer = setTimeout(() => {
     if (token.done) return;
@@ -813,7 +834,14 @@ function beginInFlight(p, key) {
     const before = p.inFlight.get(key) || 0;
     if (before > 0) {
       const next = decrementInFlight(p, key);
-      emitEvent('inflight_timeout', p, key, { inflightBefore: before, inflightAfter: next, ttlMs: INFLIGHT_TTL_MS });
+      // A timeout here means the rotator saw a key pick but no provider headers,
+      // completion, or transport error before the TTL.  For OpenClaw failover
+      // paths this otherwise leaves the sticky bucket pinned forever and the
+      // dashboard shows only "pending/no response observed".  Treat it as a
+      // transient key failure so the next request can rotate to another key.
+      try { recordTransientFailure(p, key, token.model || null); } catch (_) {}
+      try { clearStickyKey(p, key, token.model || null); } catch (_) {}
+      emitEvent('inflight_timeout', p, key, { model: token.model || null, inflightBefore: before, inflightAfter: next, ttlMs: INFLIGHT_TTL_MS, classifiedAs: 'transient' });
     }
   }, INFLIGHT_TTL_MS);
   token.timer.unref?.();
@@ -874,16 +902,25 @@ function nextKey(p, model) {
     const stickyKey = p.stickyKeys.get(stickyBucketForProvider(p, model));
     if (stickyKey && p.keys.includes(stickyKey) && isActive(p, stickyKey, model)) {
       const inflight = p.inFlight.get(stickyKey) || 0;
-      verbosePickLog(`[key-rotator] ${p.name}: sticky picked ${keySlot(p, stickyKey)}${keyMask(stickyKey)}${model ? ` model=${model}` : ''} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
-      if (inflight >= MAX_INFLIGHT_PER_KEY) {
-        warn(`[key-rotator] ${p.name}: sticky key saturated, still reusing ${keySlot(p, stickyKey)}${keyMask(stickyKey)}${model ? ` model=${model}` : ''} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY} until it fails/exhausts`);
-        emitEvent('sticky_saturated_reuse', p, stickyKey, { model, inflight: inflight + 1, maxInflight: MAX_INFLIGHT_PER_KEY });
-      } else {
+      if (inflight < MAX_INFLIGHT_PER_KEY) {
+        verbosePickLog(`[key-rotator] ${p.name}: sticky picked ${keySlot(p, stickyKey)}${keyMask(stickyKey)}${model ? ` model=${model}` : ''} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
         emitEvent('sticky_pick', p, stickyKey, { model, inflight: inflight + 1, maxInflight: MAX_INFLIGHT_PER_KEY });
+        return { key: stickyKey, waitMs: 0 };
       }
-      return { key: stickyKey, waitMs: 0 };
+
+      // Do not keep piling requests onto one sticky key when OpenClaw has not
+      // produced provider headers/completion/error for previous picks.  That was
+      // the real cause of dashboards like "pick 14, pending 14, rate 0": sticky
+      // mode intentionally reused the same key even after it was saturated.  Clear
+      // the bucket and let the normal active-key scan below choose another key;
+      // only if every key is saturated will the fallback path reuse the least-bad
+      // candidate.
+      warn(`[key-rotator] ${p.name}: sticky key saturated, rotating away from ${keySlot(p, stickyKey)}${keyMask(stickyKey)}${model ? ` model=${model}` : ''} inflight=${inflight}/${MAX_INFLIGHT_PER_KEY}`);
+      emitEvent('sticky_saturated_rotate', p, stickyKey, { model, inflight, maxInflight: MAX_INFLIGHT_PER_KEY });
+      clearStickyKey(p, stickyKey, model);
+    } else if (stickyKey) {
+      clearStickyKey(p, stickyKey, model);
     }
-    if (stickyKey) clearStickyKey(p, stickyKey, model);
   }
 
   let bestPick = null;
@@ -907,7 +944,7 @@ function nextKey(p, model) {
       // Score: prefer keys with fewer recent failures and lower in-flight count.
       // For perModelLimits, also factor in model-specific strike count.
       const ks  = p.keyState.get(key) || makeKeyState();
-      const mks = (p.modelKeyState && model) ? (p.modelKeyState.get(`${key}:${model}`) || makeKeyState()) : makeKeyState();
+      const mks = p.modelKeyState ? (p.modelKeyState.get(`${key}:${scopedModelKey(model)}`) || makeKeyState()) : makeKeyState();
       const recentFailPenalty =
         (ks.lastFailureAt  > 0 && (Date.now() - ks.lastFailureAt)  < FAILURE_DECAY_MS ? 100 : 0) +
         (mks.lastFailureAt > 0 && (Date.now() - mks.lastFailureAt) < FAILURE_DECAY_MS ? 100 : 0);
@@ -1047,9 +1084,11 @@ function handleStatus(p, key, status, model, retryAfterMs, errorInfo) {
   }
 
   if (failureKind === 'transient') {
-    // Transient server errors are not model-specific — penalise key globally.
-    recordTransientFailure(p, key);
-    clearStickyKey(p, key);
+    // For per-model providers, keep transient cooldowns scoped to the current
+    // model/unknown-model bucket so one Gemini model does not suppress the key
+    // for all other Gemini models.
+    recordTransientFailure(p, key, model);
+    clearStickyKey(p, key, model);
     warn(`[key-rotator] ${p.name}: transient status=${status} on ${keySlot(p, key)}${keyMask(key)}`);
     emitEvent('transient_status', p, key, { status, model, ...errorFields });
     return;
@@ -1061,7 +1100,7 @@ function handleStatus(p, key, status, model, retryAfterMs, errorInfo) {
   }
 }
 
-function handleTransportError(p, key, err) {
+function handleTransportError(p, key, err, model = null) {
   if (!p || !key) return;
   // Node.js 18+ undici fetch throws TypeError: "fetch failed" where the actual
   // network error code lives in err.cause.code (e.g. ECONNRESET, ETIMEDOUT,
@@ -1071,12 +1110,22 @@ function handleTransportError(p, key, err) {
     ? String(err.code || err.cause?.code).toUpperCase()
     : '';
   const name = String(err?.name || '');
+  const message = String(err?.message || err?.cause?.message || '');
+  const haystack = `${name} ${message}`.toLowerCase();
+  const looksRateOrQuota = /rate.?limit|too.?many|quota|resource.?exhaust|usage.?limit|insufficient.?quota|capacity.?exceeded|tokens?.?per|requests?.?per|rate_limit|rate.?limited|userratelimit|dailylimit|limitexceeded/.test(haystack);
+  if (looksRateOrQuota) {
+    recordFailure(p, key, model, 0);
+    clearStickyKey(p, key, model);
+    warn(`[key-rotator] ${p.name}: transport/failover quota signal ${name || 'Error'}${code ? ` code=${code}` : ''} on ${keySlot(p, key)}${keyMask(key)}${model ? ` model=${model}` : ''}`);
+    emitEvent('rate_limited', p, key, { model, name: name || 'Error', code, source: 'transport_error', message: message.slice(0, 240) });
+    return;
+  }
   const retryable = classifyRetryableFailure(undefined, code) || name === 'AbortError';
   if (retryable) {
-    recordTransientFailure(p, key);
-    clearStickyKey(p, key);
-    warn(`[key-rotator] ${p.name}: retryable network ${name || 'Error'}${code ? ` code=${code}` : ''} on ${keySlot(p, key)}${keyMask(key)}`);
-    emitEvent('network_retryable', p, key, { name: name || 'Error', code });
+    recordTransientFailure(p, key, model);
+    clearStickyKey(p, key, model);
+    warn(`[key-rotator] ${p.name}: retryable network ${name || 'Error'}${code ? ` code=${code}` : ''} on ${keySlot(p, key)}${keyMask(key)}${model ? ` model=${model}` : ''}`);
+    emitEvent('network_retryable', p, key, { model, name: name || 'Error', code });
   }
 }
 
@@ -1614,7 +1663,7 @@ function wrapUndiciHandler(handler, provider, key, inFlightToken, getModel) {
           } finally {
             // User handlers may throw/rethrow; the rotator still owns the
             // in-flight token and transport error classification for this key.
-            settle(() => { if (!statusHandled) { try { handleTransportError(provider, key, err); } catch (_) {} } });
+            settle(() => { if (!statusHandled) { try { handleTransportError(provider, key, err, currentModel()); } catch (_) {} } });
           }
         };
       }
@@ -1680,7 +1729,7 @@ function patchUndiciDispatch(proto, tag) {
 
         if (key) {
           usedKey = key; usedProvider = provider; usedModel = model;
-          usedInFlight = beginInFlight(usedProvider, usedKey);
+          usedInFlight = beginInFlight(usedProvider, usedKey, usedModel);
 
           const newOptions = { ...options };
 
@@ -1709,7 +1758,7 @@ function patchUndiciDispatch(proto, tag) {
             usedProvider,
             usedKey,
             () => usedModel,
-            (model) => { usedModel = model; },
+            (model) => { usedModel = model; if (usedInFlight) usedInFlight.model = model; },
           );
           const wrappedHandler = wrapUndiciHandler(handler, usedProvider, usedKey, usedInFlight, () => usedModel);
           return runInRotatorRequest(() => origDispatch.call(this, newOptions, wrappedHandler));
@@ -1892,7 +1941,7 @@ function patchFetch() {
           if (key) {
             triedKeys.add(key);
             usedKey = key;
-            usedInFlight = beginInFlight(provider, key);
+            usedInFlight = beginInFlight(provider, key, model);
           }
 
           const attemptArgs = buildAttemptFetchArgs(input, init, provider, usedKey);
@@ -1923,7 +1972,7 @@ function patchFetch() {
         } catch (err) {
           lastErr = err;
           try { endInFlight(provider, usedKey, usedInFlight); } catch (_) {}
-          try { handleTransportError(provider, usedKey, err); } catch (_) {}
+          try { handleTransportError(provider, usedKey, err, model); } catch (_) {}
           // Node.js 18+ undici fetch: network errors are TypeError("fetch failed")
           // where the real code (ECONNRESET, ETIMEDOUT, ENOTFOUND …) is in
           // err.cause.code.  Check that first before falling back to err.code.
@@ -1989,7 +2038,7 @@ function patchHttpModule(mod) {
 
         if (key) {
           usedKey = key; usedProvider = provider; usedModel = model;
-          usedInFlight = beginInFlight(usedProvider, usedKey);
+          usedInFlight = beginInFlight(usedProvider, usedKey, usedModel);
           if (provider.queryParam) {
             const hasOptionsArg = args[1] && typeof args[1] === 'object' && typeof args[1].on !== 'function';
             const u = new URL(String(
@@ -2081,6 +2130,7 @@ function patchHttpModule(mod) {
                   const bodyModel = extractModelFromBody(fullBody);
                   if (bodyModel) {
                     usedModel = bodyModel;
+                    if (usedInFlight) usedInFlight.model = usedModel;
                     promoteStickyKeyModel(usedProvider, usedKey, null, usedModel);
                     emitEvent('model_detected', usedProvider, usedKey, { model: usedModel, source: 'http_request_body' });
                     debug(`[key-rotator] ${usedProvider.name}: (http) model extracted from request body: ${usedModel}`);
@@ -2149,7 +2199,7 @@ function patchHttpModule(mod) {
       req.on('error', (err) => {
         try { endInFlight(usedProvider, usedKey, usedInFlight); } catch (_) {}
         if (!statusHandled) {
-          try { handleTransportError(usedProvider, usedKey, err); } catch (_) {}
+          try { handleTransportError(usedProvider, usedKey, err, usedModel); } catch (_) {}
         }
       });
     }
@@ -2181,7 +2231,7 @@ if (hasProviderKeys) {
   patchUndici();         // covers OpenClaw gateway's bundled undici AI calls
   startDiagnostics();
 
-  debug(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:${formatHours(PERM_SUSPEND_MS)}h (cap 16h) max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} max-retry-after:${MAX_RETRY_AFTER_MS/1000}s max-key-wait:${MAX_KEY_WAIT_MS/1000}s diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'} log-level:${LOG_LEVEL} verbose-picks:${VERBOSE_PICKS ? 'on' : 'off'} suspended-last-resort:${USE_SUSPENDED_KEY_AS_LAST_RESORT ? 'on' : 'off'} per-model-providers:${providerState.filter(p => p.perModelLimits).map(p => p.name).join(',') || 'none'} model-from-body:on model-sniff-max:${REQUEST_MODEL_SNIFF_MAX_BYTES} error-sniff-max:${ERROR_BODY_SNIFF_MAX_BYTES} inflight-ttl:${INFLIGHT_TTL_MS}ms sticky-until-failure:${STICKY_UNTIL_FAILURE ? 'on' : 'off'} sticky-scope:${String(process.env.KEY_STICKY_SCOPE || 'provider').trim().toLowerCase() || 'provider'} sticky-providers:${[...STICKY_PROVIDER_SET].join(',') || 'none'} llm-fallback-providers:${LLM_FALLBACK_PROVIDER_SET ? [...LLM_FALLBACK_PROVIDER_SET].join(',') : 'all'}`);
+  debug(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:${formatHours(PERM_SUSPEND_MS)}h (cap 16h) max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} max-retry-after:${MAX_RETRY_AFTER_MS/1000}s max-key-wait:${MAX_KEY_WAIT_MS/1000}s diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'} log-level:${LOG_LEVEL} verbose-picks:${VERBOSE_PICKS ? 'on' : 'off'} suspended-last-resort:${USE_SUSPENDED_KEY_AS_LAST_RESORT ? 'on' : 'off'} per-model-providers:${providerState.filter(p => p.perModelLimits).map(p => p.name).join(',') || 'none'} model-from-body:on model-sniff-max:${REQUEST_MODEL_SNIFF_MAX_BYTES} error-sniff-max:${ERROR_BODY_SNIFF_MAX_BYTES} inflight-ttl:${INFLIGHT_TTL_MS}ms sticky-until-failure:${STICKY_UNTIL_FAILURE ? 'on' : 'off'} sticky-scope:${String(process.env.KEY_STICKY_SCOPE || 'auto').trim().toLowerCase() || 'auto'} sticky-providers:${[...STICKY_PROVIDER_SET].join(',') || 'none'} llm-fallback-providers:${LLM_FALLBACK_PROVIDER_SET ? [...LLM_FALLBACK_PROVIDER_SET].join(',') : 'all'}`);
   emitEvent('rotator_loaded', null, null, {
     providers: providerState.filter(p => p.keys.length).map(p => ({ name: p.name, total: p.keys.length })),
     logLevel: LOG_LEVEL,
@@ -2190,7 +2240,7 @@ if (hasProviderKeys) {
     modelSniffMaxBytes: REQUEST_MODEL_SNIFF_MAX_BYTES,
     errorBodySniffMaxBytes: ERROR_BODY_SNIFF_MAX_BYTES,
     stickyUntilFailure: STICKY_UNTIL_FAILURE,
-    stickyScope: String(process.env.KEY_STICKY_SCOPE || 'provider').trim().toLowerCase() || 'provider',
+    stickyScope: String(process.env.KEY_STICKY_SCOPE || 'auto').trim().toLowerCase() || 'auto',
     stickyProviders: [...STICKY_PROVIDER_SET],
     llmFallbackProviders: LLM_FALLBACK_PROVIDER_SET ? [...LLM_FALLBACK_PROVIDER_SET] : ['*'],
   });
