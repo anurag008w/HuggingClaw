@@ -25,6 +25,7 @@ const http  = require('node:http');
 const https = require('node:https');
 const fs    = require('node:fs');
 const path  = require('node:path');
+const crypto = require('node:crypto');
 const { AsyncLocalStorage } = require('node:async_hooks');
 
 const VERBOSE_PICKS = /^(1|true|yes|on)$/i.test(String(process.env.KEY_ROTATOR_VERBOSE_PICKS || '').trim());
@@ -71,6 +72,16 @@ const MAX_STRIKES = Math.max(
 const MAX_INFLIGHT_PER_KEY = Math.max(
   1,
   parseInt(process.env.KEY_MAX_INFLIGHT_PER_KEY || '', 10) || 3,
+);
+// Sticky providers (Gemini by default) are intentionally pinned until the
+// provider returns a real key outcome (success keeps the pin; quota/auth/
+// retryable provider failures clear it). In-flight leases are only local
+// bookkeeping and can expire when a stream/caller stops being observed, so they
+// must not force Gemini to walk the whole key pool. Keep this production-safe by
+// making the behavior explicit and env-tunable for operators who prefer hard
+// concurrency spreading.
+const STICKY_IGNORE_INFLIGHT_SATURATION = !/^(0|false|no|off)$/i.test(
+  String(process.env.KEY_STICKY_IGNORE_INFLIGHT_SATURATION || 'true').trim(),
 );
 const COOLDOWN_JITTER_PCT = Math.min(
   50,
@@ -195,6 +206,10 @@ const formatHours = (ms) => (ms / (60 * 60 * 1000)).toFixed(ms % (60 * 60 * 1000
  * Short keys (≤12 chars) are fully masked as "***".
  */
 const keyMask = (k) => (k && k.length > 12 ? `${k.slice(0, 4)}...${k.slice(-6)}` : '***');
+const keyFingerprint = (k) => {
+  try { return k ? crypto.createHash('sha256').update(String(k)).digest('hex').slice(0, 12) : null; }
+  catch (_) { return null; }
+};
 
 // ─── Provider definitions ────────────────────────────────────────────────────
 
@@ -277,7 +292,7 @@ function emitEvent(type, p, key, extra = {}) {
       ts: new Date().toISOString(),
       type,
       provider: p?.name || extra.provider || 'system',
-      ...(idx >= 0 ? { slot: idx + 1, total: p.keys.length, key: keyMask(key) } : {}),
+      ...(idx >= 0 ? { slot: idx + 1, total: p.keys.length, key: keyMask(key), kid: keyFingerprint(key) } : {}),
       ...extra,
     };
     const dir = path.dirname(EVENT_LOG_FILE);
@@ -394,6 +409,21 @@ function parseProviderErrorInfo(text) {
 
 async function parseResponseErrorInfo(response) {
   if (!response || response.status < 400 || typeof response.clone !== 'function') return null;
+  const deadline = Date.now() + ERROR_BODY_WAIT_MS;
+  const remainingWait = () => Math.max(0, deadline - Date.now());
+  const withDeadline = async (promise) => {
+    const waitMs = remainingWait();
+    if (waitMs <= 0) return { timedOut: true };
+    let timer = null;
+    try {
+      return await Promise.race([
+        promise.then(value => ({ value }), error => ({ error })),
+        new Promise(resolve => { timer = setTimeout(() => resolve({ timedOut: true }), waitMs); }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
   try {
     const clone = response.clone();
     if (clone.body && typeof clone.body.getReader === 'function') {
@@ -402,7 +432,9 @@ async function parseResponseErrorInfo(response) {
       let total = 0;
       try {
         while (total < ERROR_BODY_SNIFF_MAX_BYTES) {
-          const { done, value } = await reader.read();
+          const result = await withDeadline(reader.read());
+          if (result.timedOut || result.error) break;
+          const { done, value } = result.value || {};
           if (done) break;
           const buf = Buffer.isBuffer(value)
             ? value
@@ -416,12 +448,13 @@ async function parseResponseErrorInfo(response) {
           total += slice.length;
         }
       } finally {
-        try { await reader.cancel(); } catch (_) {}
+        try { reader.cancel().catch?.(() => {}); } catch (_) {}
       }
-      return parseProviderErrorInfo(Buffer.concat(chunks).toString('utf8'));
+      return chunks.length ? parseProviderErrorInfo(Buffer.concat(chunks).toString('utf8')) : null;
     }
-    const text = await clone.text();
-    return parseProviderErrorInfo(text.slice(0, ERROR_BODY_SNIFF_MAX_BYTES));
+    const result = await withDeadline(clone.text());
+    if (result.timedOut || result.error || typeof result.value !== 'string') return null;
+    return parseProviderErrorInfo(result.value.slice(0, ERROR_BODY_SNIFF_MAX_BYTES));
   } catch (_) {
     return null;
   }
@@ -479,16 +512,23 @@ function transportErrorInfo(err, status) {
   return info;
 }
 
+function normalizeHttpStatusCode(status) {
+  const n = Number(status);
+  return Number.isFinite(n) ? Math.trunc(n) : 0;
+}
+
 function statusNeedsErrorBodyForScope(status) {
-  // Wait for the body only where provider text can materially change key
-  // health classification (notably Google/Gemini 403 quota vs permission).
-  // 401/402/429/5xx are unambiguous from headers; handling them immediately
-  // avoids 30s lease-expiry noise when OpenClaw aborts/failover stops reading
-  // the error body.
-  return status === 400 || status === 403 || status === 409 || status === 413 || status === 423 || status === 425 || status === 529;
+  status = normalizeHttpStatusCode(status);
+  // Production classification needs provider error bodies for more than Gemini
+  // 403s: many gateways encode quota/auth/transient reasons in JSON even when
+  // the HTTP code is generic (400/404/422/5xx). We still cap the wait with
+  // ERROR_BODY_WAIT_MS, so missing bodies close quickly instead of aging into
+  // lease-only/pending dashboard noise.
+  return status >= 400 && status < 600;
 }
 
 function classifyProviderFailure(p, status, errorInfo) {
+  status = normalizeHttpStatusCode(status);
   const haystack = [
     errorInfo?.code,
     errorInfo?.type,
@@ -501,9 +541,11 @@ function classifyProviderFailure(p, status, errorInfo) {
   const looksAuth = /auth|unauthori[sz]ed|invalid.?api.?key|invalid.?key|permission|forbidden|billing|credit|payment|required/.test(haystack);
   const looksTransient = /overload|temporar|unavailable|timeout|backend|internal|server.?error|try.?again|capacity/.test(haystack);
 
+  if (status >= 100 && status < 400) return 'success';
   if (status === 401) return 'auth';
   if (status === 402) return 'rate';
   if (status === 429) return 'rate';
+  if (status === 529) return looksRateOrQuota ? 'rate' : 'transient';
   // Google/Vertex and some Google APIs can return 403 for quota/rate conditions
   // (rateLimitExceeded / QUOTA_EXCEEDED), while plain 403 remains auth/permission.
   if (status === 403) return looksRateOrQuota ? 'rate' : 'auth';
@@ -1068,22 +1110,28 @@ function nextKey(p, model) {
     const stickyKey = p.stickyKeys.get(stickyBucketForProvider(p, model));
     if (stickyKey && p.keys.includes(stickyKey) && isActive(p, stickyKey, model)) {
       const inflight = p.inFlight.get(stickyKey) || 0;
-      if (inflight < MAX_INFLIGHT_PER_KEY) {
+      if (inflight < MAX_INFLIGHT_PER_KEY || STICKY_IGNORE_INFLIGHT_SATURATION) {
         rememberTaskAffinityKey(p, model, stickyKey);
-        verbosePickLog(`[key-rotator] ${p.name}: sticky picked ${keySlot(p, stickyKey)}${keyMask(stickyKey)}${model ? ` model=${model}` : ''} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
-        emitEvent('sticky_pick', p, stickyKey, { model, inflight: inflight + 1, maxInflight: MAX_INFLIGHT_PER_KEY });
+        const saturated = inflight >= MAX_INFLIGHT_PER_KEY;
+        if (saturated) {
+          // In-flight count is a local safety lease, not a provider verdict.
+          // For sticky providers, only a real provider failure should move the
+          // bucket to a different key; otherwise long streams/abandoned callers
+          // make Gemini appear to "fail" every key by lease expiry alone.
+          warn(`[key-rotator] ${p.name}: sticky key saturated but staying pinned until real provider outcome on ${keySlot(p, stickyKey)}${keyMask(stickyKey)}${model ? ` model=${model}` : ''} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
+          emitEvent('sticky_saturated_reuse', p, stickyKey, { model, inflight: inflight + 1, maxInflight: MAX_INFLIGHT_PER_KEY, sticky: true, reason: 'sticky_until_real_failure' });
+        } else {
+          verbosePickLog(`[key-rotator] ${p.name}: sticky picked ${keySlot(p, stickyKey)}${keyMask(stickyKey)}${model ? ` model=${model}` : ''} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
+          emitEvent('sticky_pick', p, stickyKey, { model, inflight: inflight + 1, maxInflight: MAX_INFLIGHT_PER_KEY });
+        }
         return { key: stickyKey, waitMs: 0 };
       }
 
-      // Do not keep piling requests onto one sticky key when OpenClaw has not
-      // produced provider headers/completion/error for previous picks.  That was
-      // the real cause of dashboards like "pick 14, pending 14, rate 0": sticky
-      // mode intentionally reused the same key even after it was saturated.  Clear
-      // the bucket and let the normal active-key scan below choose another key;
-      // only if every key is saturated will the fallback path reuse the least-bad
-      // candidate.
+      // Operator opted out of strict sticky pinning. In that mode, saturation can
+      // rotate away from the sticky key, but this is no longer the default for
+      // Gemini because lease-only saturation is not a real key failure.
       warn(`[key-rotator] ${p.name}: sticky key saturated, rotating away from ${keySlot(p, stickyKey)}${keyMask(stickyKey)}${model ? ` model=${model}` : ''} inflight=${inflight}/${MAX_INFLIGHT_PER_KEY}`);
-      emitEvent('sticky_saturated_rotate', p, stickyKey, { model, inflight, maxInflight: MAX_INFLIGHT_PER_KEY });
+      emitEvent('sticky_saturated_rotate', p, stickyKey, { model, inflight, maxInflight: MAX_INFLIGHT_PER_KEY, sticky: true, reason: 'operator_opt_out' });
       clearStickyKey(p, stickyKey, model);
     } else if (stickyKey) {
       clearStickyKey(p, stickyKey, model);
@@ -1225,9 +1273,20 @@ function setAuthHeader(headers, key) {
 
 function handleStatus(p, key, status, model, retryAfterMs, errorInfo, extra = {}) {
   if (!p || !key) return;
+  status = normalizeHttpStatusCode(status);
   retryAfterMs = retryAfterMs || errorInfo?.retryAfterMs || 0;
   const failureKind = classifyProviderFailure(p, status, errorInfo);
   const errorFields = { ...providerErrorFields(errorInfo), ...extra };
+
+  // Count every final HTTP success code as success before any key-failure logic.
+  // Some transports/providers can surface 1xx/204/206/304-style successful
+  // completions; these must reset the selected key and show as success in the
+  // manager instead of falling through as an unclassified/no-op outcome.
+  if (failureKind === 'success') {
+    recordSuccess(p, key, model);
+    emitEvent('success', p, key, { status, model, ...errorFields });
+    return;
+  }
 
   if (failureKind === 'auth') {
     // Invalid/expired/unauthorized key — always a global (not model-scoped) blacklist.
@@ -1266,12 +1325,6 @@ function handleStatus(p, key, status, model, retryAfterMs, errorInfo, extra = {}
     clearTaskAffinityKey(p, key, model);
     warn(`[key-rotator] ${p.name}: transient status=${status} on ${keySlot(p, key)}${keyMask(key)}`);
     emitEvent('transient_status', p, key, { status, model, ...errorFields });
-    return;
-  }
-
-  if (status >= 200 && status < 400) {
-    recordSuccess(p, key, model);
-    emitEvent('success', p, key, { status, model });
     return;
   }
 
@@ -1339,7 +1392,15 @@ function handleTransportError(p, key, err, model = null, extra = {}) {
     clearTaskAffinityKey(p, key, model);
     warn(`[key-rotator] ${p.name}: retryable network ${name || 'Error'}${code ? ` code=${code}` : ''} on ${keySlot(p, key)}${keyMask(key)}${model ? ` model=${model}` : ''}`);
     emitEvent('network_retryable', p, key, { model, ...extra, name: name || 'Error', code });
+    return;
   }
+
+  // Always close the dashboard/request lifecycle with a real observed outcome.
+  // Unknown transport errors are not enough evidence to punish or rotate a key,
+  // but emitting nothing leaves the manager showing phantom pending/lease-only
+  // activity and makes sticky providers look broken.
+  warn(`[key-rotator] ${p.name}: transport unknown ${name || 'Error'}${code ? ` code=${code}` : ''} on ${keySlot(p, key)}${keyMask(key)}${model ? ` model=${model}` : ''} (key not penalized)`);
+  emitEvent('transport_unknown', p, key, { model, ...extra, name: name || 'Error', code, message: message.slice(0, 240), classifiedAs: 'non_key_transport_error' });
 }
 
 /**
@@ -2249,14 +2310,23 @@ function patchHttpModule(mod) {
 
     try {
       const options  = args[0];
-      const optionHeaders = options && typeof options === 'object' ? options.headers : undefined;
+      const hasOptionsArg = args[1] && typeof args[1] === 'object' && typeof args[1].on !== 'function';
+      const optionHeaders = (() => {
+        const first = options && typeof options === 'object' ? options.headers : undefined;
+        const second = hasOptionsArg ? args[1].headers : undefined;
+        if (!first) return second;
+        if (!second) return first;
+        return { ...first, ...second };
+      })();
       const provider = resolveProviderForUrl(options, optionHeaders);
 
       if (provider) {
-        // Extract model for per-model-limit providers from the request path.
-        const pathStr = typeof options === 'object' && options.path
-          ? options.path
-          : (typeof options === 'string' || options instanceof URL) ? String(options) : '';
+        // Extract model for per-model-limit providers from the effective request path.
+        const pathStr = hasOptionsArg && args[1].path
+          ? args[1].path
+          : typeof options === 'object' && options.path
+            ? options.path
+            : (typeof options === 'string' || options instanceof URL) ? String(options) : '';
         const model = provider.perModelLimits
           ? (pathStr.match(/\/models\/([^/:?]+)/)?.[1]?.toLowerCase() || null)
           : null;
@@ -2272,12 +2342,20 @@ function patchHttpModule(mod) {
           usedKey = key; usedProvider = provider; usedModel = model;
           usedInFlight = beginInFlight(usedProvider, usedKey, usedModel);
           if (provider.queryParam) {
-            const hasOptionsArg = args[1] && typeof args[1] === 'object' && typeof args[1].on !== 'function';
             const u = new URL(String(
               typeof options === 'string' || options instanceof URL
                 ? options
-                : `https://${options.hostname}${options.path || '/'}`
+                : `${options.protocol || 'https:'}//${options.hostname || options.host || 'localhost'}${options.path || '/'}`
             ));
+            // node:http merges request(url, options) with options taking
+            // precedence, including `path`. If callers pass an override path in
+            // the second arg, inject into that effective path too; otherwise the
+            // key added to the URL arg can be silently discarded by Node.
+            if (hasOptionsArg && args[1].path) {
+              const override = new URL(String(args[1].path), u);
+              u.pathname = override.pathname;
+              u.search = override.search;
+            }
             if (!isGeminiOpenAICompatPath(u.pathname)) u.searchParams.set('key', key);
             // BUG FIX: Google OpenAI-compatible endpoint uses Bearer, not ?key=.
             // Preserve string/URL overload options too; many SDKs call
@@ -2295,18 +2373,31 @@ function patchHttpModule(mod) {
               args[0] = { ...options, path:`${u.pathname}${u.search}`, headers: patchedHeaders };
             } else {
               args[0] = u.toString();
-              if (needsBearer) {
-                if (hasOptionsArg) args[1] = { ...args[1], headers: patchedHeaders };
-                else if (typeof args[1] === 'function') { args[2] = args[1]; args[1] = { headers: patchedHeaders }; }
+              if (hasOptionsArg) {
+                args[1] = {
+                  ...args[1],
+                  path: `${u.pathname}${u.search}`,
+                  ...(needsBearer ? { headers: patchedHeaders } : {}),
+                };
+              } else if (needsBearer) {
+                if (typeof args[1] === 'function') { args[2] = args[1]; args[1] = { headers: patchedHeaders }; }
                 else args[1] = { headers: patchedHeaders };
               }
             }
           } else if (typeof options === 'string' || options instanceof URL) {
             const u = new URL(String(options));
-            const extra = (args[1] && typeof args[1] === 'object' && typeof args[1].on !== 'function') ? args[1] : {};
+            const extra = hasOptionsArg ? args[1] : {};
             args[0] = { protocol:u.protocol, hostname:u.hostname, port:u.port,
                         path:`${u.pathname}${u.search}`, ...extra,
                         headers:setAuthHeader(extra.headers, key) };
+            // We have folded the second options argument into args[0]. Leaving it
+            // in place would call http.request(options, options, cb), where Node
+            // expects the second argument to be the callback and can throw or drop
+            // the real callback for non-query providers such as OpenAI/Anthropic.
+            if (hasOptionsArg) {
+              if (typeof args[2] === 'function') { args[1] = args[2]; args.length = 2; }
+              else { args.length = 1; }
+            }
           } else if (options && typeof options === 'object') {
             args[0] = { ...options, headers:setAuthHeader(options.headers, key) };
           }
@@ -2392,9 +2483,14 @@ function patchHttpModule(mod) {
     if (usedProvider && usedKey) {
       const _emit = req.emit.bind(req);
       let statusHandled = false;
+      let bodyWaitTimer = null;
+      const clearBodyWaitTimer = () => {
+        if (bodyWaitTimer) { clearTimeout(bodyWaitTimer); bodyWaitTimer = null; }
+      };
       const finishStatus = (res, errorInfo) => {
         if (statusHandled) return;
         statusHandled = true;
+        clearBodyWaitTimer();
         const retryAfterMs = parseRetryAfterMs(res?.headers?.['retry-after']);
         try { endInFlight(usedProvider, usedKey, usedInFlight); } catch (_) {}
         try { handleStatus(usedProvider, usedKey, res?.statusCode, usedModel, retryAfterMs, errorInfo, { requestId: usedInFlight?.requestId }); } catch (_) {}
@@ -2420,6 +2516,8 @@ function patchHttpModule(mod) {
                 : null;
               finishStatus(res, errorInfo);
             };
+            bodyWaitTimer = setTimeout(finishWithSniffedBody, ERROR_BODY_WAIT_MS);
+            bodyWaitTimer.unref?.();
             res.on('end', finishWithSniffedBody);
             res.on('close', finishWithSniffedBody);
           } else {
@@ -2463,7 +2561,7 @@ if (hasProviderKeys) {
   patchUndici();         // covers OpenClaw gateway's bundled undici AI calls
   startDiagnostics();
 
-  debug(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:${formatHours(PERM_SUSPEND_MS)}h (cap 16h) max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} max-retry-after:${MAX_RETRY_AFTER_MS/1000}s max-key-wait:${MAX_KEY_WAIT_MS/1000}s diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'} log-level:${LOG_LEVEL} verbose-picks:${VERBOSE_PICKS ? 'on' : 'off'} suspended-last-resort:${USE_SUSPENDED_KEY_AS_LAST_RESORT ? 'on' : 'off'} per-model-providers:${providerState.filter(p => p.perModelLimits).map(p => p.name).join(',') || 'none'} model-from-body:on model-sniff-max:${REQUEST_MODEL_SNIFF_MAX_BYTES} error-sniff-max:${ERROR_BODY_SNIFF_MAX_BYTES} error-body-wait:${ERROR_BODY_WAIT_MS}ms inflight-ttl:${INFLIGHT_TTL_MS}ms task-affinity:${TASK_AFFINITY_MS}ms/${TASK_AFFINITY_MAX_REUSES}reuses sticky-until-failure:${STICKY_UNTIL_FAILURE ? 'on' : 'off'} sticky-scope:${String(process.env.KEY_STICKY_SCOPE || 'auto').trim().toLowerCase() || 'auto'} sticky-providers:${[...STICKY_PROVIDER_SET].join(',') || 'none'} llm-fallback-providers:${LLM_FALLBACK_PROVIDER_SET ? [...LLM_FALLBACK_PROVIDER_SET].join(',') : 'all'}`);
+  debug(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:${formatHours(PERM_SUSPEND_MS)}h (cap 16h) max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} max-retry-after:${MAX_RETRY_AFTER_MS/1000}s max-key-wait:${MAX_KEY_WAIT_MS/1000}s diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'} log-level:${LOG_LEVEL} verbose-picks:${VERBOSE_PICKS ? 'on' : 'off'} suspended-last-resort:${USE_SUSPENDED_KEY_AS_LAST_RESORT ? 'on' : 'off'} per-model-providers:${providerState.filter(p => p.perModelLimits).map(p => p.name).join(',') || 'none'} model-from-body:on model-sniff-max:${REQUEST_MODEL_SNIFF_MAX_BYTES} error-sniff-max:${ERROR_BODY_SNIFF_MAX_BYTES} error-body-wait:${ERROR_BODY_WAIT_MS}ms inflight-ttl:${INFLIGHT_TTL_MS}ms task-affinity:${TASK_AFFINITY_MS}ms/${TASK_AFFINITY_MAX_REUSES}reuses sticky-until-failure:${STICKY_UNTIL_FAILURE ? 'on' : 'off'} sticky-ignore-inflight-saturation:${STICKY_IGNORE_INFLIGHT_SATURATION ? 'on' : 'off'} sticky-scope:${String(process.env.KEY_STICKY_SCOPE || 'auto').trim().toLowerCase() || 'auto'} sticky-providers:${[...STICKY_PROVIDER_SET].join(',') || 'none'} llm-fallback-providers:${LLM_FALLBACK_PROVIDER_SET ? [...LLM_FALLBACK_PROVIDER_SET].join(',') : 'all'}`);
   emitEvent('rotator_loaded', null, null, {
     providers: providerState.filter(p => p.keys.length).map(p => ({ name: p.name, total: p.keys.length })),
     logLevel: LOG_LEVEL,
@@ -2474,6 +2572,7 @@ if (hasProviderKeys) {
     taskAffinityMs: TASK_AFFINITY_MS,
     taskAffinityMaxReuses: TASK_AFFINITY_MAX_REUSES,
     stickyUntilFailure: STICKY_UNTIL_FAILURE,
+    stickyIgnoreInflightSaturation: STICKY_IGNORE_INFLIGHT_SATURATION,
     stickyScope: String(process.env.KEY_STICKY_SCOPE || 'auto').trim().toLowerCase() || 'auto',
     stickyProviders: [...STICKY_PROVIDER_SET],
     llmFallbackProviders: LLM_FALLBACK_PROVIDER_SET ? [...LLM_FALLBACK_PROVIDER_SET] : ['*'],
