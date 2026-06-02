@@ -3,7 +3,8 @@
 /**
  * Multi-provider API key rotator for OpenClaw/HuggingClaw
  * --------------------------------------------------------
- * - Round-robin rotation per provider
+ * - Round-robin rotation per provider for new task windows
+ * - Short same-task affinity avoids spending a new key for each sequential chunk
  * - 429/402 → exponential backoff blacklist per key
  * - After MAX_STRIKES consecutive failures → permanent session blacklist
  * - Successful response → strikes reset
@@ -142,6 +143,23 @@ const STICKY_PROVIDER_SET = new Set(
     .filter(Boolean),
 );
 const UNKNOWN_MODEL_SCOPE = '__unknown_model__';
+
+// Task affinity keeps only a short, bounded burst of sequential non-sticky
+// provider calls on the same key.  OpenClaw/HuggingClaw can split one user task
+// into a few immediate upstream requests (planning/tool/result chunks); pure
+// per-request round-robin would spend a different key for each chunk.  Keep the
+// default conservative so intentional round-robin load balancing resumes after
+// the burst. Sticky providers still use their stronger until-failure pin below.
+const RAW_TASK_AFFINITY_MS = parseInt(process.env.KEY_TASK_AFFINITY_MS || '', 10);
+const TASK_AFFINITY_MS = Math.max(
+  0,
+  Number.isFinite(RAW_TASK_AFFINITY_MS) ? RAW_TASK_AFFINITY_MS : 30_000,
+);
+const RAW_TASK_AFFINITY_MAX_REUSES = parseInt(process.env.KEY_TASK_AFFINITY_MAX_REUSES || '', 10);
+const TASK_AFFINITY_MAX_REUSES = Math.max(
+  0,
+  Number.isFinite(RAW_TASK_AFFINITY_MAX_REUSES) ? RAW_TASK_AFFINITY_MAX_REUSES : 3,
+);
 
 // Maximum ms to respect from a Retry-After header.
 // Old cap was 10s — too low for Gemini/Google which often returns 60s+.
@@ -493,11 +511,70 @@ function clearStickyKey(p, key, model) {
   }
 }
 
+function rememberTaskAffinityKey(p, model, key) {
+  if (!p?.taskAffinity || !key || TASK_AFFINITY_MS <= 0 || TASK_AFFINITY_MAX_REUSES <= 0) return;
+  // Sticky providers already have a stronger until-failure pin.  Do not layer a
+  // second affinity system on top, otherwise diagnostics and expiry semantics
+  // become harder to reason about.
+  if (isStickyProvider(p)) return;
+  p.taskAffinity.set(stickyBucketForProvider(p, model), {
+    key,
+    expiresAt: Date.now() + TASK_AFFINITY_MS,
+    remainingReuses: TASK_AFFINITY_MAX_REUSES,
+  });
+}
+
+function clearTaskAffinityKey(p, key, model) {
+  if (!p?.taskAffinity || !key) return;
+  const hasScopedModelArg = arguments.length >= 3;
+  if (hasScopedModelArg) {
+    const bucket = stickyBucketForProvider(p, model);
+    if (p.taskAffinity.get(bucket)?.key === key) p.taskAffinity.delete(bucket);
+    if (model) {
+      const fallbackBucket = stickyBucketForProvider(p, null);
+      if (p.taskAffinity.get(fallbackBucket)?.key === key) p.taskAffinity.delete(fallbackBucket);
+    }
+    return;
+  }
+  for (const [bucket, entry] of p.taskAffinity) {
+    if (entry?.key === key) p.taskAffinity.delete(bucket);
+  }
+}
+
+function pickAffinitizedKey(p, model) {
+  if (!p?.taskAffinity || TASK_AFFINITY_MS <= 0 || TASK_AFFINITY_MAX_REUSES <= 0) return null;
+  if (isStickyProvider(p)) return null;
+  const bucket = stickyBucketForProvider(p, model);
+  const entry = p.taskAffinity.get(bucket);
+  if (!entry?.key) return null;
+  if (Date.now() > entry.expiresAt || (entry.remainingReuses || 0) <= 0) {
+    p.taskAffinity.delete(bucket);
+    return null;
+  }
+  const key = entry.key;
+  if (!p.keys.includes(key) || !isActive(p, key, model)) {
+    p.taskAffinity.delete(bucket);
+    return null;
+  }
+  const inflight = p.inFlight.get(key) || 0;
+  if (inflight >= MAX_INFLIGHT_PER_KEY) return null;
+  entry.remainingReuses -= 1;
+  entry.expiresAt = Date.now() + TASK_AFFINITY_MS;
+  if (entry.remainingReuses <= 0) p.taskAffinity.delete(bucket);
+  verbosePickLog(`[key-rotator] ${p.name}: task-affinity picked ${keySlot(p, key)}${keyMask(key)}${model ? ` model=${model}` : ''} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY} remaining-reuses=${Math.max(0, entry.remainingReuses)}`);
+  emitEvent('task_affinity_pick', p, key, { model, inflight: inflight + 1, maxInflight: MAX_INFLIGHT_PER_KEY, ttlMs: TASK_AFFINITY_MS, remainingReuses: Math.max(0, entry.remainingReuses), sticky: false });
+  return { key, waitMs: 0 };
+}
+
 function promoteStickyKeyModel(p, key, fromModel, toModel) {
-  if (!isStickyProvider(p) || !key || !toModel) return;
+  if (!key || !toModel) return;
   const fromBucket = stickyBucketForProvider(p, fromModel);
-  if (p.stickyKeys.get(fromBucket) === key) p.stickyKeys.delete(fromBucket);
-  rememberStickyKey(p, toModel, key);
+  if (isStickyProvider(p)) {
+    if (p.stickyKeys.get(fromBucket) === key) p.stickyKeys.delete(fromBucket);
+    rememberStickyKey(p, toModel, key);
+  }
+  if (p.taskAffinity?.get(fromBucket)?.key === key) p.taskAffinity.delete(fromBucket);
+  rememberTaskAffinityKey(p, toModel, key);
 }
 
 
@@ -596,7 +673,7 @@ const providerState = PROVIDERS.map(p => {
   // FIX: idx tracks position in the ACTIVE (non-permanently-removed) pool.
   // We never remove keys from the array — we just skip blacklisted ones.
   // idx advances only when a key is ACTUALLY picked (no drift for skipped keys).
-  return { ...p, keys, keyState, modelKeyState, inFlight: new Map(), inFlightTimers: new Map(), idx: 0, stickyKeys: new Map() };
+  return { ...p, keys, keyState, modelKeyState, inFlight: new Map(), inFlightTimers: new Map(), idx: 0, stickyKeys: new Map(), taskAffinity: new Map() };
 });
 
 // LLM_API_KEY fallback summary
@@ -834,14 +911,11 @@ function beginInFlight(p, key, model = null) {
     const before = p.inFlight.get(key) || 0;
     if (before > 0) {
       const next = decrementInFlight(p, key);
-      // A timeout here means the rotator saw a key pick but no provider headers,
-      // completion, or transport error before the TTL.  For OpenClaw failover
-      // paths this otherwise leaves the sticky bucket pinned forever and the
-      // dashboard shows only "pending/no response observed".  Treat it as a
-      // transient key failure so the next request can rotate to another key.
-      try { recordTransientFailure(p, key, token.model || null); } catch (_) {}
-      try { clearStickyKey(p, key, token.model || null); } catch (_) {}
-      emitEvent('inflight_timeout', p, key, { model: token.model || null, inflightBefore: before, inflightAfter: next, ttlMs: INFLIGHT_TTL_MS, classifiedAs: 'transient' });
+      // A timeout here only releases the safety lease.  It must not be treated
+      // as a key failure: one logical OpenClaw task can legitimately hold an
+      // upstream stream longer than the lease TTL, and rotating/blacklisting on
+      // a bookkeeping timeout can split that task across multiple API keys.
+      emitEvent('inflight_timeout', p, key, { model: token.model || null, inflightBefore: before, inflightAfter: next, ttlMs: INFLIGHT_TTL_MS, classifiedAs: 'lease_cleanup' });
     }
   }, INFLIGHT_TTL_MS);
   token.timer.unref?.();
@@ -898,11 +972,15 @@ function nextKey(p, model) {
 
   const total = p.keys.length;
 
+  const affinitized = pickAffinitizedKey(p, model);
+  if (affinitized) return affinitized;
+
   if (isStickyProvider(p)) {
     const stickyKey = p.stickyKeys.get(stickyBucketForProvider(p, model));
     if (stickyKey && p.keys.includes(stickyKey) && isActive(p, stickyKey, model)) {
       const inflight = p.inFlight.get(stickyKey) || 0;
       if (inflight < MAX_INFLIGHT_PER_KEY) {
+        rememberTaskAffinityKey(p, model, stickyKey);
         verbosePickLog(`[key-rotator] ${p.name}: sticky picked ${keySlot(p, stickyKey)}${keyMask(stickyKey)}${model ? ` model=${model}` : ''} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
         emitEvent('sticky_pick', p, stickyKey, { model, inflight: inflight + 1, maxInflight: MAX_INFLIGHT_PER_KEY });
         return { key: stickyKey, waitMs: 0 };
@@ -936,6 +1014,7 @@ function nextKey(p, model) {
       if (inflight < MAX_INFLIGHT_PER_KEY) {
         p.idx = (i + 1) % total;   // next call starts AFTER the key we just picked
         rememberStickyKey(p, model, key);
+        rememberTaskAffinityKey(p, model, key);
         verbosePickLog(`[key-rotator] ${p.name}: picked ${keySlot(p, key)}${keyMask(key)}${model ? ` model=${model}` : ''}${isStickyProvider(p) ? ' (sticky until failure)' : ''} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
         emitEvent('pick', p, key, { model, inflight: inflight + 1, maxInflight: MAX_INFLIGHT_PER_KEY, sticky: isStickyProvider(p) });
         return { key, waitMs: 0 };
@@ -957,6 +1036,7 @@ function nextKey(p, model) {
   if (bestPick) {
     p.idx = (bestPick.i + 1) % total;
     rememberStickyKey(p, model, bestPick.key);
+    rememberTaskAffinityKey(p, model, bestPick.key);
     warn(`[key-rotator] ${p.name}: all active keys saturated, reusing ${keySlot(p, bestPick.key)}${keyMask(bestPick.key)}${model ? ` model=${model}` : ''} inflight=${bestPick.inflight + 1}/${MAX_INFLIGHT_PER_KEY}`);
     emitEvent('saturated_reuse', p, bestPick.key, { model, inflight: bestPick.inflight + 1, maxInflight: MAX_INFLIGHT_PER_KEY, sticky: isStickyProvider(p) });
     return { key: bestPick.key, waitMs: 0 };
@@ -992,6 +1072,7 @@ function nextKey(p, model) {
     warn(`[key-rotator] ${p.name}: all ${total} key(s) suspended — using soonest-recovering key ${keySlot(p, chosenKey)}${keyMask(chosenKey)}`);
 
   rememberStickyKey(p, model, chosenKey);
+  rememberTaskAffinityKey(p, model, chosenKey);
   emitEvent('all_suspended_pick', p, chosenKey, { model, waitMs, sticky: isStickyProvider(p) });
   return { key: chosenKey, waitMs };
 }
@@ -1066,6 +1147,7 @@ function handleStatus(p, key, status, model, retryAfterMs, errorInfo) {
     ks.lastFailureAt = Date.now();
     ks.blacklistedUntil = Date.now() + PERM_SUSPEND_MS;
     clearStickyKey(p, key);
+    clearTaskAffinityKey(p, key);
     warn(`[key-rotator] ${p.name}: ${keySlot(p, key)}${keyMask(key)} auth-failed (${status}) — suspended for ${formatHours(PERM_SUSPEND_MS)} h`);
     emitEvent('auth_failed', p, key, { status, suspendMs: PERM_SUSPEND_MS, ...errorFields });
     return;
@@ -1077,6 +1159,7 @@ function handleStatus(p, key, status, model, retryAfterMs, errorInfo) {
     // Pass retryAfterMs so the key blacklist respects the server's stated wait time.
     recordFailure(p, key, model, retryAfterMs);
     clearStickyKey(p, key, model);
+    clearTaskAffinityKey(p, key, model);
     const reason = errorFields.errorReason || errorFields.errorStatus || errorFields.errorType || errorFields.errorCode;
     warn(`[key-rotator] ${p.name}: quota/rate status=${status}${reason ? ` reason=${reason}` : ''} on ${keySlot(p, key)}${keyMask(key)}${model ? ` model=${model}` : ''}${retryAfterMs ? ` retry-after=${Math.round(retryAfterMs/1000)}s` : ''}`);
     emitEvent('rate_limited', p, key, { status, model, retryAfterMs: retryAfterMs || 0, ...errorFields });
@@ -1089,6 +1172,7 @@ function handleStatus(p, key, status, model, retryAfterMs, errorInfo) {
     // for all other Gemini models.
     recordTransientFailure(p, key, model);
     clearStickyKey(p, key, model);
+    clearTaskAffinityKey(p, key, model);
     warn(`[key-rotator] ${p.name}: transient status=${status} on ${keySlot(p, key)}${keyMask(key)}`);
     emitEvent('transient_status', p, key, { status, model, ...errorFields });
     return;
@@ -1116,6 +1200,7 @@ function handleTransportError(p, key, err, model = null) {
   if (looksRateOrQuota) {
     recordFailure(p, key, model, 0);
     clearStickyKey(p, key, model);
+    clearTaskAffinityKey(p, key, model);
     warn(`[key-rotator] ${p.name}: transport/failover quota signal ${name || 'Error'}${code ? ` code=${code}` : ''} on ${keySlot(p, key)}${keyMask(key)}${model ? ` model=${model}` : ''}`);
     emitEvent('rate_limited', p, key, { model, name: name || 'Error', code, source: 'transport_error', message: message.slice(0, 240) });
     return;
@@ -1124,6 +1209,7 @@ function handleTransportError(p, key, err, model = null) {
   if (retryable) {
     recordTransientFailure(p, key, model);
     clearStickyKey(p, key, model);
+    clearTaskAffinityKey(p, key, model);
     warn(`[key-rotator] ${p.name}: retryable network ${name || 'Error'}${code ? ` code=${code}` : ''} on ${keySlot(p, key)}${keyMask(key)}${model ? ` model=${model}` : ''}`);
     emitEvent('network_retryable', p, key, { model, name: name || 'Error', code });
   }
@@ -1921,6 +2007,7 @@ function patchFetch() {
                   provider.idx = (i + 1) % total;
                   key = candidate; waitMs = 0;
                   rememberStickyKey(provider, model, key);
+                  rememberTaskAffinityKey(provider, model, key);
                   emitEvent('pick_retry_fresh', provider, key, { model, attempt, sticky: isStickyProvider(provider) });
                   break;
                 }
@@ -2231,7 +2318,7 @@ if (hasProviderKeys) {
   patchUndici();         // covers OpenClaw gateway's bundled undici AI calls
   startDiagnostics();
 
-  debug(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:${formatHours(PERM_SUSPEND_MS)}h (cap 16h) max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} max-retry-after:${MAX_RETRY_AFTER_MS/1000}s max-key-wait:${MAX_KEY_WAIT_MS/1000}s diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'} log-level:${LOG_LEVEL} verbose-picks:${VERBOSE_PICKS ? 'on' : 'off'} suspended-last-resort:${USE_SUSPENDED_KEY_AS_LAST_RESORT ? 'on' : 'off'} per-model-providers:${providerState.filter(p => p.perModelLimits).map(p => p.name).join(',') || 'none'} model-from-body:on model-sniff-max:${REQUEST_MODEL_SNIFF_MAX_BYTES} error-sniff-max:${ERROR_BODY_SNIFF_MAX_BYTES} inflight-ttl:${INFLIGHT_TTL_MS}ms sticky-until-failure:${STICKY_UNTIL_FAILURE ? 'on' : 'off'} sticky-scope:${String(process.env.KEY_STICKY_SCOPE || 'auto').trim().toLowerCase() || 'auto'} sticky-providers:${[...STICKY_PROVIDER_SET].join(',') || 'none'} llm-fallback-providers:${LLM_FALLBACK_PROVIDER_SET ? [...LLM_FALLBACK_PROVIDER_SET].join(',') : 'all'}`);
+  debug(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:${formatHours(PERM_SUSPEND_MS)}h (cap 16h) max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} max-retry-after:${MAX_RETRY_AFTER_MS/1000}s max-key-wait:${MAX_KEY_WAIT_MS/1000}s diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'} log-level:${LOG_LEVEL} verbose-picks:${VERBOSE_PICKS ? 'on' : 'off'} suspended-last-resort:${USE_SUSPENDED_KEY_AS_LAST_RESORT ? 'on' : 'off'} per-model-providers:${providerState.filter(p => p.perModelLimits).map(p => p.name).join(',') || 'none'} model-from-body:on model-sniff-max:${REQUEST_MODEL_SNIFF_MAX_BYTES} error-sniff-max:${ERROR_BODY_SNIFF_MAX_BYTES} inflight-ttl:${INFLIGHT_TTL_MS}ms task-affinity:${TASK_AFFINITY_MS}ms/${TASK_AFFINITY_MAX_REUSES}reuses sticky-until-failure:${STICKY_UNTIL_FAILURE ? 'on' : 'off'} sticky-scope:${String(process.env.KEY_STICKY_SCOPE || 'auto').trim().toLowerCase() || 'auto'} sticky-providers:${[...STICKY_PROVIDER_SET].join(',') || 'none'} llm-fallback-providers:${LLM_FALLBACK_PROVIDER_SET ? [...LLM_FALLBACK_PROVIDER_SET].join(',') : 'all'}`);
   emitEvent('rotator_loaded', null, null, {
     providers: providerState.filter(p => p.keys.length).map(p => ({ name: p.name, total: p.keys.length })),
     logLevel: LOG_LEVEL,
@@ -2239,6 +2326,8 @@ if (hasProviderKeys) {
     inflightTtlMs: INFLIGHT_TTL_MS,
     modelSniffMaxBytes: REQUEST_MODEL_SNIFF_MAX_BYTES,
     errorBodySniffMaxBytes: ERROR_BODY_SNIFF_MAX_BYTES,
+    taskAffinityMs: TASK_AFFINITY_MS,
+    taskAffinityMaxReuses: TASK_AFFINITY_MAX_REUSES,
     stickyUntilFailure: STICKY_UNTIL_FAILURE,
     stickyScope: String(process.env.KEY_STICKY_SCOPE || 'auto').trim().toLowerCase() || 'auto',
     stickyProviders: [...STICKY_PROVIDER_SET],
