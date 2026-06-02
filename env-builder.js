@@ -597,7 +597,7 @@ const FIELDS = [
     "ph": "900000",
     "tag": "advanced"
   },
-{
+  {
     "g": "Plugins",
     "icon": "🔄",
     "k": "KEY_MAX_INFLIGHT_PER_KEY",
@@ -606,7 +606,17 @@ const FIELDS = [
     "ph": "3",
     "tag": "advanced"
   },
-{
+  {
+    "g": "Plugins",
+    "icon": "⏱️",
+    "k": "OPENCLAW_PROVIDER_TIMEOUT_SECONDS",
+    "lbl": "OpenClaw provider timeoutSeconds (prevents 120s idle aborts)",
+    "type": "text",
+    "ph": "300",
+    "tag": "advanced",
+    "help": "Maps to models.providers.<id>.timeoutSeconds for configured providers. Raise for slow preview/thinking models; set 0 to use OpenClaw defaults."
+  },
+  {
     "g": "Plugins",
     "icon": "🔄",
     "k": "KEY_INFLIGHT_TTL_MS",
@@ -2330,6 +2340,15 @@ function showToast(msg = 'Copied!') {
 
 let activeGroup = 'All';
 let customCount = 0;
+const TAG_META = {
+  critical:   { cls: 'badge-critical',   lbl: 'critical'   },
+  credential: { cls: 'badge-credential', lbl: 'credential' },
+  feature:    { cls: 'badge-feature',    lbl: 'feature'    },
+  optional:   { cls: 'badge-optional',   lbl: 'optional'   },
+  advanced:   { cls: 'badge-advanced',   lbl: 'advanced'   },
+  build:      { cls: 'badge-build',      lbl: 'build-time' },
+};
+const CUSTOM_TAG_OPTIONS = Object.keys(TAG_META);
 const GROUPS = ['All', ...[...new Set(FIELDS.map(f => f.g))], 'Custom Env'];
 
 function ensureAllSelectedSection() {
@@ -2479,14 +2498,6 @@ function valueControlHTML(field) {
 }
 
 function cardHTML(f, origIdx = 0) {
-  const TAG_META = {
-    critical:   { cls: 'badge-critical',   lbl: 'critical'   },
-    credential: { cls: 'badge-credential', lbl: 'credential' },
-    feature:    { cls: 'badge-feature',    lbl: 'feature'    },
-    optional:   { cls: 'badge-optional',   lbl: 'optional'   },
-    advanced:   { cls: 'badge-advanced',   lbl: 'advanced'   },
-    build:      { cls: 'badge-build',      lbl: 'build-time' },
-  };
   const tm = TAG_META[f.tag] || TAG_META.optional;
   const badge = `<span class="badge ${tm.cls}">${tm.lbl}</span>`;
 
@@ -2503,37 +2514,88 @@ function cardHTML(f, origIdx = 0) {
   </div>`;
 }
 
-function addCustomRow(key = '', val = '', enabled = false) {
+function customSearchText(key, val, tag) {
+  return `Custom Env ${key || ''} ${val || ''} ${tag || ''} custom`.toLowerCase();
+}
+
+function updateCustomRowMeta(row) {
+  if (!row) return;
+  const id = row.dataset.customRow;
+  const key = (row.querySelector(`[data-ck="${id}"]`)?.value || '').trim();
+  const val = (row.querySelector(`[data-cv="${id}"]`)?.value || '').trim();
+  const tag = row.querySelector(`[data-ct="${id}"]`)?.value || 'optional';
+  row.dataset.tag = tag;
+  row.dataset.search = customSearchText(key, val, tag);
+  if (key) row.dataset.customKey = key;
+  else delete row.dataset.customKey;
+  const keyLabel = row.querySelector('[data-custom-key-label]');
+  if (keyLabel) keyLabel.textContent = key || 'CUSTOM_ENV_NAME';
+  const badge = row.querySelector('[data-custom-badge]');
+  const tm = TAG_META[tag] || TAG_META.optional;
+  if (badge) {
+    badge.className = `badge ${tm.cls}`;
+    badge.textContent = tm.lbl;
+  }
+}
+
+function addCustomRow(key = '', val = '', enabled = false, tag = 'optional') {
   const id = customCount++;
+  const safeTag = TAG_META[tag] ? tag : 'optional';
   const row = document.createElement('div');
-  row.className = 'custom-row';
+  row.className = 'env-card custom-env-card';
   row.dataset.customRow = id;
   row.dataset.enabled = enabled ? '1' : '0';
+  row.dataset.group = 'Custom Env';
+  row.dataset.tag = safeTag;
+  row.dataset.search = customSearchText(key, val, safeTag);
+  row.dataset.origIdx = String(id);
+  row.setAttribute('data-row', '');
+
+  const tagOptions = CUSTOM_TAG_OPTIONS.map(t => {
+    const tm = TAG_META[t] || TAG_META.optional;
+    return `<option value="${esc(t)}" ${t === safeTag ? 'selected' : ''}>${esc(tm.lbl)}</option>`;
+  }).join('');
+  const tm = TAG_META[safeTag] || TAG_META.optional;
 
   row.innerHTML = `
-    <input data-ck="${id}" placeholder="CUSTOM_ENV_NAME" value="${esc(key)}">
-    <input data-cv="${id}" placeholder="value" value="${esc(val)}">
-    <button class="tog${enabled ? ' on' : ''}">${enabled ? 'On' : 'Off'}</button>
+    <div class="card-top">
+      <input type="checkbox" class="card-check" data-custom-enable="${id}" ${enabled ? 'checked' : ''}>
+      <div class="card-info">
+        <div class="card-key" data-custom-key-label>${esc(key || 'CUSTOM_ENV_NAME')}</div>
+        <div class="card-lbl">User-created environment variable</div>
+      </div>
+      <span class="badge ${tm.cls}" data-custom-badge>${esc(tm.lbl)}</span>
+    </div>
+    <div class="custom-card-grid">
+      <label class="custom-field"><span>Name</span><input data-ck="${id}" placeholder="MY_CUSTOM_ENV" value="${esc(key)}" spellcheck="false"></label>
+      <label class="custom-field"><span>Value</span><input data-cv="${id}" placeholder="value" value="${esc(val)}" spellcheck="false"></label>
+      <label class="custom-field custom-tag-field"><span>Tag</span><select data-ct="${id}">${tagOptions}</select></label>
+      <button type="button" class="mini-btn custom-remove" data-custom-remove="${id}" title="Remove custom env card">Remove</button>
+    </div>
   `;
 
   $('customRows').appendChild(row);
 
-  row.querySelectorAll('input').forEach(el => el.addEventListener('input', refresh));
-  const keyInput = row.querySelector(`[data-ck="${id}"]`);
-  const syncCustomKey = () => {
-    const customKey = (keyInput?.value || '').trim();
-    if (customKey) row.dataset.customKey = customKey;
-    else delete row.dataset.customKey;
-  };
-  row.querySelector(`[data-ck="${id}"]`)?.addEventListener('input', syncCustomKey);
-  syncCustomKey();
-  row.querySelector('button').onclick = () => {
-    const on = row.dataset.enabled !== '1';
-    row.dataset.enabled = on ? '1' : '0';
-    row.querySelector('button').textContent = on ? 'On' : 'Off';
-    row.querySelector('button').classList.toggle('on', on);
+  const enabledInput = row.querySelector(`[data-custom-enable="${id}"]`);
+  const sync = () => { updateCustomRowMeta(row); refresh(); filter(); };
+  row.querySelectorAll('input[data-ck], input[data-cv]').forEach(el => el.addEventListener('input', sync));
+  row.querySelector(`[data-ct="${id}"]`)?.addEventListener('change', sync);
+  enabledInput?.addEventListener('change', () => {
+    row.dataset.enabled = enabledInput.checked ? '1' : '0';
+    row.classList.toggle('selected', enabledInput.checked);
     refresh();
-  };
+    updateCounts();
+  });
+  row.querySelector(`[data-custom-remove="${id}"]`)?.addEventListener('click', () => {
+    row.remove();
+    refresh();
+    filter();
+  });
+  updateCustomRowMeta(row);
+  row.classList.toggle('selected', enabled);
+  refresh();
+  filter();
+  return row;
 }
 
 function getFieldValueInput(key) {
@@ -2570,7 +2632,8 @@ function collect() {
     const id = row.dataset.customRow;
     const key = (row.querySelector(`[data-ck="${id}"]`)?.value || '').trim();
     const val = (row.querySelector(`[data-cv="${id}"]`)?.value || '').trim();
-    if (row.dataset.enabled === '1' && safeKey(key) && val) obj[key] = val;
+    const checked = row.querySelector(`[data-custom-enable="${id}"]`)?.checked;
+    if ((row.dataset.enabled === '1' || checked) && safeKey(key) && val) obj[key] = val;
   });
 
   return obj;
@@ -2623,7 +2686,10 @@ function jumpToEnvKey(key) {
 }
 
 function markSelected() {
-  document.querySelectorAll('[data-row]').forEach(r => r.classList.toggle('selected', !!r.querySelector('[data-check]')?.checked));
+  document.querySelectorAll('[data-row]').forEach(r => {
+    const selected = !!r.querySelector('[data-check]')?.checked || !!r.querySelector('[data-custom-enable]')?.checked;
+    r.classList.toggle('selected', selected);
+  });
 }
 
 function updateCounts() {
@@ -2633,7 +2699,7 @@ function updateCounts() {
     const g = ch.closest('[data-row]')?.dataset.group;
     if (g) byGrp[g] = (byGrp[g] || 0) + 1;
   });
-  const custOn = document.querySelectorAll('[data-custom-row][data-enabled="1"]').length;
+  const custOn = document.querySelectorAll('[data-custom-row] [data-custom-enable]:checked').length;
   const total = Object.values(byGrp).reduce((a, b) => a + b, 0) + custOn;
   const allEl = document.getElementById('nc_All'); if (allEl) allEl.textContent = total;
   Object.entries(byGrp).forEach(([g, c]) => {
@@ -2680,7 +2746,7 @@ function clearForm() {
   });
   $('customRows').innerHTML = '';
   customCount = 0;
-  addCustomRow();
+  addCustomRow('', '', false, 'optional');
 }
 
 function applyObj(obj, replace = false) {
@@ -2700,7 +2766,7 @@ function applyObj(obj, replace = false) {
         inp.value = on ? 'true' : 'false';
       }
     } else {
-      addCustomRow(key, val, true);
+      addCustomRow(key, val, true, 'optional');
     }
   }
   sortAllSections(); markSelected(); filter(); refresh();
@@ -2921,7 +2987,7 @@ function copyText(text) {
 try {
   renderSidebar();
   renderSections();
-  addCustomRow();
+  addCustomRow('', '', false, 'optional');
   filter();
   refresh();
 } catch(e) {
@@ -2974,7 +3040,14 @@ $('applyImport').onclick = () => {
 };
 
 // Import is explicit via the Import & Apply button to avoid surprising UI resets.
-$('addCustom').onclick = () => addCustomRow();
+$('addCustom').onclick = () => {
+  activeGroup = 'Custom Env';
+  renderSidebar();
+  filter();
+  const row = addCustomRow('', '', true, 'optional');
+  row?.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+  row?.querySelector('[data-ck]')?.focus({ preventScroll: true });
+};
 $('applyBundle').onclick = () => {
   try {
     applyObj(decodeBundle($('bundleOut').value), true);

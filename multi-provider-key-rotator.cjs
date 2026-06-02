@@ -876,6 +876,19 @@ function classifyRetryableFailure(status, errCode) {
   return false;
 }
 
+function isCallerAbortError(err) {
+  // OpenClaw's idle watchdog/caller aborts arrive as AbortError, sometimes with
+  // a numeric DOMException code (for example 20). That numeric code is not a
+  // provider/network failure code, and the selected API key might still be
+  // perfectly healthy. Do not blacklist/rotate the key for this shape; just let
+  // OpenClaw's same-model retry policy handle it.
+  return String(err?.name || '') === 'AbortError';
+}
+
+function shouldRetryTransportError(err, code) {
+  if (classifyRetryableFailure(undefined, code)) return true;
+  return false;
+}
 
 function shouldRetryMethod(method, hasReplayableBody) {
   const m = String(method || 'GET').toUpperCase();
@@ -1205,7 +1218,12 @@ function handleTransportError(p, key, err, model = null) {
     emitEvent('rate_limited', p, key, { model, name: name || 'Error', code, source: 'transport_error', message: message.slice(0, 240) });
     return;
   }
-  const retryable = classifyRetryableFailure(undefined, code) || name === 'AbortError';
+  if (isCallerAbortError(err)) {
+    debug(`[key-rotator] ${p.name}: caller abort ${name || 'AbortError'} on ${keySlot(p, key)}${keyMask(key)}${model ? ` model=${model}` : ''} — leaving key sticky/healthy`);
+    emitEvent('transport_aborted', p, key, { model, name: name || 'AbortError', code, message: message.slice(0, 240), classifiedAs: 'caller_abort' });
+    return;
+  }
+  const retryable = shouldRetryTransportError(err, code);
   if (retryable) {
     recordTransientFailure(p, key, model);
     clearStickyKey(p, key, model);
@@ -2067,7 +2085,7 @@ function patchFetch() {
             ? String(err.code || err.cause?.code).toUpperCase()
             : '';
           const isAbort = String(err?.name || '') === 'AbortError';
-          const shouldRetry = attempt < maxAttempts && (classifyRetryableFailure(undefined, code) || isAbort);
+          const shouldRetry = attempt < maxAttempts && shouldRetryTransportError(err, code);
           if (shouldRetry) {
             const backoffMs = Math.min(10_000, FETCH_RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1));
             warn(`[key-rotator] ${provider.name}: fetch retry ${attempt}/${maxAttempts - 1} after network ${isAbort ? 'AbortError' : `code=${code || 'unknown'}`} method=${method}`);

@@ -758,7 +758,9 @@ body {
 .tog:focus-visible,
 .picker-select:focus-visible,
 .card-input input:focus-visible,
-.card-input textarea:focus-visible {
+.card-input textarea:focus-visible,
+.custom-field input:focus-visible,
+.custom-field select:focus-visible {
   outline: 2px solid var(--amber2);
   outline-offset: 2px;
 }
@@ -768,15 +770,51 @@ body {
   margin-top: 8px;
 }
 
-.custom-row {
+.custom-env-toolbar {
   display: flex;
-  gap: 8px;
   align-items: center;
-  margin-bottom: 8px;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  background: var(--bg2);
+  border: 1px dashed var(--border2);
+  border-radius: var(--r2);
 }
 
-.custom-row input {
-  flex: 1;
+.custom-env-copy {
+  color: var(--text2);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.custom-env-card .card-top { margin-bottom: 12px; }
+
+.custom-card-grid {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(220px, 1.4fr) minmax(130px, .7fr) auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.custom-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.custom-field span {
+  font-size: 9px;
+  color: var(--text3);
+  text-transform: uppercase;
+  letter-spacing: .8px;
+  font-weight: 700;
+}
+
+.custom-field input,
+.custom-field select {
+  width: 100%;
   background: var(--bg3);
   border: 1px solid var(--border);
   border-radius: var(--r);
@@ -785,12 +823,27 @@ body {
   font-size: 11px;
   color: var(--text);
   outline: none;
-  transition: border-color .15s;
+  transition: border-color .15s, background .15s;
   min-width: 0;
 }
 
-.custom-row input:focus { border-color: var(--amber); }
-.custom-row input:first-child { flex: 0 0 40%; }
+.custom-field select {
+  cursor: pointer;
+  color: var(--amber2);
+}
+
+.custom-field input:focus,
+.custom-field select:focus { border-color: var(--amber); background: var(--bg4); }
+
+.custom-remove {
+  height: 31px;
+  color: var(--red);
+}
+
+@media (max-width: 900px) {
+  .custom-card-grid { grid-template-columns: 1fr; }
+  .custom-remove { width: 100%; }
+}
 
 /* ── Toast ── */
 #toast {
@@ -1024,8 +1077,11 @@ body {
             <span class="sec-title">Custom Env</span>
             <div class="sec-line"></div>
           </div>
-          <div id="customRows"></div>
-          <button id="addCustom" class="btn" style="margin-top:6px;">+ Add variable</button>
+          <div class="custom-env-toolbar">
+            <div class="custom-env-copy">Create your own env card, choose an available tag, then tick it to include it in the bundle.</div>
+            <button id="addCustom" class="btn" type="button">+ Create env card</button>
+          </div>
+          <div id="customRows" class="cards"></div>
         </div>
       </div>
 
