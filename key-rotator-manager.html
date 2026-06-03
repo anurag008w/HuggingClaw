@@ -44,7 +44,7 @@
         <div class="panel-title"><h2>Rotation event log</h2><span id="eventCount" class="pill">0</span></div>
         <div class="toolbar">
           <input id="q" class="input" placeholder="Filter provider, key, model, event…" aria-label="Filter events">
-          <select id="type" class="select" aria-label="Event type"><option value="">All events</option><option value="pick">Picks</option><option value="success">Success</option><option value="rate_limited">Rate limits</option><option value="network_retryable">Network retries</option><option value="pick_retry_fresh">Retry picks</option><option value="auth_failed">Auth failures</option></select>
+          <select id="type" class="select" aria-label="Event type"><option value="">All events</option><option value="pick">Picks</option><option value="sticky_pick">Sticky picks</option><option value="task_affinity_pick">Affinity picks</option><option value="success">Success</option><option value="rate_limited">Rate limits</option><option value="network_retryable">Network retries</option><option value="pick_retry_fresh">Retry picks</option><option value="auth_failed">Auth failures</option></select>
           <label class="toggle"><input id="scope" type="checkbox" checked> selected provider only</label>
         </div>
         <div id="events" class="events"><div class="empty">Loading rotator events…</div></div>
@@ -55,7 +55,7 @@
 <script>
 let state={events:[],providers:[],runtime:{routes:[]},paused:false,selected:localStorage.getItem('hc.keyRotator.provider')||''};
 const $=id=>document.getElementById(id), HTML_ESCAPE={'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'};
-const PICK_TYPES=['pick','sticky_pick','pick_retry_fresh','all_suspended_pick','saturated_reuse','sticky_saturated_reuse'];
+const PICK_TYPES=['pick','sticky_pick','task_affinity_pick','pick_retry_fresh','all_suspended_pick','saturated_reuse','sticky_saturated_reuse'];
 const START_TYPES=['request_started'];
 const STALE_PENDING_MS=35000;
 const OUTCOME_TYPES=['success','rate_limited','network_retryable','auth_failed','transient_status','transport_aborted','transport_unknown','client_error','provider_error','inflight_lease_expired','inflight_timeout'];
