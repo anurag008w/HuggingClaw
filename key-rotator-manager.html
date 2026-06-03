@@ -44,7 +44,7 @@
         <div class="panel-title"><h2>Rotation event log</h2><span id="eventCount" class="pill">0</span></div>
         <div class="toolbar">
           <input id="q" class="input" placeholder="Filter provider, key, model, event…" aria-label="Filter events">
-          <select id="type" class="select" aria-label="Event type"><option value="">All events</option><option value="pick">Picks</option><option value="success">Success</option><option value="rate_limited">Rate limits</option><option value="network_retryable">Network retries</option><option value="pick_retry_fresh">Retry picks</option><option value="auth_failed">Auth failures</option></select>
+          <select id="type" class="select" aria-label="Event type"><option value="">All events</option><option value="pick">Picks</option><option value="sticky_pick">Sticky picks</option><option value="task_affinity_pick">Affinity picks</option><option value="success">Success</option><option value="rate_limited">Rate limits</option><option value="network_retryable">Network retries</option><option value="pick_retry_fresh">Retry picks</option><option value="auth_failed">Auth failures</option></select>
           <label class="toggle"><input id="scope" type="checkbox" checked> selected provider only</label>
         </div>
         <div id="events" class="events"><div class="empty">Loading rotator events…</div></div>
