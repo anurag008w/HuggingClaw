@@ -688,11 +688,22 @@ function pickAffinitizedKey(p, model) {
 function promoteStickyKeyModel(p, key, fromModel, toModel) {
   if (!key || !toModel) return;
   const fromBucket = stickyBucketForProvider(p, fromModel);
+  const toBucket = stickyBucketForProvider(p, toModel);
   if (isStickyProvider(p)) {
-    if (p.stickyKeys.get(fromBucket) === key) p.stickyKeys.delete(fromBucket);
+    // Pin the now-known model bucket so future picks that DO know the model reuse it.
     rememberStickyKey(p, toModel, key);
+    // Keep the unknown-model fallback bucket pinned to this key instead of
+    // vacating it. OpenAI-compatible Gemini (and node:http) requests routinely
+    // reach nextKey() before the body reveals the model, so the *next* request
+    // also picks under the unknown bucket. Deleting it here sent every such
+    // request back to round-robin, defeating stickiness entirely (keys rotated
+    // on every call). The fallback pin is still cleared on a real provider
+    // failure via clearStickyKey()'s fallback-bucket path.
+    if (fromBucket !== toBucket && !p.stickyKeys.has(fromBucket)) {
+      rememberStickyKey(p, fromModel, key);
+    }
   }
-  if (p.taskAffinity?.get(fromBucket)?.key === key) p.taskAffinity.delete(fromBucket);
+  if (fromBucket !== toBucket && p.taskAffinity?.get(fromBucket)?.key === key) p.taskAffinity.delete(fromBucket);
   rememberTaskAffinityKey(p, toModel, key);
 }
 
