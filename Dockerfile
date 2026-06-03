@@ -124,7 +124,7 @@ ENV HOME=/home/node \
     OPENCLAW_VERSION=${OPENCLAW_VERSION} \
     PATH=/home/node/.local/bin:/usr/local/bin:$PATH \
     NODE_PATH=/home/node/browser-deps/node_modules \
-    NODE_OPTIONS="--require /opt/cloudflare-proxy.js"
+    NODE_OPTIONS="--require /opt/cloudflare-proxy.js --require /home/node/app/multi-provider-key-rotator.cjs"
 
 WORKDIR /home/node/app
 
