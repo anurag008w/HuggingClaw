@@ -214,7 +214,11 @@ const keyFingerprint = (k) => {
 // ─── Provider definitions ────────────────────────────────────────────────────
 
 const PROVIDERS = [
-  { name:'anthropic',    hostname:/(?:^|\.)api\.anthropic\.com$/i,            envPlural:'ANTHROPIC_API_KEYS',        envSingular:'ANTHROPIC_API_KEY' },
+  // Anthropic's native REST API (api.anthropic.com) authenticates via the
+  // `x-api-key` header, NOT `Authorization: Bearer`. Injecting only a Bearer
+  // header leaves the caller's original x-api-key in place, so the rotated pool
+  // is never used. authHeader pins the correct header for key injection.
+  { name:'anthropic',    hostname:/(?:^|\.)api\.anthropic\.com$/i,            envPlural:'ANTHROPIC_API_KEYS',        envSingular:'ANTHROPIC_API_KEY', authHeader:'x-api-key' },
   { name:'openai',       hostname:/(?:^|\.)api\.openai\.com$/i,               envPlural:'OPENAI_API_KEYS',           envSingular:'OPENAI_API_KEY' },
   { name:'gemini',       hostname:/(?:^|\.)(?:generativelanguage\.googleapis\.com|aiplatform\.googleapis\.com)$/i,
                                                                                envPlural:'GEMINI_API_KEYS',           envSingular:'GEMINI_API_KEY',  queryParam:true,
@@ -1271,6 +1275,19 @@ function setAuthHeader(headers, key) {
   return { authorization: val };
 }
 
+// Provider-aware auth injection. Most providers use `Authorization: Bearer <key>`,
+// but some native APIs read the key from a different header (e.g. Anthropic uses
+// `x-api-key`). For those, set the raw key on the provider's header instead of a
+// Bearer token so the rotated key is actually the one the upstream API reads.
+function applyProviderAuthHeaders(headers, provider, key) {
+  if (!key) return headers;
+  const headerName = provider && provider.authHeader ? String(provider.authHeader) : 'authorization';
+  const value = headerName.toLowerCase() === 'authorization' ? `Bearer ${key}` : key;
+  // uSetHeader handles every header shape used at the call sites — undici flat
+  // arrays, fetch Headers/Map, and plain objects — and replaces case-insensitively.
+  return uSetHeader(headers || {}, headerName, value);
+}
+
 function handleStatus(p, key, status, model, retryAfterMs, errorInfo, extra = {}) {
   if (!p || !key) return;
   status = normalizeHttpStatusCode(status);
@@ -1703,7 +1720,7 @@ function buildAttemptFetchArgs(input, init, provider, usedKey) {
   }
 
   if (usedKey) {
-    return [input, { ...initObj, headers: setAuthHeader(baseHeaders, usedKey) }];
+    return [input, { ...initObj, headers: applyProviderAuthHeaders(baseHeaders, provider, usedKey) }];
   }
 
   return [input, initObj];
@@ -2041,8 +2058,9 @@ function patchUndiciDispatch(proto, tag) {
               newOptions.headers = uSetHeader(options.headers || {}, 'authorization', `Bearer ${key}`);
             }
           } else {
-            // All other providers: inject / replace Authorization: Bearer
-            newOptions.headers = uSetHeader(options.headers || {}, 'authorization', `Bearer ${key}`);
+            // All other providers: inject / replace the provider's auth header
+            // (Authorization: Bearer for most; x-api-key for Anthropic, etc.)
+            newOptions.headers = applyProviderAuthHeaders(options.headers || {}, provider, key);
           }
 
           newOptions.body = wrapBodyForModelSniffing(
@@ -2389,7 +2407,7 @@ function patchHttpModule(mod) {
             const extra = hasOptionsArg ? args[1] : {};
             args[0] = { protocol:u.protocol, hostname:u.hostname, port:u.port,
                         path:`${u.pathname}${u.search}`, ...extra,
-                        headers:setAuthHeader(extra.headers, key) };
+                        headers:applyProviderAuthHeaders(extra.headers, provider, key) };
             // We have folded the second options argument into args[0]. Leaving it
             // in place would call http.request(options, options, cb), where Node
             // expects the second argument to be the callback and can throw or drop
@@ -2399,7 +2417,7 @@ function patchHttpModule(mod) {
               else { args.length = 1; }
             }
           } else if (options && typeof options === 'object') {
-            args[0] = { ...options, headers:setAuthHeader(options.headers, key) };
+            args[0] = { ...options, headers:applyProviderAuthHeaders(options.headers, provider, key) };
           }
         }
       }

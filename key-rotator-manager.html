@@ -55,7 +55,7 @@
 <script>
 let state={events:[],providers:[],runtime:{routes:[]},paused:false,selected:localStorage.getItem('hc.keyRotator.provider')||''};
 const $=id=>document.getElementById(id), HTML_ESCAPE={'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'};
-const PICK_TYPES=['pick','sticky_pick','pick_retry_fresh','all_suspended_pick','saturated_reuse','sticky_saturated_reuse'];
+const PICK_TYPES=['pick','sticky_pick','task_affinity_pick','pick_retry_fresh','all_suspended_pick','saturated_reuse','sticky_saturated_reuse'];
 const START_TYPES=['request_started'];
 const STALE_PENDING_MS=35000;
 const OUTCOME_TYPES=['success','rate_limited','network_retryable','auth_failed','transient_status','transport_aborted','transport_unknown','client_error','provider_error','inflight_lease_expired','inflight_timeout'];
