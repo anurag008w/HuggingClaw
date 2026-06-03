@@ -1987,6 +1987,55 @@ function wrapUndiciHandler(handler, provider, key, inFlightToken, getModel) {
           }
         };
       }
+      // ── undici v6+/v7/v8 dispatch handler interface ──
+      // Newer undici (OpenClaw bundles undici 8) no longer calls the classic
+      // onHeaders/onData/onComplete/onError methods; it calls onResponseStart/
+      // onResponseData/onResponseEnd/onResponseError instead (note the leading
+      // `controller` argument and statusCode at index 1). Without instrumenting
+      // these, status accounting (success + rate/auth classification) and the
+      // in-flight lease release never run, so successful calls show success=0
+      // and leak the lease until it TTL-expires (inflight_lease_expired).
+      // The shared `settled`/`statusHandled` guards make this safe even if a
+      // future undici were to emit both interfaces for one request.
+      if (prop === 'onResponseStart') {
+        return function (controller, sc, headers, statusMessage) {
+          statusCode = sc;
+          retryAfterMs = parseRetryAfterMs(uGetHeader(headers, 'retry-after'));
+          if (handleHeadersStatus()) {
+            settle(() => {});
+          } else if (statusNeedsErrorBodyForScope(statusCode) && !bodyWaitTimer) {
+            bodyWaitTimer = setTimeout(() => {
+              settle(() => { handleHeadersStatus(true); });
+            }, ERROR_BODY_WAIT_MS);
+            bodyWaitTimer.unref?.();
+          }
+          return target.onResponseStart ? target.onResponseStart.call(target, controller, sc, headers, statusMessage) : undefined;
+        };
+      }
+      if (prop === 'onResponseData') {
+        return function (controller, chunk) {
+          collectErrorBody(chunk);
+          return target.onResponseData ? target.onResponseData.call(target, controller, chunk) : undefined;
+        };
+      }
+      if (prop === 'onResponseEnd') {
+        return function (controller, trailers) {
+          try {
+            return target.onResponseEnd ? target.onResponseEnd.call(target, controller, trailers) : undefined;
+          } finally {
+            settle(() => { handleHeadersStatus(true); });
+          }
+        };
+      }
+      if (prop === 'onResponseError') {
+        return function (controller, err) {
+          try {
+            return target.onResponseError ? target.onResponseError.call(target, controller, err) : undefined;
+          } finally {
+            settle(() => { if (!statusHandled) { try { handleTransportError(provider, key, err, currentModel(), { requestId: inFlightToken?.requestId }); } catch (_) {} } });
+          }
+        };
+      }
       const v = target[prop];
       return typeof v === 'function' ? v.bind(target) : v;
     },
