@@ -83,6 +83,16 @@ const MAX_INFLIGHT_PER_KEY = Math.max(
 const STICKY_IGNORE_INFLIGHT_SATURATION = !/^(0|false|no|off)$/i.test(
   String(process.env.KEY_STICKY_IGNORE_INFLIGHT_SATURATION || 'true').trim(),
 );
+// Task-affinity keys: same reasoning as sticky — in-flight leases are local
+// bookkeeping only.  When the affinity key reaches MAX_INFLIGHT_PER_KEY,
+// re-using it (with a warning) keeps the whole task on one key.  The
+// alternative — dropping affinity and letting round-robin pick a new key —
+// causes exactly the mid-task API-key switch the user observes.
+// FIX: default changed to true so non-sticky providers (Anthropic, OpenAI, etc.)
+// are protected from mid-task rotation just like Gemini sticky keys.
+const TASK_AFFINITY_IGNORE_INFLIGHT_SATURATION = !/^(0|false|no|off)$/i.test(
+  String(process.env.KEY_AFFINITY_IGNORE_INFLIGHT_SATURATION || 'true').trim(),
+);
 const COOLDOWN_JITTER_PCT = Math.min(
   50,
   Math.max(0, parseInt(process.env.KEY_BLACKLIST_JITTER_PCT || '', 10) || 15),
@@ -160,21 +170,30 @@ const STICKY_PROVIDER_SET = new Set(
 );
 const UNKNOWN_MODEL_SCOPE = '__unknown_model__';
 
-// Task affinity keeps only a short, bounded burst of sequential non-sticky
-// provider calls on the same key.  OpenClaw/HuggingClaw can split one user task
-// into a few immediate upstream requests (planning/tool/result chunks); pure
-// per-request round-robin would spend a different key for each chunk.  Keep the
-// default conservative so intentional round-robin load balancing resumes after
-// the burst. Sticky providers still use their stronger until-failure pin below.
+// Task affinity keeps sequential non-sticky provider calls on the same key for
+// an entire task window.  OpenClaw/HuggingClaw splits one user task into many
+// upstream requests (planning → tool calls → result synthesis → follow-ups);
+// pure per-request round-robin would spend a different key on every chunk and
+// cause visible mid-task provider switches.
+//
+// FIX: defaults raised from 30 s / 3 reuses to 300 s / 50 reuses.
+//   - 30 s was too short: complex tasks (deep research, multi-tool chains) easily
+//     exceed it, causing a key switch at the 31st second.
+//   - 3 reuses was too low: a single OpenClaw task can involve 5-20+ upstream
+//     calls (think → tool → observe → think → tool → synthesize …).  After the
+//     3rd call the rotator picked a fresh key mid-task.
+// Round-robin load-balancing still resumes when a *new* task starts (affinity
+// expires or key fails), so fairness across keys is preserved over time.
+// Sticky providers (Gemini) use their stronger until-failure pin and are unaffected.
 const RAW_TASK_AFFINITY_MS = parseInt(process.env.KEY_TASK_AFFINITY_MS || '', 10);
 const TASK_AFFINITY_MS = Math.max(
   0,
-  Number.isFinite(RAW_TASK_AFFINITY_MS) ? RAW_TASK_AFFINITY_MS : 30_000,
+  Number.isFinite(RAW_TASK_AFFINITY_MS) ? RAW_TASK_AFFINITY_MS : 300_000,  // 5 min — covers full task burst
 );
 const RAW_TASK_AFFINITY_MAX_REUSES = parseInt(process.env.KEY_TASK_AFFINITY_MAX_REUSES || '', 10);
 const TASK_AFFINITY_MAX_REUSES = Math.max(
   0,
-  Number.isFinite(RAW_TASK_AFFINITY_MAX_REUSES) ? RAW_TASK_AFFINITY_MAX_REUSES : 3,
+  Number.isFinite(RAW_TASK_AFFINITY_MAX_REUSES) ? RAW_TASK_AFFINITY_MAX_REUSES : 50,  // 50 calls — covers any task
 );
 
 // Maximum ms to respect from a Retry-After header.
@@ -636,7 +655,17 @@ function rememberTaskAffinityKey(p, model, key) {
   // second affinity system on top, otherwise diagnostics and expiry semantics
   // become harder to reason about.
   if (isStickyProvider(p)) return;
-  p.taskAffinity.set(stickyBucketForProvider(p, model), {
+  const bucket = stickyBucketForProvider(p, model);
+  // FIX: do NOT reset a still-valid affinity slot for the same key.
+  // rememberTaskAffinityKey is called from nextKey's round-robin path every time
+  // ANY key is picked (including the saturated-reuse fallback).  Overwriting a
+  // live entry here would silently refill remainingReuses and extend expiresAt,
+  // hiding the mid-task switch that TASK_AFFINITY_IGNORE_INFLIGHT_SATURATION is
+  // meant to guard against.  Only create/replace when the bucket is empty,
+  // pointing at a different key, or the existing entry has expired/exhausted.
+  const existing = p.taskAffinity.get(bucket);
+  if (existing && existing.key === key && Date.now() < existing.expiresAt && (existing.remainingReuses || 0) > 0) return;
+  p.taskAffinity.set(bucket, {
     key,
     expiresAt: Date.now() + TASK_AFFINITY_MS,
     remainingReuses: TASK_AFFINITY_MAX_REUSES,
@@ -676,12 +705,25 @@ function pickAffinitizedKey(p, model) {
     return null;
   }
   const inflight = p.inFlight.get(key) || 0;
-  if (inflight >= MAX_INFLIGHT_PER_KEY) return null;
+  const saturated = inflight >= MAX_INFLIGHT_PER_KEY;
+  // FIX: when the affinity key is saturated, do NOT return null.
+  // Returning null here drops affinity and sends the caller back to round-robin,
+  // which picks a DIFFERENT key mid-task — the exact bug reported.
+  // In-flight counts are local safety leases (they expire via INFLIGHT_TTL_MS),
+  // not real provider verdicts; a saturated key is almost certainly still healthy.
+  // Mirror sticky-provider behaviour: stay pinned and warn, rotate only on a
+  // real provider failure (auth / rate / transient from handleStatus).
+  if (saturated && !TASK_AFFINITY_IGNORE_INFLIGHT_SATURATION) return null;
   entry.remainingReuses -= 1;
   entry.expiresAt = Date.now() + TASK_AFFINITY_MS;
   if (entry.remainingReuses <= 0) p.taskAffinity.delete(bucket);
-  verbosePickLog(`[key-rotator] ${p.name}: task-affinity picked ${keySlot(p, key)}${keyMask(key)}${model ? ` model=${model}` : ''} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY} remaining-reuses=${Math.max(0, entry.remainingReuses)}`);
-  emitEvent('task_affinity_pick', p, key, { model, inflight: inflight + 1, maxInflight: MAX_INFLIGHT_PER_KEY, ttlMs: TASK_AFFINITY_MS, remainingReuses: Math.max(0, entry.remainingReuses), sticky: false });
+  if (saturated) {
+    warn(`[key-rotator] ${p.name}: task-affinity key saturated but staying pinned on ${keySlot(p, key)}${keyMask(key)}${model ? ` model=${model}` : ''} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY} remaining-reuses=${Math.max(0, entry.remainingReuses || 0)} (affinity protects mid-task key switch)`);
+    emitEvent('task_affinity_saturated_reuse', p, key, { model, inflight: inflight + 1, maxInflight: MAX_INFLIGHT_PER_KEY, ttlMs: TASK_AFFINITY_MS, remainingReuses: Math.max(0, entry.remainingReuses || 0), sticky: false, reason: 'affinity_until_real_failure' });
+  } else {
+    verbosePickLog(`[key-rotator] ${p.name}: task-affinity picked ${keySlot(p, key)}${keyMask(key)}${model ? ` model=${model}` : ''} inflight=${inflight + 1}/${MAX_INFLIGHT_PER_KEY} remaining-reuses=${Math.max(0, entry.remainingReuses)}`);
+    emitEvent('task_affinity_pick', p, key, { model, inflight: inflight + 1, maxInflight: MAX_INFLIGHT_PER_KEY, ttlMs: TASK_AFFINITY_MS, remainingReuses: Math.max(0, entry.remainingReuses), sticky: false });
+  }
   return { key, waitMs: 0 };
 }
 
@@ -2639,7 +2681,7 @@ if (hasProviderKeys) {
   patchUndici();         // covers OpenClaw gateway's bundled undici AI calls
   startDiagnostics();
 
-  debug(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:${formatHours(PERM_SUSPEND_MS)}h (cap 16h) max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} max-retry-after:${MAX_RETRY_AFTER_MS/1000}s max-key-wait:${MAX_KEY_WAIT_MS/1000}s diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'} log-level:${LOG_LEVEL} verbose-picks:${VERBOSE_PICKS ? 'on' : 'off'} suspended-last-resort:${USE_SUSPENDED_KEY_AS_LAST_RESORT ? 'on' : 'off'} per-model-providers:${providerState.filter(p => p.perModelLimits).map(p => p.name).join(',') || 'none'} model-from-body:on model-sniff-max:${REQUEST_MODEL_SNIFF_MAX_BYTES} error-sniff-max:${ERROR_BODY_SNIFF_MAX_BYTES} error-body-wait:${ERROR_BODY_WAIT_MS}ms inflight-ttl:${INFLIGHT_TTL_MS}ms task-affinity:${TASK_AFFINITY_MS}ms/${TASK_AFFINITY_MAX_REUSES}reuses sticky-until-failure:${STICKY_UNTIL_FAILURE ? 'on' : 'off'} sticky-ignore-inflight-saturation:${STICKY_IGNORE_INFLIGHT_SATURATION ? 'on' : 'off'} sticky-scope:${String(process.env.KEY_STICKY_SCOPE || 'auto').trim().toLowerCase() || 'auto'} sticky-providers:${[...STICKY_PROVIDER_SET].join(',') || 'none'} llm-fallback-providers:${LLM_FALLBACK_PROVIDER_SET ? [...LLM_FALLBACK_PROVIDER_SET].join(',') : 'all'}`);
+  debug(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:${formatHours(PERM_SUSPEND_MS)}h (cap 16h) max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} max-retry-after:${MAX_RETRY_AFTER_MS/1000}s max-key-wait:${MAX_KEY_WAIT_MS/1000}s diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'} log-level:${LOG_LEVEL} verbose-picks:${VERBOSE_PICKS ? 'on' : 'off'} suspended-last-resort:${USE_SUSPENDED_KEY_AS_LAST_RESORT ? 'on' : 'off'} per-model-providers:${providerState.filter(p => p.perModelLimits).map(p => p.name).join(',') || 'none'} model-from-body:on model-sniff-max:${REQUEST_MODEL_SNIFF_MAX_BYTES} error-sniff-max:${ERROR_BODY_SNIFF_MAX_BYTES} error-body-wait:${ERROR_BODY_WAIT_MS}ms inflight-ttl:${INFLIGHT_TTL_MS}ms task-affinity:${TASK_AFFINITY_MS}ms/${TASK_AFFINITY_MAX_REUSES}reuses task-affinity-ignore-inflight:${TASK_AFFINITY_IGNORE_INFLIGHT_SATURATION ? 'on' : 'off'} sticky-until-failure:${STICKY_UNTIL_FAILURE ? 'on' : 'off'} sticky-ignore-inflight-saturation:${STICKY_IGNORE_INFLIGHT_SATURATION ? 'on' : 'off'} sticky-scope:${String(process.env.KEY_STICKY_SCOPE || 'auto').trim().toLowerCase() || 'auto'} sticky-providers:${[...STICKY_PROVIDER_SET].join(',') || 'none'} llm-fallback-providers:${LLM_FALLBACK_PROVIDER_SET ? [...LLM_FALLBACK_PROVIDER_SET].join(',') : 'all'}`);
   emitEvent('rotator_loaded', null, null, {
     providers: providerState.filter(p => p.keys.length).map(p => ({ name: p.name, total: p.keys.length })),
     logLevel: LOG_LEVEL,
@@ -2649,6 +2691,7 @@ if (hasProviderKeys) {
     errorBodySniffMaxBytes: ERROR_BODY_SNIFF_MAX_BYTES,
     taskAffinityMs: TASK_AFFINITY_MS,
     taskAffinityMaxReuses: TASK_AFFINITY_MAX_REUSES,
+    taskAffinityIgnoreInflightSaturation: TASK_AFFINITY_IGNORE_INFLIGHT_SATURATION,
     stickyUntilFailure: STICKY_UNTIL_FAILURE,
     stickyIgnoreInflightSaturation: STICKY_IGNORE_INFLIGHT_SATURATION,
     stickyScope: String(process.env.KEY_STICKY_SCOPE || 'auto').trim().toLowerCase() || 'auto',
