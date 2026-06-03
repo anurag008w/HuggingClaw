@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- **Anthropic key rotation never applied** — `api.anthropic.com` authenticates via the `x-api-key` header, not `Authorization: Bearer`. The rotator only injected a Bearer header, leaving the caller's original `x-api-key` untouched, so the rotated Anthropic pool was never used. Added a provider-aware auth-header injector (`x-api-key` for Anthropic, `Bearer` for everyone else) wired into all three dispatch layers (`fetch`, `undici`, `node:http`).
+- **Gemini stickiness lost when the model is detected after key selection** — OpenAI-compatible Gemini (and `node:http`) requests reach key selection before the request body reveals the model, so the key is pinned under a temporary unknown-model bucket. Promotion then deleted that bucket, sending the next (also model-unknown) request back to round-robin — keys rotated on every call. The unknown-model bucket now stays pinned to the same key after promotion, and is still cleared on a real provider failure, restoring sticky-until-failure behavior.
+- **Dashboard pick undercount** — `task_affinity_pick` events were emitted but missing from the manager's pick-type set, so affinity reuses were not counted as picks.
+
+### Added
+
+- **Sticky / affinity event-log filters** — the key-rotator manager event log can now be filtered by `sticky_pick` and `task_affinity_pick`, so operators can directly confirm Gemini stickiness and task-affinity reuse in the live log.
+
 ## [1.6.0] - 2026-05-14
 
 ### Added
