@@ -1737,19 +1737,12 @@ function buildAttemptFetchArgs(input, init, provider, usedKey) {
       const openAICompatGemini = isGeminiOpenAICompatPath(rawUrl);
       if (!openAICompatGemini) url.searchParams.set('key', usedKey);
 
-      // BUG FIX: Google's OpenAI-compatible endpoint (/v1beta/openai/...) reads the
-      // rotated key from the Authorization: Bearer header, NOT from ?key=.
-      // Always set Bearer for /openai/... even if the caller omitted auth;
-      // otherwise Gemini ignores ?key= and the rotated pool is never used.
-      // If a Bearer header already exists, replace it with the rotated key.
-      const existingAuth = baseHeaders.get
-        ? baseHeaders.get('authorization')
-        : (baseHeaders['authorization'] || baseHeaders['Authorization'] || '');
-      const needsBearerAuth = openAICompatGemini ||
-        (existingAuth && String(existingAuth).toLowerCase().startsWith('bearer '));
-      if (needsBearerAuth) {
-        setAuthHeader(baseHeaders, usedKey);
-      }
+      // ★ FIX: Always set Bearer auth for Gemini requests with a key.
+      // The ?key= approach only works for older Google APIs. Newer endpoints
+      // like /v1beta/embeddings require Bearer auth. Setting both is safe —
+      // Google APIs accept either format, and this fixes the 401 auth error
+      // on memory/embedding calls that were failing before the key rotator.
+      setAuthHeader(baseHeaders, usedKey);
 
       // With Request input and no explicit init overrides, keep request semantics by cloning shape.
       if (inputIsRequest && (!init || Object.keys(initObj).length === 0)) {
@@ -2153,12 +2146,12 @@ function patchUndiciDispatch(proto, tag) {
               if (!isGeminiOpenAICompatPath(pathStr)) pu.searchParams.set('key', key);
               newOptions.path = pu.pathname + pu.search;
             } catch (_) { /* leave path unchanged on URL parse failure */ }
-            // Gemini OpenAI-compat endpoint (/v1beta/openai/…) uses Bearer auth
-            // instead of ?key=. Set it even if the caller omitted auth.
-            const authVal = uGetHeader(options.headers || [], 'authorization');
-            if (isGeminiOpenAICompatPath(pathStr) || String(authVal).toLowerCase().startsWith('bearer ')) {
-              newOptions.headers = uSetHeader(options.headers || {}, 'authorization', `Bearer ${key}`);
-            }
+            // ★ FIX: Always set Bearer auth for Gemini requests with a key.
+            // The ?key= approach only works for older Google APIs. Newer endpoints
+            // like /v1beta/embeddings require Bearer auth. Setting both is safe —
+            // Google APIs accept either format, and this fixes the 401 auth error
+            // on memory/embedding calls that were failing before the key rotator.
+            newOptions.headers = uSetHeader(options.headers || {}, 'authorization', `Bearer ${key}`);
           } else {
             // All other providers: inject / replace the provider's auth header
             // (Authorization: Bearer for most; x-api-key for Anthropic, etc.)
@@ -2477,31 +2470,23 @@ function patchHttpModule(mod) {
               u.search = override.search;
             }
             if (!isGeminiOpenAICompatPath(u.pathname)) u.searchParams.set('key', key);
-            // BUG FIX: Google OpenAI-compatible endpoint uses Bearer, not ?key=.
-            // Preserve string/URL overload options too; many SDKs call
-            // http.request(url, { headers }, cb), and dropping that overload left
-            // OpenAI-compatible Gemini without the rotated Authorization header.
+            // ★ FIX: Always set Bearer auth for Gemini requests with a key.
+            // The ?key= approach only works for older Google APIs. Newer endpoints
+            // like /v1beta/embeddings require Bearer auth. Setting both is safe —
+            // Google APIs accept either format, and this fixes the 401 auth error
+            // on memory/embedding calls that were failing before the key rotator.
             const existingHeaders = (typeof options === 'object' && !(options instanceof URL) && options.headers)
               ? options.headers
               : (hasOptionsArg ? args[1].headers : undefined);
-            const authVal = uGetHeader(existingHeaders || {}, 'authorization');
-            const needsBearer = isGeminiOpenAICompatPath(u.pathname) || String(authVal).toLowerCase().startsWith('bearer ');
-            const patchedHeaders = needsBearer
-              ? setAuthHeader(existingHeaders, key)
-              : existingHeaders;
+            const patchedHeaders = setAuthHeader(existingHeaders, key);
             if (typeof options === 'object' && !(options instanceof URL)) {
               args[0] = { ...options, path:`${u.pathname}${u.search}`, headers: patchedHeaders };
             } else {
               args[0] = u.toString();
               if (hasOptionsArg) {
-                args[1] = {
-                  ...args[1],
-                  path: `${u.pathname}${u.search}`,
-                  ...(needsBearer ? { headers: patchedHeaders } : {}),
-                };
-              } else if (needsBearer) {
-                if (typeof args[1] === 'function') { args[2] = args[1]; args[1] = { headers: patchedHeaders }; }
-                else args[1] = { headers: patchedHeaders };
+                args[1] = { ...args[1], path:`${u.pathname}${u.search}`, headers: patchedHeaders };
+              } else {
+                args[1] = { headers: patchedHeaders };
               }
             }
           } else if (typeof options === 'string' || options instanceof URL) {
