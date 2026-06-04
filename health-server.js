@@ -606,7 +606,7 @@ function modelProviderToRotatorProvider(model) {
   const aliases = {
     google: "gemini",
     gemini: "gemini",
-    "google-vertex": "gemini",
+    "google-vertex": "google-vertex",
     moonshot: "kimi-moonshot",
     "kimi-coding": "kimi-moonshot",
     qwen: "modelstudio",

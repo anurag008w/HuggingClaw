@@ -239,7 +239,11 @@ const PROVIDERS = [
   // is never used. authHeader pins the correct header for key injection.
   { name:'anthropic',    hostname:/(?:^|\.)api\.anthropic\.com$/i,            envPlural:'ANTHROPIC_API_KEYS',        envSingular:'ANTHROPIC_API_KEY', authHeader:'x-api-key' },
   { name:'openai',       hostname:/(?:^|\.)api\.openai\.com$/i,               envPlural:'OPENAI_API_KEYS',           envSingular:'OPENAI_API_KEY' },
-  { name:'gemini',       hostname:/(?:^|\.)(?:generativelanguage\.googleapis\.com|aiplatform\.googleapis\.com)$/i,
+  // Native Gemini Developer API uses API-key auth on generativelanguage.googleapis.com.
+  // Do NOT match aiplatform.googleapis.com here: Google Vertex AI uses GCP/OAuth
+  // credentials that OpenClaw owns, and rotating Gemini API keys into Vertex calls
+  // causes 401s before OpenClaw can run its model fallback chain.
+  { name:'gemini',       hostname:/(?:^|\.)generativelanguage\.googleapis\.com$/i,
                                                                                envPlural:'GEMINI_API_KEYS',           envSingular:'GEMINI_API_KEY',  queryParam:true,
     extraEnvPlural:['GOOGLE_API_KEYS', 'GOOGLE_GENERATIVE_AI_API_KEYS', 'GOOGLE_AI_API_KEYS', 'GOOGLE_GENAI_API_KEYS'],
     extraEnvSingular:['GOOGLE_API_KEY', 'GOOGLE_GENERATIVE_AI_API_KEY', 'GOOGLE_AI_API_KEY', 'GOOGLE_GENAI_API_KEY'],
@@ -755,7 +759,7 @@ function modelProviderToRotatorProviderName(model) {
   const aliases = {
     google: 'gemini',
     gemini: 'gemini',
-    'google-vertex': 'gemini',
+    'google-vertex': 'google-vertex',
     moonshot: 'kimi-moonshot',
     'kimi-coding': 'kimi-moonshot',
     qwen: 'modelstudio',
@@ -1315,19 +1319,6 @@ function resolveProviderForUrl(urlLike, headers) {
   return matchProvider(resolveHostname(urlLike)) || resolveProviderFromHeaders(headers);
 }
 
-function setAuthHeader(headers, key) {
-  if (!key) return headers;
-  const val = `Bearer ${key}`;
-  if (typeof Headers !== 'undefined' && headers instanceof Headers) {
-    headers.set('authorization', val); return headers;
-  }
-  if (Array.isArray(headers)) {
-    return [...headers.filter(([k]) => String(k).toLowerCase() !== 'authorization'), ['authorization', val]];
-  }
-  if (headers && typeof headers === 'object') return { ...headers, authorization: val };
-  return { authorization: val };
-}
-
 // Provider-aware auth injection. Most providers use `Authorization: Bearer <key>`,
 // but some native APIs read the key from a different header (e.g. Anthropic uses
 // `x-api-key`). For those, set the raw key on the provider's header instead of a
@@ -1339,6 +1330,19 @@ function applyProviderAuthHeaders(headers, provider, key) {
   // uSetHeader handles every header shape used at the call sites — undici flat
   // arrays, fetch Headers/Map, and plain objects — and replaces case-insensitively.
   return uSetHeader(headers || {}, headerName, value);
+}
+
+function applyGeminiAuthHeaders(headers, key, pathOrUrl) {
+  if (!key) return headers;
+  if (isGeminiOpenAICompatPath(pathOrUrl)) {
+    // Google's OpenAI-compatible Gemini endpoint intentionally uses Bearer auth.
+    return uSetHeader(uDeleteHeader(headers || {}, 'x-goog-api-key'), 'authorization', `Bearer ${key}`);
+  }
+  // Native Gemini/Generative Language endpoints authenticate API keys via
+  // x-goog-api-key (or ?key=). Sending an API key as Authorization: Bearer makes
+  // Google treat it like an OAuth access token, which can return 401 and prevents
+  // OpenClaw from reaching its own fallback cycle for embeddings/images.
+  return uSetHeader(uDeleteHeader(headers || {}, 'authorization'), 'x-goog-api-key', key);
 }
 
 function handleStatus(p, key, status, model, retryAfterMs, errorInfo, extra = {}) {
@@ -1737,18 +1741,13 @@ function buildAttemptFetchArgs(input, init, provider, usedKey) {
       const openAICompatGemini = isGeminiOpenAICompatPath(rawUrl);
       if (!openAICompatGemini) url.searchParams.set('key', usedKey);
 
-      // ★ FIX: Always set Bearer auth for Gemini requests with a key.
-      // The ?key= approach only works for older Google APIs. Newer endpoints
-      // like /v1beta/embeddings require Bearer auth. Setting both is safe —
-      // Google APIs accept either format, and this fixes the 401 auth error
-      // on memory/embedding calls that were failing before the key rotator.
-      setAuthHeader(baseHeaders, usedKey);
+      const patchedHeaders = applyGeminiAuthHeaders(baseHeaders, usedKey, rawUrl);
 
       // With Request input and no explicit init overrides, keep request semantics by cloning shape.
       if (inputIsRequest && (!init || Object.keys(initObj).length === 0)) {
         const reqInit = {
           method: input.method,
-          headers: baseHeaders,
+          headers: patchedHeaders,
         };
         if (input.signal) reqInit.signal = input.signal;
         if (!/^(GET|HEAD)$/i.test(String(input.method || 'GET')) && input.body != null) {
@@ -1758,11 +1757,11 @@ function buildAttemptFetchArgs(input, init, provider, usedKey) {
         return [url.toString(), reqInit];
       }
 
-      return [url.toString(), { ...initObj, headers: baseHeaders }];
+      return [url.toString(), { ...initObj, headers: patchedHeaders }];
     }
 
     // If URL cannot be safely rewritten, fall back to auth header injection.
-    return [input, { ...initObj, headers: setAuthHeader(baseHeaders, usedKey) }];
+    return [input, { ...initObj, headers: applyGeminiAuthHeaders(baseHeaders, usedKey, rawUrl || '') }];
   }
 
   if (usedKey) {
@@ -1851,8 +1850,18 @@ function stripGeminiThoughtParts(bodyStr) {
  * Get a header value from undici's flat [name, val, name, val] array
  * or from a plain object (case-insensitive).
  */
+function isHeaderPairArray(headers) {
+  return Array.isArray(headers) && Array.isArray(headers[0]);
+}
+
 function uGetHeader(headers, name) {
   const lower = name.toLowerCase();
+  if (isHeaderPairArray(headers)) {
+    for (const entry of headers) {
+      if (entry && String(entry[0]).toLowerCase() === lower) return String(entry[1] || '');
+    }
+    return '';
+  }
   if (Array.isArray(headers)) {
     for (let i = 0; i < headers.length; i += 2)
       if (String(headers[i]).toLowerCase() === lower) return String(headers[i + 1] || '');
@@ -1871,12 +1880,58 @@ function uGetHeader(headers, name) {
   return '';
 }
 
+function uDeleteHeader(headers, name) {
+  const lower = String(name || '').toLowerCase();
+  if (isHeaderPairArray(headers)) {
+    return headers.filter(entry => entry && String(entry[0]).toLowerCase() !== lower);
+  }
+  if (Array.isArray(headers)) {
+    const out = [];
+    for (let i = 0; i < headers.length; i += 2) {
+      if (String(headers[i]).toLowerCase() !== lower) out.push(headers[i], headers[i + 1]);
+    }
+    return out;
+  }
+  if (headers && typeof headers.delete === 'function') {
+    try {
+      const out = typeof Headers !== 'undefined' && headers instanceof Headers
+        ? new Headers(headers)
+        : headers instanceof Map
+          ? new Map(headers)
+          : headers;
+      out.delete(name);
+      out.delete(lower);
+      return out;
+    } catch (_) {}
+  }
+  const out = {};
+  for (const k of Object.keys(headers || {})) {
+    if (k.toLowerCase() !== lower) out[k] = headers[k];
+  }
+  return out;
+}
+
 /**
  * Set / replace one header in undici flat-array or plain-object form.
  * Always returns a NEW array/object — does not mutate the original.
  */
 function uSetHeader(headers, name, value) {
   const lower = name.toLowerCase();
+  if (isHeaderPairArray(headers)) {
+    const out = [];
+    let found = false;
+    for (const entry of headers) {
+      if (!entry) continue;
+      if (String(entry[0]).toLowerCase() === lower) {
+        if (!found) { out.push([entry[0], value]); found = true; }
+        // drop duplicate entries silently
+      } else {
+        out.push(entry);
+      }
+    }
+    if (!found) out.push([name, value]);
+    return out;
+  }
   if (Array.isArray(headers)) {
     const out = [];
     let found = false;
@@ -2146,12 +2201,7 @@ function patchUndiciDispatch(proto, tag) {
               if (!isGeminiOpenAICompatPath(pathStr)) pu.searchParams.set('key', key);
               newOptions.path = pu.pathname + pu.search;
             } catch (_) { /* leave path unchanged on URL parse failure */ }
-            // ★ FIX: Always set Bearer auth for Gemini requests with a key.
-            // The ?key= approach only works for older Google APIs. Newer endpoints
-            // like /v1beta/embeddings require Bearer auth. Setting both is safe —
-            // Google APIs accept either format, and this fixes the 401 auth error
-            // on memory/embedding calls that were failing before the key rotator.
-            newOptions.headers = uSetHeader(options.headers || {}, 'authorization', `Bearer ${key}`);
+            newOptions.headers = applyGeminiAuthHeaders(options.headers || {}, key, pathStr);
           } else {
             // All other providers: inject / replace the provider's auth header
             // (Authorization: Bearer for most; x-api-key for Anthropic, etc.)
@@ -2470,15 +2520,10 @@ function patchHttpModule(mod) {
               u.search = override.search;
             }
             if (!isGeminiOpenAICompatPath(u.pathname)) u.searchParams.set('key', key);
-            // ★ FIX: Always set Bearer auth for Gemini requests with a key.
-            // The ?key= approach only works for older Google APIs. Newer endpoints
-            // like /v1beta/embeddings require Bearer auth. Setting both is safe —
-            // Google APIs accept either format, and this fixes the 401 auth error
-            // on memory/embedding calls that were failing before the key rotator.
             const existingHeaders = (typeof options === 'object' && !(options instanceof URL) && options.headers)
               ? options.headers
               : (hasOptionsArg ? args[1].headers : undefined);
-            const patchedHeaders = setAuthHeader(existingHeaders, key);
+            const patchedHeaders = applyGeminiAuthHeaders(existingHeaders, key, u.pathname);
             if (typeof options === 'object' && !(options instanceof URL)) {
               args[0] = { ...options, path:`${u.pathname}${u.search}`, headers: patchedHeaders };
             } else {

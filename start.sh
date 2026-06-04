@@ -347,7 +347,10 @@ case "$LLM_PROVIDER" in
   # ── Core Providers ──
   anthropic)                    export ANTHROPIC_API_KEY="$LLM_API_KEY" ;;
   openai|openai-codex)          export OPENAI_API_KEY="$LLM_API_KEY" ;;
-  google|google-vertex)         export GEMINI_API_KEY="$LLM_API_KEY" ;;
+  google)                       export GEMINI_API_KEY="$LLM_API_KEY" ;;
+  # google-vertex uses GCP/OAuth credentials (GOOGLE_CLOUD_PROJECT / service account),
+  # not GEMINI_API_KEY. Leave Gemini key env untouched so the rotator does not
+  # treat Vertex fallback routes as native Gemini API-key traffic.
   deepseek)                     export DEEPSEEK_API_KEY="$LLM_API_KEY" ;;
   # ── OpenCode Providers ──
   opencode)                     export OPENCODE_API_KEY="$LLM_API_KEY" ;;
