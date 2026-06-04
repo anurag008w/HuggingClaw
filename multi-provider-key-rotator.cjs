@@ -209,10 +209,12 @@ const MAX_RETRY_AFTER_MS = Math.max(
 // sleep never causes a proxy timeout.  With large key pools (50+) this
 // path rarely triggers anyway; with 2-3 keys it prevents the rotator from
 // sleeping longer than the upstream proxy allows.
-// Set to 0 to disable (reverts to old fire-and-miss behaviour).
+// Default is 0 (disabled) — fire-and-miss on all-suspended pools.
+// Set to a positive value (e.g. 20000) to sleep up to that many ms for the
+// soonest-recovering key instead of immediately forwarding into a guaranteed 429.
 const MAX_KEY_WAIT_MS = Math.max(
   0,
-  parseInt(process.env.KEY_MAX_WAIT_MS || '', 10) || 20_000,
+  parseInt(process.env.KEY_MAX_WAIT_MS || '', 10) || 0,
 );
 
 // Long suspend window for exhausted/invalid keys.
@@ -2338,7 +2340,7 @@ function patchFetch() {
           // Old behaviour fired immediately into a guaranteed 429 (fake cycle).
           // Now we sleep until the key's cooldown expires so the request has a
           // real chance of succeeding.  Capped by MAX_KEY_WAIT_MS (env-tunable,
-          // default 2 min) so we never stall indefinitely.
+          // default 0 / disabled) so we never stall indefinitely.
           if (key && waitMs > 0 && MAX_KEY_WAIT_MS > 0) {
             const actualWait = Math.min(waitMs, MAX_KEY_WAIT_MS);
             await sleep(actualWait);

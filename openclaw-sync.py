@@ -31,6 +31,34 @@ os.environ.setdefault("HF_HUB_VERBOSITY", "error")
 from huggingface_hub import CommitOperationDelete, HfApi, snapshot_download, upload_folder
 from huggingface_hub.errors import HfHubHTTPError, RepositoryNotFoundError
 
+# huggingface_hub.upload_folder always appends DEFAULT_IGNORE_PATTERNS which
+# hard-blocks every .git/ subtree regardless of ignore_patterns= argument.
+# Work around this by escaping .git → __dot_git__ in the local snapshot before
+# upload, then unescaping after snapshot_download on restore.
+_GIT_ESCAPE = "__dot_git__"
+
+
+def _escape_git_dirs(root: Path) -> None:
+    """Rename every .git dir inside *root* to __dot_git__ so upload_folder uploads them."""
+    for dirpath, dirnames, _ in os.walk(root, topdown=False):
+        for dirname in list(dirnames):
+            if dirname == ".git":
+                src = Path(dirpath) / ".git"
+                dst = Path(dirpath) / _GIT_ESCAPE
+                if src.exists() and not dst.exists():
+                    src.rename(dst)
+
+
+def _unescape_git_dirs(root: Path) -> None:
+    """Rename every __dot_git__ dir inside *root* back to .git after snapshot_download."""
+    for dirpath, dirnames, _ in os.walk(root, topdown=False):
+        for dirname in list(dirnames):
+            if dirname == _GIT_ESCAPE:
+                src = Path(dirpath) / _GIT_ESCAPE
+                dst = Path(dirpath) / ".git"
+                if src.exists() and not dst.exists():
+                    src.rename(dst)
+
 # Belt-and-suspenders: also raise the level after import in case the env var
 # wasn't honored (older hub versions, or message logged via a sub-logger).
 logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
@@ -768,6 +796,10 @@ def create_snapshot_dir(source_root: Path) -> Path:
             raise RuntimeError(
                 f"Snapshot changed while copying {rel_posix}; retrying next sync pass."
             )
+    # Escape .git dirs so upload_folder (which hard-blocks .git via
+    # DEFAULT_IGNORE_PATTERNS) can upload them. _unescape_git_dirs is called
+    # in restore_workspace after snapshot_download.
+    _escape_git_dirs(staging_root)
     return staging_root
 
 
@@ -929,6 +961,10 @@ def restore_workspace() -> bool:
             if not any(tmp_path.iterdir()):
                 write_status("fresh", "Backup dataset is empty. Starting fresh.")
                 return True
+
+            # Undo the .git → __dot_git__ escaping applied before upload
+            # (upload_folder hard-blocks .git via DEFAULT_IGNORE_PATTERNS).
+            _unescape_git_dirs(tmp_path)
 
             # Build the restored workspace in a staging dir without touching the
             # live workspace.  Only swap once staging is fully written so a copy
