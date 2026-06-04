@@ -6,11 +6,17 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
-- **Gemini Bearer auth 401 on newer endpoints** — The key rotator only set `Authorization: Bearer` for OpenAI-compatible paths (`/v1beta/openai/...`), using `?key=` for other endpoints. Newer Google endpoints like `/v1beta/embeddings` (used for memory/embeddings) require Bearer auth. Fixed by always setting Bearer auth for ALL Gemini requests with a key, regardless of endpoint path. Google APIs accept both formats, so no regression.
+- **Gemini invalid API keys stuck as client errors** — Google can return invalid Gemini API keys as HTTP 400 `INVALID_ARGUMENT` / `API_KEY_INVALID` (`"API key not valid"`). The rotator now classifies that body as an auth/key failure so the bad key is suspended and the pool can advance instead of repeatedly logging `client_error status=400` on the same key.
+- **Gemini/Vertex auth separation** — Native Gemini Developer API calls keep API-key auth (`?key=` / `x-goog-api-key`), OpenAI-compatible Gemini paths keep `Authorization: Bearer`, and Vertex (`aiplatform.googleapis.com`) is no longer matched by the Gemini API-key rotator so OpenClaw can use its own GCP/OAuth credentials.
 - **Anthropic key rotation never applied** — `api.anthropic.com` authenticates via the `x-api-key` header, not `Authorization: Bearer`. The rotator only injected a Bearer header, leaving the caller's original `x-api-key` untouched, so the rotated Anthropic pool was never used. Added a provider-aware auth-header injector (`x-api-key` for Anthropic, `Bearer` for everyone else) wired into all three dispatch layers (`fetch`, `undici`, `node:http`).
 - **Gemini stickiness lost when the model is detected after key selection** — OpenAI-compatible Gemini (and `node:http`) requests reach key selection before the request body reveals the model, so the key is pinned under a temporary unknown-model bucket. Promotion then deleted that bucket, sending the next (also model-unknown) request back to round-robin — keys rotated on every call. The unknown-model bucket now stays pinned to the same key after promotion, and is still cleared on a real provider failure, restoring sticky-until-failure behavior.
 - **Dashboard pick undercount** — `task_affinity_pick` events were emitted but missing from the manager's pick-type set, so affinity reuses were not counted as picks.
 - **Rotator blind to responses on undici 8 (no success/failure accounting, lease leak)** — OpenClaw bundles undici 8, whose dispatch handler interface renamed `onHeaders`/`onData`/`onComplete`/`onError` to `onResponseStart`/`onResponseData`/`onResponseEnd`/`onResponseError`. The rotator's handler wrapper only instrumented the classic names, so on undici 8 none fired: successes were never recorded (`success 0`), 429/auth failures were never classified (keys never penalized or rotated), and the in-flight lease was only released by its 30s TTL (`inflight_lease_expired` "lease cleanup"). The wrapper now instruments both interfaces; classic-undici behavior (e.g. the repo's undici 7) is unchanged.
+
+### Changed
+
+- **Gemini body rewriting is opt-in** — The key rotator now keeps request payload shaping with OpenClaw/provider adapters by default. Legacy cleanup for malformed Gemini `thought_signature` placeholders remains available behind `KEY_GEMINI_BODY_SANITIZER=true`.
+- **Task-affinity docs/UI aligned with runtime defaults** — documented defaults and the env builder now match the 300s / 50-reuse runtime values used to avoid mid-task key switches.
 
 ### Added
 

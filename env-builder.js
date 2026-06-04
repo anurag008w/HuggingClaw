@@ -632,9 +632,9 @@ const FIELDS = [
     "k": "KEY_TASK_AFFINITY_MS",
     "lbl": "Same-task key affinity window (ms)",
     "type": "text",
-    "ph": "30000",
+    "ph": "300000",
     "tag": "advanced",
-    "help": "Sequential non-sticky requests for the same provider/model bucket can reuse the last healthy key during this short idle window. Set 0 for pure round-robin."
+    "help": "Sequential non-sticky requests for the same provider/model bucket can reuse the last healthy key during this idle window. Runtime default: 300000 ms (5 minutes). Set 0 for pure round-robin."
   },
 {
     "g": "Plugins",
@@ -642,9 +642,9 @@ const FIELDS = [
     "k": "KEY_TASK_AFFINITY_MAX_REUSES",
     "lbl": "Same-task max key reuses per burst",
     "type": "text",
-    "ph": "3",
+    "ph": "50",
     "tag": "advanced",
-    "help": "Maximum extra same-key reuses per non-sticky affinity burst before normal round-robin resumes. Default: 3."
+    "help": "Maximum extra same-key reuses per non-sticky affinity burst before normal round-robin resumes. Runtime default: 50."
   },
 {
     "g": "Plugins",
@@ -654,7 +654,17 @@ const FIELDS = [
     "type": "text",
     "ph": "262144",
     "tag": "advanced",
-    "help": "Maximum request-body bytes inspected to find model names in streaming OpenAI-compatible Gemini calls. Default: 256 KiB."
+    "help": "Maximum request-body bytes inspected to find model names in streaming OpenAI-compatible Gemini calls. Only used for key scoping; it does not rewrite OpenClaw payloads. Default: 256 KiB."
+  },
+{
+    "g": "Plugins",
+    "icon": "🔄",
+    "k": "KEY_GEMINI_BODY_SANITIZER",
+    "lbl": "Gemini legacy body sanitizer (opt-in)",
+    "type": "toggle",
+    "ph": "false",
+    "tag": "advanced",
+    "help": "Default off. Leave OpenClaw/provider adapters in charge of request-body shaping; enable only to strip known malformed Gemini thought_signature placeholders from legacy histories."
   },
 {
     "g": "Plugins",

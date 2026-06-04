@@ -300,9 +300,10 @@ Optional tuning:
 - `KEY_MAX_INFLIGHT_PER_KEY` (default `3`) — soft concurrent request cap per key.
 - `OPENCLAW_PROVIDER_TIMEOUT_SECONDS` (default `300`, set `0` to disable) — injects provider-level `timeoutSeconds` into generated OpenClaw model providers so slow preview/thinking models are not aborted at the default ~120s idle window before the first reply chunk.
 - `KEY_INFLIGHT_TTL_MS` (default `30000`) — safety lease for picked keys with no provider headers/completion/error; stale leases are cleaned up without marking the key failed, so long streams/tasks do not rotate away just because bookkeeping timed out.
-- `KEY_TASK_AFFINITY_MS` (default `30000`) — short same-task affinity window for sequential non-sticky provider calls; sticky providers keep their stronger until-failure pin.
-- `KEY_TASK_AFFINITY_MAX_REUSES` (default `3`) — max extra same-key reuses per non-sticky affinity burst before normal round-robin resumes.
-- `KEY_MODEL_SNIFF_MAX_BYTES` (default `262144`) — max request-body bytes to inspect for model names on streaming OpenAI-compatible Gemini calls.
+- `KEY_TASK_AFFINITY_MS` (default `300000`) — short same-task affinity window for sequential non-sticky provider calls; sticky providers keep their stronger until-failure pin.
+- `KEY_TASK_AFFINITY_MAX_REUSES` (default `50`) — max extra same-key reuses per non-sticky affinity burst before normal round-robin resumes.
+- `KEY_MODEL_SNIFF_MAX_BYTES` (default `262144`) — max request-body bytes to inspect for model names on streaming OpenAI-compatible Gemini calls; this is only for per-model key scoping, not payload rewriting.
+- `KEY_GEMINI_BODY_SANITIZER` (default `false`) — legacy opt-in cleanup for malformed Gemini `thought_signature` placeholders. Leave off for normal OpenClaw deployments because OpenClaw/provider adapters own request-body shaping and the rotator should only inject/select keys.
 - `KEY_ERROR_BODY_SNIFF_MAX_BYTES` (default `65536`) — max error-response bytes to inspect so provider quota/rate bodies such as 403 quota errors are scoped correctly instead of being treated as permanent auth failures.
 - `KEY_STICKY_UNTIL_FAILURE` (default `true`) — keep sticky providers on one key until that key fails/exhausts.
 - `KEY_STICKY_PROVIDERS` (default `gemini`) — comma-separated provider names that should use sticky key selection instead of per-request round-robin.

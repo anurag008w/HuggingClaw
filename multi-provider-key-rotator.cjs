@@ -154,6 +154,14 @@ const USE_SUSPENDED_KEY_AS_LAST_RESORT = !/^(0|false|no|off)$/i.test(
   String(process.env.KEY_USE_SUSPENDED_AS_LAST_RESORT || 'true').trim(),
 );
 
+// The rotator's primary job is credential injection/selection. Gemini request
+// bodies are owned by OpenClaw/provider adapters, so body rewriting stays opt-in
+// as a legacy compatibility escape hatch for deployments that still leak the
+// known `reasoning_content` placeholder into Gemini thought_signature fields.
+const GEMINI_BODY_SANITIZER_ENABLED = /^(1|true|yes|on)$/i.test(
+  String(process.env.KEY_GEMINI_BODY_SANITIZER || '').trim(),
+);
+
 // Sticky mode keeps one key assigned to the same provider/model bucket until
 // that key is suspended or fails.  Gemini enables it by default because Google
 // quotas are model-scoped. New model buckets are initially balanced through
@@ -565,7 +573,11 @@ function classifyProviderFailure(p, status, errorInfo) {
   ].map(normalizeErrorToken).join(' ');
 
   const looksRateOrQuota = /rate.?limit|too.?many|quota|resource.?exhaust|usage.?limit|insufficient.?quota|capacity.?exceeded|tokens?.?per|requests?.?per|rate_limit|rate.?limited|userratelimit|dailylimit|limitexceeded/.test(haystack);
-  const looksAuth = /auth|unauthori[sz]ed|invalid.?api.?key|invalid.?key|permission|forbidden|billing|credit|payment|required/.test(haystack);
+  // Google Gemini returns invalid API keys as HTTP 400 INVALID_ARGUMENT with
+  // reason=API_KEY_INVALID and message "API key not valid". Treat that as an
+  // auth/key failure, not a harmless client_error, otherwise one bad key stays
+  // sticky forever and every Gemini request repeats the same 400 on #1/N.
+  const looksAuth = /auth|unauthori[sz]ed|permission|forbidden|billing|credit|payment|required|invalid.?api.?key|api.?key.?invalid|api.?key.?not.?valid|key.?invalid|invalid.?key/.test(haystack);
   const looksTransient = /overload|temporar|unavailable|timeout|backend|internal|server.?error|try.?again|capacity/.test(haystack);
 
   if (status >= 100 && status < 400) return 'success';
@@ -1671,14 +1683,30 @@ function createBodyModelSniffer(provider, key, getModel, setModel) {
   };
 }
 
+function rewriteGeminiBodyIfNeeded(body, provider) {
+  if (!GEMINI_BODY_SANITIZER_ENABLED || !provider || provider.name !== 'gemini' || body == null) return { body, modified: false };
+  if (!(typeof body === 'string' || Buffer.isBuffer(body) || body instanceof Uint8Array || body instanceof ArrayBuffer || Array.isArray(body))) {
+    return { body, modified: false };
+  }
+  const text = bodyToUtf8String(body);
+  if (!text) return { body, modified: false };
+  const cleaned = stripGeminiThoughtParts(text);
+  if (cleaned === text) return { body, modified: false };
+  if (typeof body === 'string') return { body: cleaned, modified: true };
+  if (Buffer.isBuffer(body)) return { body: Buffer.from(cleaned, 'utf8'), modified: true };
+  if (body instanceof Uint8Array) return { body: Buffer.from(cleaned, 'utf8'), modified: true };
+  if (body instanceof ArrayBuffer) return { body: Buffer.from(cleaned, 'utf8'), modified: true };
+  return { body: cleaned, modified: true };
+}
+
 function wrapBodyForModelSniffing(body, provider, key, getModel, setModel) {
-  if (!body || getModel?.() || !provider?.perModelLimits) return body;
+  if (!body || !provider?.perModelLimits) return body;
   const sniffer = createBodyModelSniffer(provider, key, getModel, setModel);
   if (!sniffer) return body;
 
   if (typeof body === 'string' || Buffer.isBuffer(body) || body instanceof Uint8Array || body instanceof ArrayBuffer || Array.isArray(body)) {
     const text = bodyToUtf8String(body);
-    if (text) {
+    if (text && !getModel?.()) {
       const model = extractModelFromBody(text);
       if (model) {
         setModel(model);
@@ -1688,6 +1716,8 @@ function wrapBodyForModelSniffing(body, provider, key, getModel, setModel) {
     }
     return body;
   }
+
+  if (getModel?.()) return body;
 
   if (typeof body[Symbol.asyncIterator] === 'function') {
     return (async function* sniffAsyncBody() {
@@ -1790,35 +1820,82 @@ function buildAttemptFetchArgs(input, init, provider, usedKey) {
 function stripGeminiThoughtParts(bodyStr) {
   if (typeof bodyStr !== 'string' || bodyStr.length === 0) return bodyStr;
   // Quick pre-check: skip JSON parse if neither key is present.
-  if (!bodyStr.includes('thought_signature') && !bodyStr.includes('"thought":true') &&
+  if (!bodyStr.includes('thought_signature') && !bodyStr.includes('thoughtSignature') &&
+      !bodyStr.includes('reasoning_content') && !bodyStr.includes('"thought":true') &&
       !bodyStr.includes('"thought": true')) {
     return bodyStr;
   }
   try {
     const body = JSON.parse(bodyStr);
-    if (!body || !Array.isArray(body.contents)) return bodyStr;
+    if (!body || typeof body !== 'object') return bodyStr;
     let modified = false;
-    body.contents = body.contents.map(content => {
-      if (!content || !Array.isArray(content.parts)) return content;
-      let partsModified = false;
-      const filtered = content.parts.map(part => {
-        if (!part || typeof part !== 'object') return part;
-        if (part.thought === true) { modified = true; partsModified = true; return null; }
-        if (Object.prototype.hasOwnProperty.call(part, 'thought_signature') &&
-            part.thought_signature === 'reasoning_content') {
-          const { thought_signature, ...rest } = part;
-          modified = true; partsModified = true;
-          return rest;
+
+    const cleanPart = (part) => {
+      if (!part || typeof part !== 'object' || Array.isArray(part)) return part;
+      let next = part;
+      const clone = () => { if (next === part) next = { ...part }; return next; };
+
+      // A provider-conversion hop can leak Anthropic's placeholder into Gemini's
+      // encrypted signature slot. Google expects an opaque base64-ish signature
+      // and rejects the literal placeholder with HTTP 400. Drop only that known
+      // malformed value; valid thought signatures must pass through untouched.
+      for (const keyName of ['thought_signature', 'thoughtSignature']) {
+        if (Object.prototype.hasOwnProperty.call(next, keyName) && next[keyName] === 'reasoning_content') {
+          delete clone()[keyName];
+          modified = true;
         }
-        return part;
-      }).filter(Boolean);
-      if (partsModified) {
-        // Preserve the content entry even if all parts were stripped (empty
-        // parts array is valid for role-only content markers).
-        return { ...content, parts: filtered };
       }
-      return content;
-    });
+
+      // Native Gemini parts sometimes contain a private thought-only marker from
+      // intermediate history conversion. It is safe to drop only when the part has
+      // no payload and no valid signature. Never remove functionCall/text parts.
+      const keys = Object.keys(next).filter(k => next[k] !== undefined);
+      if (next.thought === true && keys.every(k => k === 'thought')) {
+        modified = true;
+        return null;
+      }
+      return next;
+    };
+
+    const cleanPartsArray = (parts) => {
+      if (!Array.isArray(parts)) return parts;
+      const out = [];
+      let changed = false;
+      for (const part of parts) {
+        const cleaned = cleanPart(part);
+        if (cleaned == null) { changed = true; continue; }
+        if (cleaned !== part) changed = true;
+        out.push(cleaned);
+      }
+      if (changed) modified = true;
+      return changed ? out : parts;
+    };
+
+    // Native Gemini REST: { contents: [{ parts: [...] }] }
+    if (Array.isArray(body.contents)) {
+      body.contents = body.contents.map(content => {
+        if (!content || !Array.isArray(content.parts)) return content;
+        const cleanedParts = cleanPartsArray(content.parts);
+        return cleanedParts === content.parts ? content : { ...content, parts: cleanedParts };
+      });
+    }
+
+    // OpenAI-compatible Gemini: { messages: [{ tool_calls: [{ extra_content: { google: { thought_signature }}}]}] }
+    // Sanitise only the known malformed placeholder; keep valid signatures per
+    // Google's function-calling validation rules.
+    const visit = (node) => {
+      if (!node || typeof node !== 'object') return;
+      if (Array.isArray(node)) { for (const item of node) visit(item); return; }
+      for (const keyName of ['thought_signature', 'thoughtSignature']) {
+        if (Object.prototype.hasOwnProperty.call(node, keyName) && node[keyName] === 'reasoning_content') {
+          delete node[keyName];
+          modified = true;
+        }
+      }
+      for (const value of Object.values(node)) visit(value);
+    };
+    if (Array.isArray(body.messages)) visit(body.messages);
+
     if (modified) {
       debug('[key-rotator] gemini: normalized malformed thought_signature history');
       return JSON.stringify(body);
@@ -1826,7 +1903,6 @@ function stripGeminiThoughtParts(bodyStr) {
   } catch (_) { /* malformed JSON — leave untouched */ }
   return bodyStr;
 }
-
 // ─── Patch undici (covers OpenClaw gateway's bundled undici AI calls) ───────────
 //
 // ROOT CAUSE: OpenClaw gateway uses a bundled undici for all AI provider HTTP
@@ -2208,6 +2284,16 @@ function patchUndiciDispatch(proto, tag) {
             newOptions.headers = applyProviderAuthHeaders(options.headers || {}, provider, key);
           }
 
+          const rewrittenBody = rewriteGeminiBodyIfNeeded(newOptions.body, provider);
+          if (rewrittenBody.modified) {
+            newOptions.body = rewrittenBody.body;
+            // The sanitized JSON can be shorter than the caller's original body.
+            // Drop a stale caller-supplied Content-Length so undici computes the
+            // correct length instead of sending a truncated or overlong request.
+            newOptions.headers = uDeleteHeader(newOptions.headers || {}, 'content-length');
+            debug('[key-rotator] gemini (undici): normalized malformed thought_signature history');
+          }
+
           newOptions.body = wrapBodyForModelSniffing(
             newOptions.body,
             usedProvider,
@@ -2308,16 +2394,20 @@ function patchFetch() {
     // Extract model for per-model-limit providers (gemini etc.)
     let model = provider.perModelLimits ? extractModelFromUrl(urlLike) : null;
 
-    // ── Gemini: normalise thought parts / thought_signature before sending ───
+    // ── Gemini: optional legacy body sanitizer (disabled by default) ─────
     if (provider.name === 'gemini') {
       try {
         const rawBody = init?.body ?? (typeof input === 'object' && !(input instanceof URL) ? input?.body : null);
-        if (typeof rawBody === 'string') {
-          const cleaned = stripGeminiThoughtParts(rawBody);
-          if (cleaned !== rawBody) {
-            // Rebuild init with sanitised body; keep all other fields intact.
-            init = { ...init, body: cleaned };
-          }
+        const rewrittenBody = rewriteGeminiBodyIfNeeded(rawBody, provider);
+        if (rewrittenBody.modified) {
+          // Rebuild init with sanitised body; keep all other fields intact.
+          // Drop a stale Content-Length because the sanitized JSON can shrink.
+          init = {
+            ...init,
+            body: rewrittenBody.body,
+            headers: uDeleteHeader(init?.headers || inputHeaders || {}, 'content-length'),
+          };
+          debug('[key-rotator] gemini (fetch): normalized malformed thought_signature history');
         }
       } catch (_) { /* never break the request on sanitiser error */ }
     }
@@ -2557,13 +2647,12 @@ function patchHttpModule(mod) {
 
     const req = runInRotatorSyncRequest(() => orig.apply(mod, args));
 
-    // ── Gemini: normalise thought parts / thought_signature before sending ───
-    // patchFetch handles globalThis.fetch callers.  SDKs that use node:http
-    // directly (e.g. older Google AI SDK versions) bypass patchFetch, so the
-    // same sanitisation must happen here.  We intercept req.write / req.end,
-    // accumulate the body chunks, and rewrite the body before the first flush
-    // if any thought parts need normalising.  This avoids the 400 error:
-    //   "Invalid value at 'contents[N].parts[M].thought_signature' (TYPE_BYTES)"
+    // ── Gemini: optional legacy body sanitizer (disabled by default) ─────
+    // We already intercept req.write / req.end for model sniffing on the
+    // node:http path. If KEY_GEMINI_BODY_SANITIZER=true, reuse that buffered
+    // body to remove only the known malformed thought_signature placeholder
+    // before the first flush. With the default setting, request-body shaping
+    // stays entirely with OpenClaw/provider adapters.
     if (usedProvider && usedProvider.name === 'gemini') {
       try {
         const _write = req.write.bind(req);
@@ -2611,10 +2700,13 @@ function patchHttpModule(mod) {
                 } catch (_) { /* non-JSON body — leave model null */ }
               }
 
-              const cleaned = stripGeminiThoughtParts(fullBody);
-              if (cleaned !== fullBody) {
-                debug('[key-rotator] gemini (http): normalized malformed thought_signature history');
-                return _end(cleaned, 'utf8', typeof encoding === 'function' ? encoding : callback);
+              if (GEMINI_BODY_SANITIZER_ENABLED) {
+                const cleaned = stripGeminiThoughtParts(fullBody);
+                if (cleaned !== fullBody) {
+                  try { req.removeHeader?.('content-length'); } catch (_) {}
+                  debug('[key-rotator] gemini (http): normalized malformed thought_signature history');
+                  return _end(cleaned, 'utf8', typeof encoding === 'function' ? encoding : callback);
+                }
               }
               // No change — replay chunks as-is.
               for (const c of chunks) _write(c);
@@ -2711,7 +2803,7 @@ if (hasProviderKeys) {
   patchUndici();         // covers OpenClaw gateway's bundled undici AI calls
   startDiagnostics();
 
-  debug(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:${formatHours(PERM_SUSPEND_MS)}h (cap 16h) max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} max-retry-after:${MAX_RETRY_AFTER_MS/1000}s max-key-wait:${MAX_KEY_WAIT_MS/1000}s diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'} log-level:${LOG_LEVEL} verbose-picks:${VERBOSE_PICKS ? 'on' : 'off'} suspended-last-resort:${USE_SUSPENDED_KEY_AS_LAST_RESORT ? 'on' : 'off'} per-model-providers:${providerState.filter(p => p.perModelLimits).map(p => p.name).join(',') || 'none'} model-from-body:on model-sniff-max:${REQUEST_MODEL_SNIFF_MAX_BYTES} error-sniff-max:${ERROR_BODY_SNIFF_MAX_BYTES} error-body-wait:${ERROR_BODY_WAIT_MS}ms inflight-ttl:${INFLIGHT_TTL_MS}ms task-affinity:${TASK_AFFINITY_MS}ms/${TASK_AFFINITY_MAX_REUSES}reuses task-affinity-ignore-inflight:${TASK_AFFINITY_IGNORE_INFLIGHT_SATURATION ? 'on' : 'off'} sticky-until-failure:${STICKY_UNTIL_FAILURE ? 'on' : 'off'} sticky-ignore-inflight-saturation:${STICKY_IGNORE_INFLIGHT_SATURATION ? 'on' : 'off'} sticky-scope:${String(process.env.KEY_STICKY_SCOPE || 'auto').trim().toLowerCase() || 'auto'} sticky-providers:${[...STICKY_PROVIDER_SET].join(',') || 'none'} llm-fallback-providers:${LLM_FALLBACK_PROVIDER_SET ? [...LLM_FALLBACK_PROVIDER_SET].join(',') : 'all'}`);
+  debug(`[key-rotator] loaded — cooldown base:${BASE_COOLDOWN_MS/1000}s max-strikes:${MAX_STRIKES} perm-suspend:${formatHours(PERM_SUSPEND_MS)}h (cap 16h) max-inflight-per-key:${MAX_INFLIGHT_PER_KEY} max-retry-after:${MAX_RETRY_AFTER_MS/1000}s max-key-wait:${MAX_KEY_WAIT_MS/1000}s diagnostics:${DIAGNOSTICS_ENABLED ? 'on' : 'off'} log-level:${LOG_LEVEL} verbose-picks:${VERBOSE_PICKS ? 'on' : 'off'} suspended-last-resort:${USE_SUSPENDED_KEY_AS_LAST_RESORT ? 'on' : 'off'} gemini-body-sanitizer:${GEMINI_BODY_SANITIZER_ENABLED ? 'on' : 'off'} per-model-providers:${providerState.filter(p => p.perModelLimits).map(p => p.name).join(',') || 'none'} model-from-body:on model-sniff-max:${REQUEST_MODEL_SNIFF_MAX_BYTES} error-sniff-max:${ERROR_BODY_SNIFF_MAX_BYTES} error-body-wait:${ERROR_BODY_WAIT_MS}ms inflight-ttl:${INFLIGHT_TTL_MS}ms task-affinity:${TASK_AFFINITY_MS}ms/${TASK_AFFINITY_MAX_REUSES}reuses task-affinity-ignore-inflight:${TASK_AFFINITY_IGNORE_INFLIGHT_SATURATION ? 'on' : 'off'} sticky-until-failure:${STICKY_UNTIL_FAILURE ? 'on' : 'off'} sticky-ignore-inflight-saturation:${STICKY_IGNORE_INFLIGHT_SATURATION ? 'on' : 'off'} sticky-scope:${String(process.env.KEY_STICKY_SCOPE || 'auto').trim().toLowerCase() || 'auto'} sticky-providers:${[...STICKY_PROVIDER_SET].join(',') || 'none'} llm-fallback-providers:${LLM_FALLBACK_PROVIDER_SET ? [...LLM_FALLBACK_PROVIDER_SET].join(',') : 'all'}`);
   emitEvent('rotator_loaded', null, null, {
     providers: providerState.filter(p => p.keys.length).map(p => ({ name: p.name, total: p.keys.length })),
     logLevel: LOG_LEVEL,
@@ -2726,6 +2818,7 @@ if (hasProviderKeys) {
     stickyIgnoreInflightSaturation: STICKY_IGNORE_INFLIGHT_SATURATION,
     stickyScope: String(process.env.KEY_STICKY_SCOPE || 'auto').trim().toLowerCase() || 'auto',
     stickyProviders: [...STICKY_PROVIDER_SET],
+    geminiBodySanitizer: GEMINI_BODY_SANITIZER_ENABLED,
     llmFallbackProviders: LLM_FALLBACK_PROVIDER_SET ? [...LLM_FALLBACK_PROVIDER_SET] : ['*'],
   });
 } else {
