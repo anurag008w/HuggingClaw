@@ -73,9 +73,17 @@ if (PROXY_ALL) {
   }
 }
 
+const isHeaderPairArray = (headers) => Array.isArray(headers) && Array.isArray(headers[0]);
+
 const getHeaderValue = (headers, name) => {
   const lower = String(name || "").toLowerCase();
   if (!headers || !lower) return "";
+  if (isHeaderPairArray(headers)) {
+    for (const entry of headers) {
+      if (entry && String(entry[0]).toLowerCase() === lower) return String(entry[1] || "");
+    }
+    return "";
+  }
   if (Array.isArray(headers)) {
     for (let i = 0; i < headers.length; i += 2) {
       if (String(headers[i]).toLowerCase() === lower) return String(headers[i + 1] || "");
@@ -99,6 +107,12 @@ const getHeaderValue = (headers, name) => {
 const headersToObject = (headers) => {
   const out = {};
   if (!headers) return out;
+  if (isHeaderPairArray(headers)) {
+    for (const entry of headers) {
+      if (entry && entry[0] != null) out[String(entry[0])] = entry[1];
+    }
+    return out;
+  }
   if (Array.isArray(headers)) {
     for (let i = 0; i < headers.length; i += 2) {
       if (headers[i] != null) out[String(headers[i])] = headers[i + 1];
@@ -114,6 +128,41 @@ const headersToObject = (headers) => {
   if (headers && typeof headers === "object") {
     for (const key of Object.keys(headers)) out[key] = headers[key];
   }
+  return out;
+};
+
+const setHeaderValue = (headers, name, value) => {
+  const lower = String(name || "").toLowerCase();
+  if (isHeaderPairArray(headers)) {
+    let found = false;
+    for (const entry of headers) {
+      if (entry && String(entry[0]).toLowerCase() === lower) {
+        entry[1] = value;
+        found = true;
+        break;
+      }
+    }
+    if (!found) headers.push([name, value]);
+    return headers;
+  }
+  if (Array.isArray(headers)) {
+    let found = false;
+    for (let i = 0; i < headers.length; i += 2) {
+      if (String(headers[i]).toLowerCase() === lower) {
+        headers[i + 1] = value;
+        found = true;
+        break;
+      }
+    }
+    if (!found) headers.push(name, value);
+    return headers;
+  }
+  if (headers instanceof Map || (headers && typeof headers.set === "function")) {
+    headers.set(name, value);
+    return headers;
+  }
+  const out = headers || {};
+  out[name] = value;
   return out;
 };
 
@@ -394,26 +443,11 @@ if (PROXY_URL) {
               const targetHeader = "x-target-host";
               const secretHeader = "x-proxy-key";
 
-              if (Array.isArray(options.headers)) {
-                let foundTarget = false;
-                for (let i = 0; i < options.headers.length; i += 2) {
-                  if (String(options.headers[i]).toLowerCase() === targetHeader) {
-                    foundTarget = true;
-                    break;
-                  }
-                }
-                if (!foundTarget) {
-                  options.headers.push(targetHeader, hostname);
-                  if (PROXY_SHARED_SECRET) options.headers.push(secretHeader, PROXY_SHARED_SECRET);
-                }
-              } else {
-                options.headers = options.headers || {};
-                if (options.headers instanceof Map || (typeof options.headers.set === 'function')) {
-                  options.headers.set(targetHeader, hostname);
-                  if (PROXY_SHARED_SECRET) options.headers.set(secretHeader, PROXY_SHARED_SECRET);
-                } else {
-                  options.headers[targetHeader] = hostname;
-                  if (PROXY_SHARED_SECRET) options.headers[secretHeader] = PROXY_SHARED_SECRET;
+              options.headers = options.headers || {};
+              if (!getHeaderValue(options.headers, targetHeader)) {
+                options.headers = setHeaderValue(options.headers, targetHeader, hostname);
+                if (PROXY_SHARED_SECRET) {
+                  options.headers = setHeaderValue(options.headers, secretHeader, PROXY_SHARED_SECRET);
                 }
               }
               options.origin = `https://${proxy.hostname}`;
