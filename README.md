@@ -308,6 +308,7 @@ Optional tuning:
 - `KEY_STICKY_PROVIDERS` (default `gemini`) — comma-separated provider names that should use sticky key selection instead of per-request round-robin.
 - `KEY_STICKY_SCOPE` (default `auto`) — `auto` uses per-model sticky buckets for Gemini/per-model providers and provider-level buckets for others; set `provider` or `model` to override.
 - `KEY_FETCH_MAX_RETRIES` (default `0`) — optional auto-retry count for retryable failures on **GET/HEAD/OPTIONS/POST** with a different key. Default `0` means the rotator does **not** spend extra upstream attempts for a single caller request.
+- `KEY_MAX_WAIT_MS` (default `0` / disabled) — when all keys are suspended and best-effort mode is active, sleep up to this many ms for the soonest-recovering key before forwarding the request. `0` (default) preserves the old fire-and-miss behaviour; set e.g. `20000` to give suspended keys a real recovery window instead of forwarding into a guaranteed 429.
 - `KEY_FETCH_RETRY_BASE_DELAY_MS` (default `250`) — base delay for retry backoff (respects `Retry-After`, capped to 10s).
 - `KEY_ROTATOR_ASSERT_NO_EXTRA_CALLS=true` — optional diagnostic warning if a single caller fetch creates more than one upstream provider attempt.
 - `KEY_ROTATOR_EMIT_SYNTHETIC_EVENTS=true` — optional local-only dashboard probe; with `SYNTHETIC_API_KEYS` configured, emits synthetic rotator events without sending an upstream provider request.
