@@ -309,6 +309,7 @@ Optional tuning:
 - `KEY_STICKY_SCOPE` (default `auto`) — `auto` uses per-model sticky buckets for Gemini/per-model providers and provider-level buckets for others; set `provider` or `model` to override.
 - `KEY_FETCH_MAX_RETRIES` (default `0`) — optional auto-retry count for retryable failures on **GET/HEAD/OPTIONS/POST** with a different key. Default `0` means the rotator does **not** spend extra upstream attempts for a single caller request.
 - `KEY_FETCH_RETRY_BASE_DELAY_MS` (default `250`) — base delay for retry backoff (respects `Retry-After`, capped to 10s).
+- `KEY_MAX_WAIT_MS` (default `0`) — optional wait before reusing a suspended key when the whole pool is exhausted. Default `0` keeps OpenClaw fallback unblocked; set a small positive value only for single-provider setups where waiting for key recovery is preferred.
 - `KEY_ROTATOR_ASSERT_NO_EXTRA_CALLS=true` — optional diagnostic warning if a single caller fetch creates more than one upstream provider attempt.
 - `KEY_ROTATOR_EMIT_SYNTHETIC_EVENTS=true` — optional local-only dashboard probe; with `SYNTHETIC_API_KEYS` configured, emits synthetic rotator events without sending an upstream provider request.
 - `KEY_ROTATOR_DIAGNOSTICS=true` — emit periodic provider/key health snapshots.
