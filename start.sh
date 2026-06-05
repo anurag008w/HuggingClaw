@@ -20,6 +20,23 @@ hc_is_true() {
   esac
 }
 
+hc_is_enabled() {
+  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on|enabled) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+hc_key_rotator_enabled() {
+  if [ "${KEY_ROTATOR_ENABLED+x}" = "x" ]; then
+    hc_is_enabled "${KEY_ROTATOR_ENABLED}"
+  elif [ "${KEY_ROTATOR+x}" = "x" ]; then
+    hc_is_enabled "${KEY_ROTATOR}"
+  else
+    hc_is_enabled "${ROTATOR:-off}"
+  fi
+}
+
 load_env_bundle() {
   # HUGGINGCLAW_ENV_BUNDLE is a single base64url-encoded JSON object generated
   # by /env-builder. Existing individual env vars win over bundled values.
@@ -1412,15 +1429,35 @@ fi
 chmod 600 "$EXISTING_CONFIG"
 
 # ── Enable Gateway Preload Fixes ──
-# These preload scripts keep iframe embedding working on HF Spaces and enable
-# provider key rotation for gateway traffic. Keep paths centralized so future
-# rotator renames do not leave stale NODE_OPTIONS references behind.
-export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--require ${IFRAME_FIX_PRELOAD} --require ${KEY_ROTATOR_PRELOAD}"
+# These preload scripts keep iframe embedding working on HF Spaces. HuggingClaw's
+# custom provider key rotator is opt-in with ROTATOR=on (or
+# KEY_ROTATOR_ENABLED=true); when disabled, OpenClaw's native multi-key provider
+# pools read the same *_API_KEYS / *_API_KEY_N envs directly.
+# Docker images may already contain the rotator in NODE_OPTIONS. Remove that
+# one preload first, then add it back only when ROTATOR is explicitly enabled. Keep other
+# existing preloads (notably Cloudflare proxy) untouched.
+_cleaned_node_options=" ${NODE_OPTIONS:-} "
+for _pattern in "--require ${KEY_ROTATOR_PRELOAD} " "--require=${KEY_ROTATOR_PRELOAD} " "-r ${KEY_ROTATOR_PRELOAD} "; do
+  _cleaned_node_options="${_cleaned_node_options//$_pattern/ }"
+done
+export NODE_OPTIONS="$(printf '%s' "$_cleaned_node_options" | tr -s ' ' | sed 's/^ //;s/ $//')"
+export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--require ${IFRAME_FIX_PRELOAD}"
+if hc_key_rotator_enabled; then
+  export NODE_OPTIONS="${NODE_OPTIONS} --require ${KEY_ROTATOR_PRELOAD}"
+else
+  echo "KeyRotator: disabled (ROTATOR=${ROTATOR:-${KEY_ROTATOR_ENABLED:-off}}); OpenClaw will read provider *_API_KEYS pools directly"
+fi
+unset _cleaned_node_options _pattern
 
 # ── Startup Summary ──
 echo ""
 echo "Version   : ${OPENCLAW_DISPLAY_VERSION}"
 echo "Model     : ${LLM_MODEL}"
+if hc_key_rotator_enabled; then
+  echo "KeyRotate : HuggingClaw preload over provider *_API_KEYS pools (set ROTATOR=off for OpenClaw native)"
+else
+  echo "KeyRotate : OpenClaw native pools only"
+fi
 if [ -n "${LLM_FALLBACK_MODELS:-}" ]; then
   echo "Fallbacks : ${LLM_FALLBACK_MODELS}"
 fi
@@ -1597,18 +1634,10 @@ warmup_browser() {
 # ── Start background services ──
 export LLM_MODEL="$LLM_MODEL"
 
-# ── Ensure key-rotator uses the correct HF token for huggingface.co calls ──
-# NODE_OPTIONS preloads the provider key rotator into health-server.js.
-# The rotator patches https.request and injects HUGGINGFACE_HUB_TOKEN (or
-# falls back to LLM_API_KEY) for any call to huggingface.co — including the
-# privacy-detection API call in detectSpacePrivacy(). If HUGGINGFACE_HUB_TOKEN
-# is not set (user's LLM provider is not HuggingFace), the rotator falls back
-# to LLM_API_KEY, which is the AI-provider key, NOT the HF owner token.
-# This causes a 401 on /api/spaces/${SPACE_ID} → privacy detection always
-# fails → SPACE_IS_PRIVATE stays true → public-space links never open in a
-# new tab.
-# Fix: seed HUGGINGFACE_HUB_TOKEN from HF_TOKEN when not already set.
-# HF Spaces auto-injects HF_TOKEN as the space owner's token, so this is safe.
+# ── Ensure privacy checks use the correct HF owner token ──
+# HF Spaces auto-injects HF_TOKEN as the space owner's token. Keep
+# HUGGINGFACE_HUB_TOKEN seeded from it so Hugging Face API calls never fall back
+# to an LLM provider key. This stays safe whether ROTATOR is on or off.
 export HUGGINGFACE_HUB_TOKEN="${HUGGINGFACE_HUB_TOKEN:-${HF_TOKEN:-}}"
 
 # 10. Start Health Server & Dashboard

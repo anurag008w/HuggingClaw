@@ -543,6 +543,16 @@ const FIELDS = [
     "help": "Keep enabled when OPENCLAW_VERSION is latest, beta, or a pinned release from the env bundle. Disable only if you want to force the image-bundled OpenClaw version."
   },
 {
+    "g": "Plugins",
+    "icon": "🔄",
+    "k": "ROTATOR",
+    "lbl": "HuggingClaw key rotator on/off (off = OpenClaw native multi-key pools only)",
+    "type": "toggle",
+    "ph": "off",
+    "tag": "advanced",
+    "help": "Default off: OpenClaw reads the same <PROVIDER>_API_KEYS / <PROVIDER>_API_KEY_N envs directly. Set on to enable HuggingClaw's preload rotator and /key-rotator manager."
+  },
+{
     "g": "Core",
     "icon": "⚡",
     "k": "LLM_API_KEY_FALLBACK_ENABLED",
