@@ -20,6 +20,13 @@ hc_is_true() {
   esac
 }
 
+hc_is_false() {
+  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+    0|false|no|off|disabled) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 hc_is_enabled() {
   case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
     1|true|yes|on|enabled) return 0 ;;
@@ -493,7 +500,7 @@ first_key_from_pool() {
     | awk 'NF{print; exit}'
 }
 
-first_numbered_key() {
+numbered_key_values() {
   local singular_var="$1"
   local prefix="${singular_var}_"
   env | awk -F= -v prefix="$prefix" '
@@ -503,11 +510,22 @@ first_numbered_key() {
     }' \
     | sort -n -k1,1 \
     | sed 's/^[0-9][0-9]*\t//' \
-    | sed 's/^[^=]*=//' \
+    | sed 's/^[^=]*=//'
+}
+
+first_numbered_key() {
+  numbered_key_values "$1" \
     | while IFS= read -r value; do
         first_key_from_pool "$value"
         break
       done
+}
+
+count_unique_keys() {
+  printf '%s\n' "$@" \
+    | tr ',;\r' '\n\n\n' \
+    | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+    | awk 'NF && !seen[$0]++ { count++ } END { print count + 0 }'
 }
 
 promote_first_pool_key() {
@@ -556,6 +574,33 @@ normalize_key_aliases() {
   done
 }
 
+mirror_singular_key_aliases() {
+  local canonical_key_var="$1"
+  shift
+  local canonical_val="${!canonical_key_var:-}"
+  local alias alias_val
+  [ -n "$canonical_val" ] || return 0
+  for alias in "$@"; do
+    alias_val="${!alias:-}"
+    # Keep operator-provided aliases, but replace a generic LLM_API_KEY mapping
+    # with the provider-specific key selected from the provider pool.
+    if [ -z "$alias_val" ] || { [ -n "${LLM_API_KEY:-}" ] && [ "$alias_val" = "$LLM_API_KEY" ]; }; then
+      export "${alias}=$canonical_val"
+    fi
+  done
+}
+
+mirror_pool_aliases() {
+  local canonical_pool_var="$1"
+  shift
+  local canonical_val="${!canonical_pool_var:-}"
+  local alias
+  [ -n "$canonical_val" ] || return 0
+  for alias in "$@"; do
+    [ -n "${!alias:-}" ] || export "${alias}=$canonical_val"
+  done
+}
+
 promote_first_pool_key "ANTHROPIC_API_KEY" "ANTHROPIC_API_KEYS"
 promote_first_pool_key "OPENAI_API_KEY" "OPENAI_API_KEYS"
 # Accept common provider aliases used by SDK docs and existing Spaces, then
@@ -564,6 +609,61 @@ normalize_key_aliases "GEMINI_API_KEYS" "GEMINI_API_KEY" \
   GOOGLE_API_KEYS GOOGLE_GENERATIVE_AI_API_KEYS GOOGLE_AI_API_KEYS GOOGLE_GENAI_API_KEYS \
   GOOGLE_API_KEY GOOGLE_GENERATIVE_AI_API_KEY GOOGLE_AI_API_KEY GOOGLE_GENAI_API_KEY
 promote_first_pool_key "GEMINI_API_KEY" "GEMINI_API_KEYS"
+# Gemini embedding adapters in OpenClaw/Google SDKs do not all agree on the
+# singular env name: some resolve GEMINI_API_KEY while others resolve
+# GOOGLE_API_KEY, GOOGLE_GENERATIVE_AI_API_KEY, GOOGLE_AI_API_KEY, or
+# GOOGLE_GENAI_API_KEY. When operators configure only GEMINI_API_KEYS pools,
+# mirror the chosen runtime key into those aliases so memory indexing does not
+# fall back to unauthenticated Google credentials and fail with 401.
+mirror_pool_aliases "GEMINI_API_KEYS" \
+  GOOGLE_API_KEYS GOOGLE_GENERATIVE_AI_API_KEYS GOOGLE_AI_API_KEYS GOOGLE_GENAI_API_KEYS
+mirror_singular_key_aliases "GEMINI_API_KEY" \
+  GOOGLE_API_KEY GOOGLE_GENERATIVE_AI_API_KEY GOOGLE_AI_API_KEY GOOGLE_GENAI_API_KEY
+GEMINI_RUNTIME_KEY_COUNT=$(count_unique_keys \
+  "${GEMINI_API_KEYS:-}" \
+  "${GEMINI_API_KEY:-}" \
+  "$(numbered_key_values GEMINI_API_KEY)" \
+  "${GOOGLE_API_KEYS:-}" \
+  "${GOOGLE_GENERATIVE_AI_API_KEYS:-}" \
+  "${GOOGLE_AI_API_KEYS:-}" \
+  "${GOOGLE_GENAI_API_KEYS:-}" \
+  "${GOOGLE_API_KEY:-}" \
+  "${GOOGLE_GENERATIVE_AI_API_KEY:-}" \
+  "${GOOGLE_AI_API_KEY:-}" \
+  "${GOOGLE_GENAI_API_KEY:-}")
+export GEMINI_RUNTIME_KEY_COUNT
+gemini_free_text_model_or_default() {
+  local candidate="$(trim_var "${1:-}")"
+  case "$candidate" in
+    gemini-2.5-flash|gemini-2.5-flash-lite) printf '%s' "$candidate" ;;
+    "") printf '%s' "gemini-2.5-flash" ;;
+    *)
+      echo "Warning: unsupported Gemini free-tier text/search model '$candidate'; using gemini-2.5-flash." >&2
+      printf '%s' "gemini-2.5-flash"
+      ;;
+  esac
+}
+
+gemini_embedding_model_or_default() {
+  local candidate="$(trim_var "${1:-}")"
+  case "$candidate" in
+    gemini-embedding-001) printf '%s' "$candidate" ;;
+    "") printf '%s' "gemini-embedding-001" ;;
+    *)
+      echo "Warning: unsupported Gemini embedding model '$candidate'; using gemini-embedding-001." >&2
+      printf '%s' "gemini-embedding-001"
+      ;;
+  esac
+}
+
+GEMINI_FREE_TEXT_MODEL="$(gemini_free_text_model_or_default "${HUGGINGCLAW_GEMINI_TEXT_MODEL:-}")"
+GEMINI_FREE_SEARCH_MODEL="$(gemini_free_text_model_or_default "${HUGGINGCLAW_GEMINI_SEARCH_MODEL:-$GEMINI_FREE_TEXT_MODEL}")"
+GEMINI_FREE_MEMORY_MODEL="$(gemini_embedding_model_or_default "${HUGGINGCLAW_GEMINI_MEMORY_MODEL:-}")"
+GEMINI_CAPABILITY_DEFAULTS_ENABLED=false
+if [ "${GEMINI_RUNTIME_KEY_COUNT:-0}" -gt 0 ] && ! hc_is_false "${HUGGINGCLAW_GEMINI_CAPABILITY_DEFAULTS:-true}"; then
+  GEMINI_CAPABILITY_DEFAULTS_ENABLED=true
+fi
+export GEMINI_RUNTIME_KEY_COUNT GEMINI_FREE_TEXT_MODEL GEMINI_FREE_SEARCH_MODEL GEMINI_FREE_MEMORY_MODEL GEMINI_CAPABILITY_DEFAULTS_ENABLED
 promote_first_pool_key "DEEPSEEK_API_KEY" "DEEPSEEK_API_KEYS"
 promote_first_pool_key "OPENROUTER_API_KEY" "OPENROUTER_API_KEYS"
 promote_first_pool_key "KILOCODE_API_KEY" "KILOCODE_API_KEYS"
@@ -777,6 +877,25 @@ CONFIG_JSON=$(jq \
    | .logging.consoleLevel = $consoleLevel
    | .logging.consoleStyle = $consoleStyle' <<<"$CONFIG_JSON")
 
+if [ "$GEMINI_CAPABILITY_DEFAULTS_ENABLED" = "true" ]; then
+  # Keep Gemini capability defaults on documented free-tier models only.
+  # - memory_search: gemini-embedding-001 is free-tier and purpose-built for text embeddings.
+  # - web_search: gemini-2.5-flash supports free-tier Search grounding.
+  # - image/PDF understanding: handled by the Gemini chat/model route (gemini-2.5-flash),
+  #   not by image_generate. Google image output models are not free-tier, so do not
+  #   force an imageGenerationModel default here. Secrets stay in env/pools.
+  CONFIG_JSON=$(jq \
+    --arg memoryModel "$GEMINI_FREE_MEMORY_MODEL" \
+    --arg searchModel "$GEMINI_FREE_SEARCH_MODEL" \
+    '
+    .agents.defaults.memorySearch.provider //= "gemini"
+    | .agents.defaults.memorySearch.model //= $memoryModel
+    | .tools.web.search.provider //= "gemini"
+    | .plugins.entries.google.config.webSearch.model //= $searchModel
+    | .plugins.entries.google.config.webSearch.baseUrl //= "https://generativelanguage.googleapis.com/v1beta"
+  ' <<<"$CONFIG_JSON")
+fi
+
 # Security: provider API keys and HF owner tokens come from runtime env/Space
 # secrets and must not be persisted into /home/node/.openclaw/openclaw.json.
 # The rotator/env provider discovery injects credentials at request time. A
@@ -891,8 +1010,8 @@ fi
 # These let multi-key pool users see models without having to also set *_MODELS.
 _DEFAULT_ANTHROPIC_MODELS="anthropic/claude-opus-4-7,anthropic/claude-sonnet-4-6,anthropic/claude-haiku-4-5,anthropic/claude-opus-4-0,anthropic/claude-sonnet-4-0,anthropic/claude-3-7-sonnet-latest,anthropic/claude-3-5-haiku-latest"
 _DEFAULT_OPENAI_MODELS="openai/gpt-5.5,openai/gpt-5.4,openai/gpt-5.4-mini,openai/gpt-5.4-nano,openai/gpt-4.1,openai/gpt-4.1-mini,openai/o3,openai/gpt-5.4-chat-latest,openai/gpt-5.5-chat-latest"
-_DEFAULT_GEMINI_MODELS="google/gemini-3.5-flash,google/gemini-3.1-pro-preview,google/gemini-3.1-flash-lite,google/gemini-2.5-pro,google/gemini-2.5-flash,google/gemini-2.5-flash-lite,google/gemini-flash-latest,google/gemini-pro-latest,google/gemini-3.5-flash-latest,google/gemini-2.5-pro-latest"
-_DEFAULT_VERTEX_MODELS="google-vertex/gemini-3.5-flash,google-vertex/gemini-3.1-pro-preview,google-vertex/gemini-2.5-pro,google-vertex/gemini-2.5-flash,google-vertex/gemini-2.5-flash-lite,google-vertex/gemini-flash-latest,google-vertex/gemini-pro-latest,google-vertex/gemini-2.5-pro-latest"
+_DEFAULT_GEMINI_MODELS="google/gemini-2.5-flash,google/gemini-2.5-flash-lite,google/gemini-2.5-pro"
+_DEFAULT_VERTEX_MODELS="google-vertex/gemini-2.5-flash,google-vertex/gemini-2.5-flash-lite,google-vertex/gemini-2.5-pro"
 _DEFAULT_DEEPSEEK_MODELS="deepseek/deepseek-v4-pro,deepseek/deepseek-v4-flash,deepseek/deepseek-r1,deepseek/deepseek-r1-0528,deepseek/deepseek-chat,deepseek/deepseek-reasoner"
 _DEFAULT_OPENROUTER_MODELS="openrouter/auto,openrouter/anthropic/claude-opus-4-7,openrouter/openai/gpt-5.4,openrouter/google/gemini-3.5-flash,openrouter/deepseek/deepseek-v4-pro,openrouter/moonshotai/kimi-k2.6"
 _DEFAULT_GROQ_MODELS="groq/compound,groq/compound-mini,groq/openai/gpt-oss-120b,groq/moonshotai/kimi-k2-instruct-0905,groq/qwen/qwen3-32b"
@@ -1566,6 +1685,20 @@ if [ -f "$EXISTING_CONFIG" ]; then
            ((.gateway.trustedProxies // []) + ($desired.gateway.trustedProxies // []))
            | unique
          )
+     | if (($desired.agents.defaults.memorySearch.provider // "") != "") then
+         if (.agents.defaults.memorySearch.provider? == null) then
+           .agents.defaults.memorySearch.provider = $desired.agents.defaults.memorySearch.provider
+           | .agents.defaults.memorySearch.model = $desired.agents.defaults.memorySearch.model
+         elif (.agents.defaults.memorySearch.provider == $desired.agents.defaults.memorySearch.provider) then
+           .agents.defaults.memorySearch.model = (.agents.defaults.memorySearch.model // $desired.agents.defaults.memorySearch.model)
+         else . end
+       else . end
+     | if (($desired.tools.web.search.provider // "") != "") then
+         .tools.web.search.provider = (.tools.web.search.provider // $desired.tools.web.search.provider)
+       else . end
+     | if (($desired.plugins.entries.google.config.webSearch // {} | length) > 0) then
+         .plugins.entries.google.config.webSearch = (($desired.plugins.entries.google.config.webSearch // {}) * (.plugins.entries.google.config.webSearch // {}))
+       else . end
      | if $fileLogConfigured then .logging.level = $fileLevel else . end
      | if $consoleLogConfigured then .logging.consoleLevel = $consoleLevel else . end
      | if $consoleStyleConfigured then .logging.consoleStyle = $consoleStyle else . end
@@ -1719,6 +1852,15 @@ if hc_key_rotator_enabled; then
   echo "KeyRotate : HuggingClaw preload over provider *_API_KEYS pools (set ROTATOR=off for OpenClaw native)"
 else
   echo "KeyRotate : OpenClaw native pools only"
+fi
+if [ "${GEMINI_RUNTIME_KEY_COUNT:-0}" -gt 0 ]; then
+  echo "GeminiKeys: ${GEMINI_RUNTIME_KEY_COUNT} runtime key(s) available from Gemini/Google pool envs"
+fi
+if [ "$GEMINI_CAPABILITY_DEFAULTS_ENABLED" = "true" ]; then
+  echo "GeminiCaps: memory_search=${GEMINI_FREE_MEMORY_MODEL}, web_search=${GEMINI_FREE_SEARCH_MODEL}; image_generate not forced (no free Google image output default)"
+  if [[ "$LLM_MODEL" != google/gemini* && "$LLM_MODEL" != google-vertex/gemini* ]]; then
+    echo "GeminiVision: set LLM_MODEL=google/${GEMINI_FREE_TEXT_MODEL} for free image/PDF understanding (current: ${LLM_MODEL})"
+  fi
 fi
 if [ -n "${LLM_FALLBACK_MODELS:-}" ]; then
   echo "Fallbacks : ${LLM_FALLBACK_MODELS}"

@@ -32,17 +32,9 @@ const MODEL_CATALOGS = {
       "chatgpt-4o-latest"
     ],
     "Gemini": [
-      "gemini-3.5-flash",
-      "gemini-3.1-pro-preview",
-      "gemini-3.1-flash-lite",
-      "gemini-2.5-pro",
       "gemini-2.5-flash",
       "gemini-2.5-flash-lite",
-      "gemini-flash-latest",
-      "gemini-pro-latest",
-      "gemini-3.5-flash-latest",
-      "gemini-2.5-pro-latest",
-      "gemini-2.5-flash-latest"
+      "gemini-2.5-pro"
     ],
     "DeepSeek": [
       "deepseek-v4-pro",
@@ -267,28 +259,14 @@ const MODEL_CATALOGS = {
     "anthropic/claude-3-5-haiku-latest"
   ],
   "GEMINI_MODELS": [
-    "google/gemini-3.5-flash",
-    "google/gemini-3.1-pro-preview",
-    "google/gemini-3.1-flash-lite",
-    "google/gemini-2.5-pro",
     "google/gemini-2.5-flash",
     "google/gemini-2.5-flash-lite",
-    "google/gemini-flash-latest",
-    "google/gemini-pro-latest",
-    "google/gemini-3.5-flash-latest",
-    "google/gemini-2.5-pro-latest",
-    "google/gemini-2.5-flash-latest"
+    "google/gemini-2.5-pro"
   ],
   "VERTEX_MODELS": [
-    "google-vertex/gemini-3.5-flash",
-    "google-vertex/gemini-3.1-pro-preview",
-    "google-vertex/gemini-2.5-pro",
     "google-vertex/gemini-2.5-flash",
     "google-vertex/gemini-2.5-flash-lite",
-    "google-vertex/gemini-flash-latest",
-    "google-vertex/gemini-pro-latest",
-    "google-vertex/gemini-2.5-pro-latest",
-    "google-vertex/gemini-2.5-flash-latest"
+    "google-vertex/gemini-2.5-pro"
   ],
   "DEEPSEEK_MODELS": [
     "deepseek/deepseek-v4-pro",
