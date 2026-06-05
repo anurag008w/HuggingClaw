@@ -67,7 +67,7 @@ secrets:
 ## ✨ Features
 
 - 🔌 **Any LLM:** Use Claude, OpenAI GPT, Google Gemini, Grok, DeepSeek, Qwen, and 40+ providers (set `LLM_API_KEY` and `LLM_MODEL` accordingly).
-- 🔑 **Multi-Key Rotation:** Supply comma-separated key pools per provider (e.g. `ANTHROPIC_API_KEYS=key1,key2,key3`) for automatic round-robin rotation across rate limits.
+- 🔑 **Multi-Key Pools:** Supply comma-separated key pools per provider (e.g. `ANTHROPIC_API_KEYS=key1,key2,key3`). By default OpenClaw uses those pools for native failover on rate-limit/quota errors; set `ROTATOR=on` only if you want HuggingClaw's per-request spreading dashboard.
 - ⚡ **Zero Config:** Duplicate this Space and set **just three** secrets (LLM_API_KEY, LLM_MODEL, GATEWAY_TOKEN) – no other setup needed.
 - 🐳 **Fast Builds:** Uses a pre-built OpenClaw Docker image to deploy in minutes.
 - 🌐 **Cloudflare Outbound Proxy:** HuggingClaw can automatically provision a Cloudflare Worker proxy for blocked outbound traffic such as Telegram API requests.
@@ -268,10 +268,13 @@ Configure password access and network restrictions:
 
 ## 🔑 API Key Rotation *(Optional)*
 
-Spread requests across multiple API keys to avoid rate limits. Supply a comma-separated pool for any provider. Gemini uses sticky-per-model key selection by default, so each model starts on the first healthy key and reuses it until it fails or hits quota; other providers keep the normal round-robin behavior.
+Use multiple API keys without putting secrets in `openclaw.json`. Keep using the same HuggingClaw pool envs, especially `{PROVIDER}_API_KEYS=key1,key2,key3`. With `ROTATOR=off` (default), HuggingClaw skips its preload and OpenClaw reads the same provider key envs directly through its native key pool handling; OpenClaw keeps all candidates available and advances to the next key on rate-limit/quota-style failures. With `ROTATOR=on`, HuggingClaw's rotator consumes those pools, enables the `/key-rotator` manager, and can spread non-sticky providers across keys before a limit is hit. Gemini uses sticky-per-model key selection by default when the HuggingClaw rotator is on, so each model starts on the first healthy key and reuses it until it fails or hits quota; other providers keep the normal round-robin behavior.
 
 ```bash
-# Single provider, multiple keys
+# Choose rotator mode
+ROTATOR=off  # default: OpenClaw native pools; set ROTATOR=on for HuggingClaw rotator + /key-rotator
+
+# Single provider, multiple keys (same env var works in both modes)
 ANTHROPIC_API_KEYS=sk-ant-key1,sk-ant-key2,sk-ant-key3
 
 # Multiple providers simultaneously
@@ -279,19 +282,26 @@ OPENAI_API_KEYS=sk-openai-key1,sk-openai-key2
 GEMINI_API_KEYS=AIza-key1,AIza-key2
 ```
 
-**Fallback chain** (per provider):
+**Key source chain** (same env names in both modes; with `ROTATOR=off`, OpenClaw owns retry/failover over these candidates, while `ROTATOR=on` uses HuggingClaw's preload rotator):
 1. `{PROVIDER}_API_KEYS` — comma-separated pool *(preferred)*
 2. `{PROVIDER}_API_KEY` — single dedicated key
-3. `LLM_API_KEY` — universal fallback *(enabled by default; disable with `LLM_API_KEY_FALLBACK_ENABLED=false`)*
+3. `{PROVIDER}_API_KEY_*` — numbered dedicated keys
+4. `LLM_API_KEY` — universal fallback *(enabled by default; disable with `LLM_API_KEY_FALLBACK_ENABLED=false`)*
+
+
+> [!IMPORTANT]
+> When `ROTATOR=off`, HuggingClaw does not preload its rotator, `/key-rotator` and `/api/key-rotator/logs` return 404, and the dashboard hides the Key Rotator button. Keep provider keys in Space secrets/env vars (`*_API_KEYS`, `*_API_KEY`, `*_API_KEY_*`); HuggingClaw still strips env-managed `apiKey` values from `openclaw.json` unless you explicitly set `HUGGINGCLAW_ALLOW_CONFIG_SECRETS=true`. For OpenClaw memory embeddings and media/voice providers, adapters often resolve singular envs such as `GEMINI_API_KEY`, `VOYAGE_API_KEY`, `FAL_KEY`, `RUNWAYML_API_SECRET`, `VYDRA_API_KEY`, `ELEVENLABS_API_KEY`, and `GRADIUM_API_KEY`, so HuggingClaw mirrors the first provider-specific pool/numbered key into the singular env at runtime (without writing it to config) and lets that dedicated key override a generic `LLM_API_KEY` mapping. The original pool env stays exported, so OpenClaw providers that support native multi-key collection can still see all keys; singular-only adapters at least receive the correct provider-specific first key instead of the wrong generic key. HuggingClaw also leaves OpenClaw's default plugin catalog unfiltered so image, video, embedding, realtime voice, and other model capabilities stay visible; set `HUGGINGCLAW_PLUGIN_ALLOW_STRICT=true` only if you need the old minimal plugin allowlist.
 
 > [!TIP]
 > By default, `LLM_API_KEY` fallback is enabled for compatibility. Set `LLM_API_KEY_FALLBACK_ENABLED=false` if you want strict provider-only activation.
 
 Failure handling behavior:
-- Retryable failures (rate-limit/quota + common transient upstream/network errors) penalize the current key with cooldown/strikes, so the **next request** avoids that key when possible.
-- The rotator **does not auto-replay the same failed request**; retries for the same request should be handled by caller/application logic.
+- With `ROTATOR=off`, OpenClaw owns native key-pool retry/failover and advances through candidate keys on rate-limit/quota-style failures.
+- With `ROTATOR=on`, retryable failures (rate-limit/quota + common transient upstream/network errors) penalize the current key with cooldown/strikes, so the **next request** avoids that key when possible.
+- HuggingClaw's rotator **does not auto-replay the same failed request** by default; retries for the same request should be handled by caller/application logic, or opt in with `KEY_FETCH_MAX_RETRIES`.
 
 Optional tuning:
+- `ROTATOR` / `KEY_ROTATOR_ENABLED` (default `off`) — leave off for OpenClaw native provider key rotation with the same `{PROVIDER}_API_KEYS` envs; set `on`, `true`, `yes`, or `1` to enable HuggingClaw's preload rotator and `/key-rotator` manager.
 - `KEY_BLACKLIST_COOLDOWN_MS` (default `60000`) — base cooldown after a retryable failure.
 - `KEY_BLACKLIST_JITTER_PCT` (default `15`) — adds ±jitter to cooldown to prevent herd re-entry.
 - `KEY_MAX_STRIKES` (default `3`) — after this many consecutive failures, key enters long suspend.

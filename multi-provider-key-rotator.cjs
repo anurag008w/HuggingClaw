@@ -1,5 +1,21 @@
 'use strict';
 
+const RAW_KEY_ROTATOR_ENABLED = String(
+  process.env.KEY_ROTATOR_ENABLED
+  ?? process.env.KEY_ROTATOR
+  ?? process.env.ROTATOR
+  ?? 'off'
+).trim();
+const KEY_ROTATOR_ENABLED = /^(1|true|yes|on|enabled)$/i.test(RAW_KEY_ROTATOR_ENABLED);
+
+if (!KEY_ROTATOR_ENABLED) {
+  if (String(process.env.KEY_ROTATOR_LOG_LEVEL || '').trim().toLowerCase() !== 'silent') {
+    console.error('[key-rotator] disabled by env (set ROTATOR=on or KEY_ROTATOR_ENABLED=true to enable HuggingClaw rotation; OpenClaw native key pools remain available).');
+  }
+  module.exports = { disabled: true, reason: 'env' };
+  return;
+}
+
 /**
  * Multi-provider API key rotator for OpenClaw/HuggingClaw
  * --------------------------------------------------------
@@ -11,6 +27,7 @@
  * - 10+ keys handled correctly (idx tracks only active keys, no drift)
  *
  * Env vars:
+ *   ROTATOR / KEY_ROTATOR_ENABLED on/off                (default off)
  *   KEY_BLACKLIST_COOLDOWN_MS   base backoff ms        (default 60 000)
  *   KEY_MAX_STRIKES             failures before perm   (default 3)
  *   LLM_API_KEY_FALLBACK_ENABLED true/false            (default true)
@@ -296,13 +313,53 @@ const PROVIDERS = [
 function normalizeKeys(...inputs) {
   const seen = new Set(), out = [];
   for (const input of inputs)
-    // Accept comma-separated values (documented) plus newline-separated values
+    // Accept comma/semicolon-separated values (OpenClaw-compatible) plus newline-separated values
     // (common when users paste many HF Space secrets from a spreadsheet/editor).
     // Do not split on generic spaces because some providers may someday use
     // structured token strings that contain spaces.
-    for (const k of String(input || '').split(/[\n\r,]+/).map(s => s.trim()).filter(Boolean))
+    for (const k of String(input || '').split(/[\n\r,;]+/).map(s => s.trim()).filter(Boolean))
       if (!seen.has(k)) { seen.add(k); out.push(k); }
   return out;
+}
+
+function numberedEnvValues(baseName) {
+  if (!baseName) return [];
+  const prefix = `${baseName}_`;
+  return Object.keys(process.env)
+    .map(name => {
+      if (!name.startsWith(prefix)) return null;
+      const suffix = name.slice(prefix.length);
+      if (!/^\d+$/.test(suffix)) return null;
+      return { name, idx: Number(suffix) };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.idx - b.idx || a.name.localeCompare(b.name))
+    .map(({ name }) => process.env[name] || '');
+}
+
+function providerEnvValues(p, ...names) {
+  const flatNames = names.flat().filter(Boolean);
+  return flatNames.flatMap(name => [process.env[name] || '', ...numberedEnvValues(name)]);
+}
+
+function providerDedicatedKeys(p) {
+  // HuggingClaw's rotator keeps the existing pool env contract unchanged:
+  // <PROVIDER>_API_KEYS remains the preferred pool, then <PROVIDER>_API_KEY,
+  // numbered singular keys, and supported aliases. When ROTATOR=off this
+  // preload is not added by start.sh, so OpenClaw reads the same env vars
+  // directly using its native key rotation.
+  return normalizeKeys(
+    process.env[p.envPlural] || '',
+    process.env[p.envSingular] || '',
+    ...numberedEnvValues(p.envSingular),
+    ...providerEnvValues(
+      p,
+      p._extraPlural,
+      p._extraSingular,
+      p.extraEnvPlural,
+      p.extraEnvSingular,
+    ),
+  );
 }
 
 function keySlot(p, key) {
@@ -805,25 +862,7 @@ const providerState = PROVIDERS.map(p => {
     String(process.env.LLM_API_KEY_FALLBACK_ENABLED || '').trim().toLowerCase(),
   );
 
-  const envValues = (...names) => names
-    .flat()
-    .filter(Boolean)
-    .map(name => process.env[name] || '');
-
-  const extraKeys = normalizeKeys(
-    ...envValues(
-      p._extraPlural,
-      p._extraSingular,
-      p.extraEnvPlural,
-      p.extraEnvSingular,
-    ),
-  );
-
-  const dedicatedKeys = normalizeKeys(
-    process.env[p.envPlural]  || '',
-    process.env[p.envSingular] || '',
-    ...extraKeys,
-  );
+  const dedicatedKeys = providerDedicatedKeys(p);
   const hasDedicated = dedicatedKeys.length > 0;
   const useLlmFallback = !hasDedicated && llmFallbackEnabled && shouldUseLlmFallbackForProvider(p);
   const keys = hasDedicated
@@ -851,23 +890,9 @@ const providerState = PROVIDERS.map(p => {
 });
 
 // LLM_API_KEY fallback summary
-const fallbackCount = providerState.filter(p => {
-  const envValues = (...names) => names
-    .flat()
-    .filter(Boolean)
-    .map(name => process.env[name] || '');
-  const ded = normalizeKeys(
-    process.env[p.envPlural]   || '',
-    process.env[p.envSingular] || '',
-    ...envValues(
-      p._extraPlural,
-      p._extraSingular,
-      p.extraEnvPlural,
-      p.extraEnvSingular,
-    ),
-  );
-  return ded.length === 0 && p.keys.length > 0 && shouldUseLlmFallbackForProvider(p);
-}).length;
+const fallbackCount = providerState.filter(p => (
+  providerDedicatedKeys(p).length === 0 && p.keys.length > 0 && shouldUseLlmFallbackForProvider(p)
+)).length;
 if (fallbackCount > 0)
   debug(`[key-rotator] ${fallbackCount} provider(s) using LLM_API_KEY fallback`);
 

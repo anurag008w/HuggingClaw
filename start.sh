@@ -20,6 +20,23 @@ hc_is_true() {
   esac
 }
 
+hc_is_enabled() {
+  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on|enabled) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+hc_key_rotator_enabled() {
+  if [ "${KEY_ROTATOR_ENABLED+x}" = "x" ]; then
+    hc_is_enabled "${KEY_ROTATOR_ENABLED}"
+  elif [ "${KEY_ROTATOR+x}" = "x" ]; then
+    hc_is_enabled "${KEY_ROTATOR}"
+  else
+    hc_is_enabled "${ROTATOR:-off}"
+  fi
+}
+
 load_env_bundle() {
   # HUGGINGCLAW_ENV_BUNDLE is a single base64url-encoded JSON object generated
   # by /env-builder. Existing individual env vars win over bundled values.
@@ -231,9 +248,79 @@ echo "  ╚═══════════════════════
 echo ""
 
 # ── Validate required secrets ──
+has_numbered_env() {
+  local base="$1"
+  env | awk -F= -v prefix="${base}_" '
+    index($1, prefix) == 1 {
+      suffix = substr($1, length(prefix) + 1)
+      if (suffix ~ /^[0-9]+$/ && length($2) > 0) found = 1
+    }
+    END { exit(found ? 0 : 1) }'
+}
+
+any_env_set() {
+  local name
+  for name in "$@"; do
+    if [ -n "${!name:-}" ]; then
+      return 0
+    fi
+    if has_numbered_env "$name" 2>/dev/null; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+has_model_provider_key() {
+  local model_provider
+  model_provider=$(printf '%s' "${1:-}" | cut -d'/' -f1)
+  case "$model_provider" in
+    anthropic) any_env_set ANTHROPIC_API_KEY ANTHROPIC_API_KEYS ;;
+    openai|openai-codex) any_env_set OPENAI_API_KEY OPENAI_API_KEYS ;;
+    google|google-vertex) any_env_set GEMINI_API_KEY GEMINI_API_KEYS GOOGLE_API_KEY GOOGLE_API_KEYS GOOGLE_GENERATIVE_AI_API_KEY GOOGLE_GENERATIVE_AI_API_KEYS GOOGLE_AI_API_KEY GOOGLE_AI_API_KEYS GOOGLE_GENAI_API_KEY GOOGLE_GENAI_API_KEYS ;;
+    deepseek) any_env_set DEEPSEEK_API_KEY DEEPSEEK_API_KEYS ;;
+    deepinfra) any_env_set DEEPINFRA_API_KEY DEEPINFRA_API_KEYS ;;
+    openrouter) any_env_set OPENROUTER_API_KEY OPENROUTER_API_KEYS ;;
+    groq) any_env_set GROQ_API_KEY GROQ_API_KEYS ;;
+    mistral|mistralai) any_env_set MISTRAL_API_KEY MISTRAL_API_KEYS ;;
+    xai|x-ai) any_env_set XAI_API_KEY XAI_API_KEYS ;;
+    nvidia) any_env_set NVIDIA_API_KEY NVIDIA_API_KEYS ;;
+    cohere) any_env_set COHERE_API_KEY COHERE_API_KEYS ;;
+    together) any_env_set TOGETHER_API_KEY TOGETHER_API_KEYS ;;
+    cerebras) any_env_set CEREBRAS_API_KEY CEREBRAS_API_KEYS ;;
+    huggingface) any_env_set HUGGINGFACE_HUB_TOKEN HUGGINGFACE_HUB_TOKENS HUGGINGFACE_API_KEY HUGGINGFACE_API_KEYS HF_TOKEN_POOL ;;
+    kilocode) any_env_set KILOCODE_API_KEY KILOCODE_API_KEYS ;;
+    opencode|opencode-go) any_env_set OPENCODE_API_KEY OPENCODE_API_KEYS ;;
+    zai|z-ai|z.ai|zhipu) any_env_set ZAI_API_KEY ZAI_API_KEYS ZHIPU_API_KEY ZHIPU_API_KEYS BIGMODEL_API_KEY BIGMODEL_API_KEYS ;;
+    moonshot) any_env_set MOONSHOT_API_KEY MOONSHOT_API_KEYS ;;
+    kimi-coding) any_env_set KIMI_API_KEY KIMI_API_KEYS ;;
+    minimax) any_env_set MINIMAX_API_KEY MINIMAX_API_KEYS ;;
+    qwen|modelstudio) any_env_set MODELSTUDIO_API_KEY MODELSTUDIO_API_KEYS DASHSCOPE_API_KEY DASHSCOPE_API_KEYS QWEN_API_KEY QWEN_API_KEYS ;;
+    xiaomi) any_env_set XIAOMI_API_KEY XIAOMI_API_KEYS ;;
+    volcengine|volcengine-plan) any_env_set VOLCANO_ENGINE_API_KEY VOLCANO_ENGINE_API_KEYS VOLCENGINE_API_KEY VOLCENGINE_API_KEYS ARK_API_KEY ARK_API_KEYS ;;
+    byteplus|byteplus-plan) any_env_set BYTEPLUS_API_KEY BYTEPLUS_API_KEYS ;;
+    qianfan) any_env_set QIANFAN_API_KEY QIANFAN_API_KEYS ;;
+    vercel-ai-gateway) any_env_set AI_GATEWAY_API_KEY AI_GATEWAY_API_KEYS VERCEL_AI_GATEWAY_API_KEY VERCEL_AI_GATEWAY_API_KEYS ;;
+    venice) any_env_set VENICE_API_KEY VENICE_API_KEYS ;;
+    arcee) any_env_set ARCEE_API_KEY ARCEE_API_KEYS ;;
+    chutes) any_env_set CHUTES_API_KEY CHUTES_API_KEYS ;;
+    fireworks) any_env_set FIREWORKS_API_KEY FIREWORKS_API_KEYS ;;
+    gmi|gmi-cloud) any_env_set GMI_API_KEY GMI_API_KEYS GMI_CLOUD_API_KEY GMI_CLOUD_API_KEYS ;;
+    inferrs) any_env_set INFERRS_API_KEY INFERRS_API_KEYS ;;
+    novita|novitaai) any_env_set NOVITA_API_KEY NOVITA_API_KEYS NOVITA_AI_API_KEY NOVITA_AI_API_KEYS ;;
+    perplexity) any_env_set PERPLEXITY_API_KEY PERPLEXITY_API_KEYS ;;
+    litellm) any_env_set LITELLM_API_KEY LITELLM_API_KEYS ;;
+    stepfun) any_env_set STEPFUN_API_KEY STEPFUN_API_KEYS ;;
+    tencent|tencent-cloud|tokenhub) any_env_set TENCENTCLOUD_API_KEY TENCENTCLOUD_API_KEYS TENCENT_CLOUD_API_KEY TENCENT_CLOUD_API_KEYS TOKENHUB_API_KEY TOKENHUB_API_KEYS ;;
+    synthetic) any_env_set SYNTHETIC_API_KEY SYNTHETIC_API_KEYS ;;
+    github-copilot) any_env_set COPILOT_GITHUB_TOKEN COPILOT_GITHUB_TOKENS GITHUB_COPILOT_TOKEN GITHUB_COPILOT_TOKENS GITHUB_COPILOT_API_KEY GITHUB_COPILOT_API_KEYS ;;
+    *) return 1 ;;
+  esac
+}
+
 ERRORS=""
-if [ -z "$LLM_API_KEY" ]; then
-  ERRORS="${ERRORS}  - LLM_API_KEY is not set\n"
+if [ -z "$LLM_API_KEY" ] && ! has_model_provider_key "$LLM_MODEL"; then
+  ERRORS="${ERRORS}  - LLM_API_KEY or a provider-specific key/pool for LLM_MODEL is not set (e.g. GEMINI_API_KEYS for google/*)\n"
 fi
 if [ -z "$LLM_MODEL" ]; then
   ERRORS="${ERRORS}  - LLM_MODEL is not set (e.g. google/gemini-3.5-flash, anthropic/claude-sonnet-4-6, openai/gpt-5.4)\n"
@@ -394,38 +481,75 @@ case "$LLM_PROVIDER" in
     ;;
 esac
 
-# Ensure OpenClaw provider discovery can see per-provider keys even when users
-# configure only *_API_KEYS pools. Mirror first pool key into singular env.
+# Ensure OpenClaw provider discovery and memory embeddings can see a singular
+# per-provider key even when users configure only *_API_KEYS pools or numbered
+# *_API_KEY_1 secrets. OpenClaw memory embedding adapters resolve singular envs
+# such as GEMINI_API_KEY, so the first dedicated pool/numbered key must win over
+# a generic LLM_API_KEY mapping.
+first_key_from_pool() {
+  printf '%s' "${1:-}" \
+    | tr ',;\r' '\n\n\n' \
+    | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+    | awk 'NF{print; exit}'
+}
+
+first_numbered_key() {
+  local singular_var="$1"
+  local prefix="${singular_var}_"
+  env | awk -F= -v prefix="$prefix" '
+    index($1, prefix) == 1 {
+      suffix = substr($1, length(prefix) + 1)
+      if (suffix ~ /^[0-9]+$/) print suffix "\t" $0
+    }' \
+    | sort -n -k1,1 \
+    | sed 's/^[0-9][0-9]*\t//' \
+    | sed 's/^[^=]*=//' \
+    | while IFS= read -r value; do
+        first_key_from_pool "$value"
+        break
+      done
+}
+
 promote_first_pool_key() {
   local singular_var="$1"
   local pool_var="$2"
   local singular_val="${!singular_var:-}"
   local pool_val="${!pool_var:-}"
+  local first=""
 
-  [ -n "$singular_val" ] && return 0
-  [ -n "$pool_val" ] || return 0
-
-  local first
-  first=$(printf '%s' "$pool_val" | tr ',\r' '\n\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | awk 'NF{print; exit}')
+  if [ -n "$pool_val" ]; then
+    first=$(first_key_from_pool "$pool_val")
+  fi
+  if [ -z "$first" ]; then
+    first=$(first_numbered_key "$singular_var")
+  fi
   [ -n "$first" ] || return 0
-  export "${singular_var}=$first"
+
+  # Do not overwrite an explicit singular provider key. Do replace a generic
+  # LLM_API_KEY mapping when a provider-specific pool/numbered key exists.
+  if [ -z "$singular_val" ] || { [ -n "${LLM_API_KEY:-}" ] && [ "$singular_val" = "$LLM_API_KEY" ]; }; then
+    export "${singular_var}=$first"
+  fi
 }
 
 normalize_key_aliases() {
   local canonical_pool_var="$1"
   local canonical_key_var="$2"
   shift 2
-  local alias
+  local alias alias_val first
   for alias in "$@"; do
+    alias_val="${!alias:-}"
+    [ -n "$alias_val" ] || continue
     case "$alias" in
       *_API_KEYS|*_TOKENS|*_TOKEN_POOL)
-        if [ -z "${!canonical_pool_var:-}" ] && [ -n "${!alias:-}" ]; then
-          export "${canonical_pool_var}=${!alias}"
+        if [ -z "${!canonical_pool_var:-}" ]; then
+          export "${canonical_pool_var}=$alias_val"
         fi
         ;;
       *)
-        if [ -z "${!canonical_key_var:-}" ] && [ -n "${!alias:-}" ]; then
-          export "${canonical_key_var}=${!alias}"
+        if [ -z "${!canonical_key_var:-}" ] || { [ -n "${LLM_API_KEY:-}" ] && [ "${!canonical_key_var:-}" = "$LLM_API_KEY" ]; }; then
+          first=$(first_key_from_pool "$alias_val")
+          [ -n "$first" ] && export "${canonical_key_var}=$first"
         fi
         ;;
     esac
@@ -475,6 +599,61 @@ promote_first_pool_key "COPILOT_GITHUB_TOKEN" "COPILOT_GITHUB_TOKENS"
 normalize_key_aliases "AI_GATEWAY_API_KEYS" "AI_GATEWAY_API_KEY" \
   VERCEL_AI_GATEWAY_API_KEYS VERCEL_AI_GATEWAY_API_KEY VERCEL_OIDC_TOKEN
 promote_first_pool_key "AI_GATEWAY_API_KEY" "AI_GATEWAY_API_KEYS"
+
+# OpenClaw capability providers (memory embeddings, image/video generation,
+# speech/TTS, realtime voice, search, and provider plugins) usually resolve a
+# singular auth env even when operators manage pools in Space secrets. Mirror
+# the first provider-specific pool/numbered secret into that singular env at
+# runtime only; this keeps secrets out of openclaw.json while allowing OpenClaw's
+# native media/embedding/voice providers to authenticate when ROTATOR=off.
+promote_first_pool_key "DEEPINFRA_API_KEY" "DEEPINFRA_API_KEYS"
+normalize_key_aliases "VOYAGE_API_KEYS" "VOYAGE_API_KEY" \
+  VOYAGEAI_API_KEYS VOYAGE_AI_API_KEYS VOYAGEAI_API_KEY VOYAGE_AI_API_KEY
+promote_first_pool_key "VOYAGE_API_KEY" "VOYAGE_API_KEYS"
+promote_first_pool_key "JINA_API_KEY" "JINA_API_KEYS"
+normalize_key_aliases "FAL_KEYS" "FAL_KEY" \
+  FAL_API_KEYS FAL_AI_API_KEYS FAL_API_KEY FAL_AI_API_KEY
+promote_first_pool_key "FAL_KEY" "FAL_KEYS"
+normalize_key_aliases "COMFY_API_KEYS" "COMFY_API_KEY" \
+  COMFY_CLOUD_API_KEYS COMFYUI_API_KEYS COMFY_CLOUD_API_KEY COMFYUI_API_KEY
+promote_first_pool_key "COMFY_API_KEY" "COMFY_API_KEYS"
+promote_first_pool_key "COMFY_CLOUD_API_KEY" "COMFY_CLOUD_API_KEYS"
+normalize_key_aliases "RUNWAYML_API_SECRETS" "RUNWAYML_API_SECRET" \
+  RUNWAY_API_KEYS RUNWAY_API_KEY RUNWAYML_API_KEY RUNWAYML_API_KEYS
+promote_first_pool_key "RUNWAYML_API_SECRET" "RUNWAYML_API_SECRETS"
+promote_first_pool_key "RUNWAY_API_KEY" "RUNWAY_API_KEYS"
+promote_first_pool_key "VYDRA_API_KEY" "VYDRA_API_KEYS"
+normalize_key_aliases "ELEVENLABS_API_KEYS" "ELEVENLABS_API_KEY" \
+  ELEVEN_LABS_API_KEYS XI_API_KEYS ELEVEN_LABS_API_KEY XI_API_KEY
+promote_first_pool_key "ELEVENLABS_API_KEY" "ELEVENLABS_API_KEYS"
+promote_first_pool_key "GRADIUM_API_KEY" "GRADIUM_API_KEYS"
+promote_first_pool_key "INWORLD_API_KEY" "INWORLD_API_KEYS"
+promote_first_pool_key "DEEPGRAM_API_KEY" "DEEPGRAM_API_KEYS"
+promote_first_pool_key "ASSEMBLYAI_API_KEY" "ASSEMBLYAI_API_KEYS"
+promote_first_pool_key "CARTESIA_API_KEY" "CARTESIA_API_KEYS"
+normalize_key_aliases "VOLCENGINE_TTS_API_KEYS" "VOLCENGINE_TTS_API_KEY" \
+  BYTEPLUS_SEED_SPEECH_API_KEYS BYTEPLUS_SEED_SPEECH_API_KEY VOLCENGINE_TTS_TOKEN VOLCENGINE_TTS_TOKENS
+promote_first_pool_key "VOLCENGINE_TTS_API_KEY" "VOLCENGINE_TTS_API_KEYS"
+promote_first_pool_key "LITELLM_API_KEY" "LITELLM_API_KEYS"
+promote_first_pool_key "PERPLEXITY_API_KEY" "PERPLEXITY_API_KEYS"
+promote_first_pool_key "BRAVE_API_KEY" "BRAVE_API_KEYS"
+promote_first_pool_key "ARCEE_API_KEY" "ARCEE_API_KEYS"
+promote_first_pool_key "CHUTES_API_KEY" "CHUTES_API_KEYS"
+promote_first_pool_key "FIREWORKS_API_KEY" "FIREWORKS_API_KEYS"
+normalize_key_aliases "GMI_API_KEYS" "GMI_API_KEY" \
+  GMI_CLOUD_API_KEYS GMI_CLOUD_API_KEY
+promote_first_pool_key "GMI_API_KEY" "GMI_API_KEYS"
+promote_first_pool_key "INFERRS_API_KEY" "INFERRS_API_KEYS"
+normalize_key_aliases "NOVITA_API_KEYS" "NOVITA_API_KEY" \
+  NOVITA_AI_API_KEYS NOVITA_AI_API_KEY
+promote_first_pool_key "NOVITA_API_KEY" "NOVITA_API_KEYS"
+promote_first_pool_key "STEPFUN_API_KEY" "STEPFUN_API_KEYS"
+normalize_key_aliases "TENCENTCLOUD_API_KEYS" "TENCENTCLOUD_API_KEY" \
+  TENCENT_CLOUD_API_KEYS TOKENHUB_API_KEYS TENCENT_CLOUD_API_KEY TOKENHUB_API_KEY
+promote_first_pool_key "TENCENTCLOUD_API_KEY" "TENCENTCLOUD_API_KEYS"
+normalize_key_aliases "REPLICATE_API_TOKENS" "REPLICATE_API_TOKEN" \
+  REPLICATE_API_KEYS REPLICATE_API_KEY
+promote_first_pool_key "REPLICATE_API_TOKEN" "REPLICATE_API_TOKENS"
 
 # kimi-coding uses Moonshot AI endpoint (api.moonshot.cn).
 # If KIMI_API_KEY is set but MOONSHOT_API_KEY is not, mirror it so the
@@ -734,6 +913,13 @@ _DEFAULT_HUGGINGFACE_MODELS="huggingface/deepseek-ai/DeepSeek-R1,huggingface/moo
 _DEFAULT_GITHUB_COPILOT_MODELS="github-copilot/gpt-5,github-copilot/gpt-4.1,github-copilot/gpt-4.1-mini"
 
 INJECTED_MODELS_PROVIDERS='{}'
+# Built-in providers such as Google ship OpenClaw/plugin catalogs with rich
+# capability metadata (image input/output, embeddings, realtime voice, tools).
+# HuggingClaw used to inject a small fallback text-model list when only a key
+# pool was present; that could shadow OpenClaw's richer catalog and make image /
+# embedding / voice models look unavailable.  Keep cleanup data here so restored
+# configs from older boots can have only those generated fallback lists removed.
+BUILTIN_DEFAULT_MODEL_CLEANUP='{}'
 # Tracks providers configured from runtime env/Space secrets. These providers
 # must not persist static apiKey values in openclaw.json; credentials stay in env
 # and the key rotator/provider discovery injects them per request.
@@ -856,6 +1042,74 @@ inject_provider_models_from_env() {
   fi
 }
 
+normalize_provider_models_json() {
+  local provider="$1"
+  local models_csv="$2"
+  printf '%s' "$models_csv" \
+    | tr ',' '\n' \
+    | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+    | awk 'NF' \
+    | jq -R . \
+    | jq -s --arg provider "$provider" '
+        def strip_outer_provider:
+          (split("/") | .[1:] | join("/"));
+        def normalize_provider_model:
+          if $provider == "nvidia" then
+            if startswith("nvidia/nvidia/")
+               or startswith("nvidia/deepseek-ai/")
+               or startswith("nvidia/qwen/")
+               or startswith("nvidia/moonshotai/")
+               or startswith("nvidia/minimaxai/")
+               or startswith("nvidia/openai/")
+               or startswith("nvidia/z-ai/")
+               or startswith("nvidia/stepfun-ai/") then
+              strip_outer_provider
+            else
+              .
+            end
+          elif startswith($provider + "/") then
+            strip_outer_provider
+          else
+            .
+          end;
+        map(normalize_provider_model)
+        | map({id: ., name: .})
+        | unique_by(.id)'
+}
+
+cleanup_builtin_default_models_if_unset() {
+  local provider="$1"
+  local models_env="$2"
+  local default_models_env="$3"
+  local explicit_models="${!models_env:-}"
+  local default_models="${!default_models_env:-}"
+
+  # If the operator set GEMINI_MODELS / VERTEX_MODELS explicitly, respect it.
+  # Otherwise remove only HuggingClaw's exact generated fallback model list so
+  # OpenClaw's native provider catalog remains authoritative for non-chat
+  # capabilities such as image generation, embeddings, and realtime voice.
+  if [ -n "$explicit_models" ] || [ -z "$default_models" ]; then
+    return 0
+  fi
+
+  local default_models_json
+  default_models_json=$(normalize_provider_models_json "$provider" "$default_models") || return 0
+
+  CONFIG_JSON=$(jq \
+    --arg provider "$provider" \
+    --argjson defaultModels "$default_models_json" \
+    'def ids($models): (($models // []) | map(.id) | sort);
+     if (.models.providers[$provider].models? != null)
+        and (ids(.models.providers[$provider].models) == ids($defaultModels)) then
+       del(.models.providers[$provider].models)
+     else . end' <<<"$CONFIG_JSON")
+
+  BUILTIN_DEFAULT_MODEL_CLEANUP=$(jq \
+    --arg provider "$provider" \
+    --argjson defaultModels "$default_models_json" \
+    '.[$provider] = $defaultModels' <<<"$BUILTIN_DEFAULT_MODEL_CLEANUP")
+}
+
 # ── Google Vertex AI credentials setup ──
 # Vertex AI uses GCP project + location, NOT a simple Gemini API key.
 # Set GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_LOCATION, and optionally
@@ -874,13 +1128,14 @@ fi
 inject_provider_models_from_env "anthropic" "ANTHROPIC_MODELS" "ANTHROPIC_API_KEY" "ANTHROPIC_API_KEYS" "_DEFAULT_ANTHROPIC_MODELS"
 inject_provider_models_from_env "openai" "OPENAI_MODELS" "OPENAI_API_KEY" "OPENAI_API_KEYS" "_DEFAULT_OPENAI_MODELS"
 inject_provider_models_from_env "openai-codex" "OPENAI_MODELS" "OPENAI_API_KEY" "OPENAI_API_KEYS" "_DEFAULT_OPENAI_MODELS"
-inject_provider_models_from_env "google" "GEMINI_MODELS" "GEMINI_API_KEY" "GEMINI_API_KEYS" "_DEFAULT_GEMINI_MODELS"
-# google-vertex: uses VERTEX_MODELS (with google-vertex/ prefix) separately from GEMINI_MODELS.
-# The "key" check uses GOOGLE_CLOUD_PROJECT so it only injects when Vertex is actually configured.
-# google-vertex: inject when GOOGLE_CLOUD_PROJECT is configured.
-# Pool key uses a dummy var (_VERTEX_POOL_UNUSED) so that only GOOGLE_CLOUD_PROJECT
-# gates injection — Vertex uses GCP project auth, not Gemini API key rotation.
-inject_provider_models_from_env "google-vertex" "VERTEX_MODELS" "GOOGLE_CLOUD_PROJECT" "_VERTEX_POOL_UNUSED" "_DEFAULT_VERTEX_MODELS"
+# Google/Gemini and Vertex are built-in OpenClaw providers with native catalogs
+# that include non-chat capabilities (image, embeddings, realtime voice). Do not
+# inject HuggingClaw's small fallback model list unless the operator explicitly
+# sets GEMINI_MODELS / VERTEX_MODELS; otherwise OpenClaw can use its own catalog.
+inject_provider_models_from_env "google" "GEMINI_MODELS" "GEMINI_API_KEY" "GEMINI_API_KEYS"
+inject_provider_models_from_env "google-vertex" "VERTEX_MODELS" "GOOGLE_CLOUD_PROJECT" "_VERTEX_POOL_UNUSED"
+cleanup_builtin_default_models_if_unset "google" "GEMINI_MODELS" "_DEFAULT_GEMINI_MODELS"
+cleanup_builtin_default_models_if_unset "google-vertex" "VERTEX_MODELS" "_DEFAULT_VERTEX_MODELS"
 inject_provider_models_from_env "deepseek" "DEEPSEEK_MODELS" "DEEPSEEK_API_KEY" "DEEPSEEK_API_KEYS" "_DEFAULT_DEEPSEEK_MODELS"
 inject_provider_models_from_env "openrouter" "OPENROUTER_MODELS" "OPENROUTER_API_KEY" "OPENROUTER_API_KEYS" "_DEFAULT_OPENROUTER_MODELS"
 inject_provider_models_from_env "kilocode" "KILOCODE_MODELS" "KILOCODE_API_KEY" "KILOCODE_API_KEYS" "_DEFAULT_KILOCODE_MODELS"
@@ -1006,16 +1261,21 @@ elif [ "$BROWSER_PLUGIN_MODE" = "auto" ] && [ -n "$BROWSER_EXECUTABLE_PATH" ] &&
 fi
 
 # Plugin allow/deny rationale:
-#   ALLOW: device-pair, phone-control, talk-voice are the minimum bundled
-#          plugins that the Control UI/dashboard needs to render correctly
-#          on HF Spaces. Without these the UI shows blank panels.
-#          telegram/whatsapp/browser/acpx are added conditionally below.
-#          Do not create a disabled acpx entry when the plugin is absent;
-#          OpenClaw reports that as a config warning on HF Spaces.
-#   DENY:  lmstudio crashes on boot when no local server is reachable;
-#          xai PLUGIN (separate from the xai model PROVIDER) is broken in
-#          current OpenClaw releases and prevents gateway start. Disabling
-#          the plugin does NOT affect xai-as-a-model-provider.
+#   DEFAULT: do not write a restrictive plugins.allow list. OpenClaw's own
+#            bundled/default plugin catalog includes capability plugins used by
+#            image, embedding, voice/realtime, and other model features. A small
+#            HuggingClaw allowlist can accidentally hide those capabilities.
+#   STRICT:  set HUGGINGCLAW_PLUGIN_ALLOW_STRICT=true to restore a minimal
+#            allowlist for locked-down deployments. Optional plugins
+#            (telegram/whatsapp/browser/acpx) are added conditionally below.
+#   DENY:    lmstudio crashes on boot when no local server is reachable;
+#            xai PLUGIN (separate from the xai model PROVIDER) is broken in
+#            current OpenClaw releases and prevents gateway start. Disabling
+#            the plugin does NOT affect xai-as-a-model-provider.
+PLUGIN_ALLOW_STRICT=false
+if hc_is_true "${HUGGINGCLAW_PLUGIN_ALLOW_STRICT:-false}"; then
+  PLUGIN_ALLOW_STRICT=true
+fi
 PLUGIN_ALLOW_JSON='["device-pair","phone-control","talk-voice"]'
 if [ "$ACP_PLUGIN_MODE" = "enabled" ] || [ "$ACP_PLUGIN_MODE" = "auto" ]; then
   PLUGIN_ALLOW_JSON=$(jq '. + ["acpx"]' <<<"$PLUGIN_ALLOW_JSON")
@@ -1036,8 +1296,9 @@ if [ "$BROWSER_SHOULD_ENABLE" = "true" ]; then BROWSER_DISABLED=false; fi
 
 CONFIG_JSON=$(jq \
   --argjson allow "$PLUGIN_ALLOW_JSON" \
+  --argjson strictAllow "$PLUGIN_ALLOW_STRICT" \
   --argjson browserDisabled "$BROWSER_DISABLED" \
-  '.plugins.allow = $allow
+  'if $strictAllow then .plugins.allow = $allow else del(.plugins.allow) end
    | .plugins.deny = ["lmstudio","xai"]
    | .plugins.entries.lmstudio.enabled = false
    | .plugins.entries.xai.enabled = false
@@ -1270,6 +1531,7 @@ if [ -f "$EXISTING_CONFIG" ]; then
     --arg consoleStyle "$OPENCLAW_CONSOLE_LOG_STYLE" \
     --argjson desired "$CONFIG_JSON" \
     --argjson injectedModelsProviders "$INJECTED_MODELS_PROVIDERS" \
+    --argjson builtinDefaultModelCleanup "$BUILTIN_DEFAULT_MODEL_CLEANUP" \
     --argjson envApiKeyProviders "$ENV_API_KEY_PROVIDERS" \
     --argjson fileLogConfigured "$OPENCLAW_FILE_LOG_LEVEL_CONFIGURED" \
     --argjson consoleLogConfigured "$OPENCLAW_CONSOLE_LOG_LEVEL_CONFIGURED" \
@@ -1307,6 +1569,8 @@ if [ -f "$EXISTING_CONFIG" ]; then
      | if $fileLogConfigured then .logging.level = $fileLevel else . end
      | if $consoleLogConfigured then .logging.consoleLevel = $consoleLevel else . end
      | if $consoleStyleConfigured then .logging.consoleStyle = $consoleStyle else . end
+     | .plugins.allow = if (($desired.plugins.allow? // null) == null) then null else $desired.plugins.allow end
+     | if (.plugins.allow == null) then del(.plugins.allow) else . end
      | .models = ((.models // {}) + {"mode": (($desired.models.mode // .models.mode) // "merge")})
      | if (($injectedModelsProviders | length) > 0) then
          ($injectedModelsProviders | to_entries) as $entries
@@ -1314,6 +1578,17 @@ if [ -f "$EXISTING_CONFIG" ]; then
              (($desired.models.providers[$e.key] // {}) * {models: (($e.value.models // []) | unique_by(.id))}) as $desiredProvider
              | .models.providers[$e.key] = ((.models.providers[$e.key] // {}) * $desiredProvider)
            )
+       else
+         .
+       end
+     | if (($builtinDefaultModelCleanup | length) > 0) then
+         reduce ($builtinDefaultModelCleanup | to_entries)[] as $cleanup (. ;
+           def ids($models): (($models // []) | map(.id) | sort);
+           if (.models.providers[$cleanup.key].models? != null)
+              and (ids(.models.providers[$cleanup.key].models) == ids($cleanup.value)) then
+             del(.models.providers[$cleanup.key].models)
+           else . end
+         )
        else
          .
        end
@@ -1351,7 +1626,11 @@ if [ -f "$EXISTING_CONFIG" ]; then
          .
        end
      | .channels = ((.channels // {}) * ($desired.channels // {}))
-     | .plugins.allow = (((.plugins.allow // []) + ($desired.plugins.allow // [])) | unique | map(select(startswith("clawhub:") | not)))
+     | if (($desired.plugins.allow? // null) != null) then
+         .plugins.allow = (((.plugins.allow // []) + ($desired.plugins.allow // [])) | unique | map(select(startswith("clawhub:") | not)))
+       else
+         del(.plugins.allow)
+       end
      | .plugins.deny = (((.plugins.deny // []) + ($desired.plugins.deny // [])) | unique)
      | .plugins.entries = ((.plugins.entries // {}) * ($desired.plugins.entries // {}))
      | del(.plugins.entries.acpx)
@@ -1412,15 +1691,35 @@ fi
 chmod 600 "$EXISTING_CONFIG"
 
 # ── Enable Gateway Preload Fixes ──
-# These preload scripts keep iframe embedding working on HF Spaces and enable
-# provider key rotation for gateway traffic. Keep paths centralized so future
-# rotator renames do not leave stale NODE_OPTIONS references behind.
-export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--require ${IFRAME_FIX_PRELOAD} --require ${KEY_ROTATOR_PRELOAD}"
+# These preload scripts keep iframe embedding working on HF Spaces. HuggingClaw's
+# custom provider key rotator is opt-in with ROTATOR=on (or
+# KEY_ROTATOR_ENABLED=true); when disabled, OpenClaw's native multi-key provider
+# pools read the same *_API_KEYS / *_API_KEY_N envs directly.
+# Docker images may already contain the rotator in NODE_OPTIONS. Remove that
+# one preload first, then add it back only when ROTATOR is explicitly enabled. Keep other
+# existing preloads (notably Cloudflare proxy) untouched.
+_cleaned_node_options=" ${NODE_OPTIONS:-} "
+for _pattern in "--require ${KEY_ROTATOR_PRELOAD} " "--require=${KEY_ROTATOR_PRELOAD} " "-r ${KEY_ROTATOR_PRELOAD} "; do
+  _cleaned_node_options="${_cleaned_node_options//$_pattern/ }"
+done
+export NODE_OPTIONS="$(printf '%s' "$_cleaned_node_options" | tr -s ' ' | sed 's/^ //;s/ $//')"
+export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--require ${IFRAME_FIX_PRELOAD}"
+if hc_key_rotator_enabled; then
+  export NODE_OPTIONS="${NODE_OPTIONS} --require ${KEY_ROTATOR_PRELOAD}"
+else
+  echo "KeyRotator: disabled (ROTATOR=${ROTATOR:-${KEY_ROTATOR_ENABLED:-off}}); OpenClaw will read provider *_API_KEYS pools directly"
+fi
+unset _cleaned_node_options _pattern
 
 # ── Startup Summary ──
 echo ""
 echo "Version   : ${OPENCLAW_DISPLAY_VERSION}"
 echo "Model     : ${LLM_MODEL}"
+if hc_key_rotator_enabled; then
+  echo "KeyRotate : HuggingClaw preload over provider *_API_KEYS pools (set ROTATOR=off for OpenClaw native)"
+else
+  echo "KeyRotate : OpenClaw native pools only"
+fi
 if [ -n "${LLM_FALLBACK_MODELS:-}" ]; then
   echo "Fallbacks : ${LLM_FALLBACK_MODELS}"
 fi
@@ -1597,18 +1896,10 @@ warmup_browser() {
 # ── Start background services ──
 export LLM_MODEL="$LLM_MODEL"
 
-# ── Ensure key-rotator uses the correct HF token for huggingface.co calls ──
-# NODE_OPTIONS preloads the provider key rotator into health-server.js.
-# The rotator patches https.request and injects HUGGINGFACE_HUB_TOKEN (or
-# falls back to LLM_API_KEY) for any call to huggingface.co — including the
-# privacy-detection API call in detectSpacePrivacy(). If HUGGINGFACE_HUB_TOKEN
-# is not set (user's LLM provider is not HuggingFace), the rotator falls back
-# to LLM_API_KEY, which is the AI-provider key, NOT the HF owner token.
-# This causes a 401 on /api/spaces/${SPACE_ID} → privacy detection always
-# fails → SPACE_IS_PRIVATE stays true → public-space links never open in a
-# new tab.
-# Fix: seed HUGGINGFACE_HUB_TOKEN from HF_TOKEN when not already set.
-# HF Spaces auto-injects HF_TOKEN as the space owner's token, so this is safe.
+# ── Ensure privacy checks use the correct HF owner token ──
+# HF Spaces auto-injects HF_TOKEN as the space owner's token. Keep
+# HUGGINGFACE_HUB_TOKEN seeded from it so Hugging Face API calls never fall back
+# to an LLM provider key. This stays safe whether ROTATOR is on or off.
 export HUGGINGFACE_HUB_TOKEN="${HUGGINGFACE_HUB_TOKEN:-${HF_TOKEN:-}}"
 
 # 10. Start Health Server & Dashboard
@@ -1847,7 +2138,9 @@ _hc_allow_openclaw_plugins() {
   plugins_json=$(printf '%s\n' "${plugins[@]}" | jq -R 'select(length > 0)' | jq -s 'unique') || return 0
   local patched
   patched=$(jq --argjson plugins "$plugins_json" \
-    '.plugins.allow = (((.plugins.allow // []) + $plugins) | unique)' \
+    'if (.plugins.allow? != null) then
+       .plugins.allow = (((.plugins.allow // []) + $plugins) | unique)
+     else . end' \
     "$config" 2>/dev/null) || { echo "Warning: could not update plugins.allow for $*" >&2; return 0; }
   write_json_atomic "$config" "$patched" || echo "Warning: could not write plugins.allow update to config." >&2
 }
@@ -2200,7 +2493,9 @@ sync_installed_plugins_into_allow() {
         | $id
       ] as $installed
     | ($installed | map(if startswith("@openclaw/") then sub("^@openclaw/"; "") else . end)) as $short
-    | .plugins.allow = (((.plugins.allow // []) + $installed + $short) | unique)
+    | if (.plugins.allow? != null) then
+        .plugins.allow = (((.plugins.allow // []) + $installed + $short) | unique)
+      else . end
   ' "$config" 2>/dev/null) || {
     echo "Warning: could not sync installed plugins into plugins.allow"
     return 0
@@ -2474,7 +2769,9 @@ install_whatsapp_plugin_runtime() {
       jq '
         .plugins.entries.whatsapp.enabled = false
         | del(.channels.whatsapp)
-        | .plugins.allow = ((.plugins.allow // []) | map(select(. != "whatsapp" and . != "@openclaw/whatsapp" and . != "clawhub:@openclaw/whatsapp")))
+        | if (.plugins.allow? != null) then
+            .plugins.allow = ((.plugins.allow // []) | map(select(. != "whatsapp" and . != "@openclaw/whatsapp" and . != "clawhub:@openclaw/whatsapp")))
+          else . end
         | if .plugins.installs then
             .plugins.installs = (.plugins.installs | with_entries(select(
               (.key | test("whatsapp|@openclaw/whatsapp"; "i")) | not
@@ -2521,13 +2818,17 @@ install_whatsapp_plugin_runtime() {
           .plugins.installs = ((.plugins.installs // {}) + ($installed[0].plugins.installs // {}))
           | .plugins.entries.whatsapp = (($installed[0].plugins.entries.whatsapp // {}) + (.plugins.entries.whatsapp // {}) + {"enabled": true})
           | .channels.whatsapp = (.channels.whatsapp // {"dmPolicy": "pairing"})
-          | .plugins.allow = (((.plugins.allow // []) + ["whatsapp", "@openclaw/whatsapp"]) | unique)
+          | if (.plugins.allow? != null) then
+              .plugins.allow = (((.plugins.allow // []) + ["whatsapp", "@openclaw/whatsapp"]) | unique)
+            else . end
         ' "$config" > "$config.tmp" 2>/dev/null && mv "$config.tmp" "$config" || rm -f "$config.tmp"
       else
         jq '
           .plugins.entries.whatsapp.enabled = true
           | .channels.whatsapp = (.channels.whatsapp // {"dmPolicy": "pairing"})
-          | .plugins.allow = (((.plugins.allow // []) + ["whatsapp", "@openclaw/whatsapp"]) | unique)
+          | if (.plugins.allow? != null) then
+              .plugins.allow = (((.plugins.allow // []) + ["whatsapp", "@openclaw/whatsapp"]) | unique)
+            else . end
         ' "$config" > "$config.tmp" 2>/dev/null && mv "$config.tmp" "$config" || rm -f "$config.tmp"
       fi
     fi
