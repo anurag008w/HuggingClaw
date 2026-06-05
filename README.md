@@ -268,10 +268,13 @@ Configure password access and network restrictions:
 
 ## 🔑 API Key Rotation *(Optional)*
 
-Spread requests across multiple API keys to avoid rate limits. Supply a comma-separated pool for any provider. Gemini uses sticky-per-model key selection by default, so each model starts on the first healthy key and reuses it until it fails or hits quota; other providers keep the normal round-robin behavior.
+Spread requests across multiple API keys to avoid rate limits. Keep using the same HuggingClaw pool envs, especially `{PROVIDER}_API_KEYS=key1,key2,key3`. With `ROTATOR=off` (default), HuggingClaw skips its preload and OpenClaw reads the same provider key envs directly through its native key rotation. With `ROTATOR=on`, HuggingClaw's rotator consumes those pools and enables the `/key-rotator` manager. Gemini uses sticky-per-model key selection by default when the HuggingClaw rotator is on, so each model starts on the first healthy key and reuses it until it fails or hits quota; other providers keep the normal round-robin behavior.
 
 ```bash
-# Single provider, multiple keys
+# Choose rotator mode
+ROTATOR=off  # default: OpenClaw native pools; set ROTATOR=on for HuggingClaw rotator + /key-rotator
+
+# Single provider, multiple keys (same env var works in both modes)
 ANTHROPIC_API_KEYS=sk-ant-key1,sk-ant-key2,sk-ant-key3
 
 # Multiple providers simultaneously
@@ -279,10 +282,15 @@ OPENAI_API_KEYS=sk-openai-key1,sk-openai-key2
 GEMINI_API_KEYS=AIza-key1,AIza-key2
 ```
 
-**Fallback chain** (per provider):
+**Fallback chain** (per provider, with HuggingClaw rotator on; default `ROTATOR=off` delegates to OpenClaw native handling of the same envs):
 1. `{PROVIDER}_API_KEYS` — comma-separated pool *(preferred)*
 2. `{PROVIDER}_API_KEY` — single dedicated key
-3. `LLM_API_KEY` — universal fallback *(enabled by default; disable with `LLM_API_KEY_FALLBACK_ENABLED=false`)*
+3. `{PROVIDER}_API_KEY_*` — numbered dedicated keys
+4. `LLM_API_KEY` — universal fallback *(enabled by default; disable with `LLM_API_KEY_FALLBACK_ENABLED=false`)*
+
+
+> [!IMPORTANT]
+> When `ROTATOR=off`, HuggingClaw does not preload its rotator, `/key-rotator` and `/api/key-rotator/logs` return 404, and the dashboard hides the Key Rotator button. Keep provider keys in Space secrets/env vars (`*_API_KEYS`, `*_API_KEY`, `*_API_KEY_*`); HuggingClaw still strips env-managed `apiKey` values from `openclaw.json` unless you explicitly set `HUGGINGCLAW_ALLOW_CONFIG_SECRETS=true`.
 
 > [!TIP]
 > By default, `LLM_API_KEY` fallback is enabled for compatibility. Set `LLM_API_KEY_FALLBACK_ENABLED=false` if you want strict provider-only activation.
@@ -292,6 +300,7 @@ Failure handling behavior:
 - The rotator **does not auto-replay the same failed request**; retries for the same request should be handled by caller/application logic.
 
 Optional tuning:
+- `ROTATOR` / `KEY_ROTATOR_ENABLED` (default `off`) — leave off for OpenClaw native provider key rotation with the same `{PROVIDER}_API_KEYS` envs; set `on`, `true`, `yes`, or `1` to enable HuggingClaw's preload rotator and `/key-rotator` manager.
 - `KEY_BLACKLIST_COOLDOWN_MS` (default `60000`) — base cooldown after a retryable failure.
 - `KEY_BLACKLIST_JITTER_PCT` (default `15`) — adds ±jitter to cooldown to prevent herd re-entry.
 - `KEY_MAX_STRIKES` (default `3`) — after this many consecutive failures, key enters long suspend.

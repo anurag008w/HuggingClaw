@@ -459,7 +459,7 @@ function renderDashboard(data) {
     <a class="hero-action" data-space-link="app" href="${APP_BASE}/">Open Control UI →</a>
     ${JUPYTER_ENABLED ? `<a class="hero-action terminal" data-space-link="terminal" href="${JUPYTER_BASE}/">💻 Open Terminal →</a>` : ""}
     <a class="hero-action env" data-space-link="env-builder" href="/env-builder">⚙️ Env Builder →</a>
-    <a class="hero-action keys" data-space-link="key-rotator" href="/key-rotator">🔑 Key Rotator →</a>
+    ${isKeyRotatorEnabled() ? `<a class="hero-action keys" data-space-link="key-rotator" href="/key-rotator">🔑 Key Rotator →</a>` : ""}
   </div>
   <section class="overview">${tilesHtml}</section>
   <footer>Built by <a href="https://github.com/somratpro" target="_blank" rel="noopener noreferrer" style="color:inherit;text-decoration:none">@somratpro</a>${JUPYTER_ENABLED ? " · Terminal by JupyterLab" : ""} · Contributions by <a href="https://github.com/anurag008w" target="_blank" rel="noopener noreferrer" style="color:inherit;text-decoration:none">@anurag008w</a></footer>
@@ -587,7 +587,7 @@ function renderKeyRotatorManager() {
 }
 
 function splitKeyPool(value) {
-  return String(value || "").split(/[\n\r,]+/).map((s) => s.trim()).filter(Boolean);
+  return String(value || "").split(/[\n\r,;]+/).map((s) => s.trim()).filter(Boolean);
 }
 
 function maskApiKey(value) {
@@ -649,6 +649,32 @@ function shouldShowLlmFallbackProvider(name) {
   return !routeProviders || routeProviders.has(String(name || "").toLowerCase());
 }
 
+
+function isKeyRotatorEnabled() {
+  const raw = String(
+    process.env.KEY_ROTATOR_ENABLED
+    ?? process.env.KEY_ROTATOR
+    ?? process.env.ROTATOR
+    ?? "off"
+  ).trim();
+  return /^(1|true|yes|on|enabled)$/i.test(raw);
+}
+
+function numberedEnvValues(baseName) {
+  if (!baseName) return [];
+  const prefix = `${baseName}_`;
+  return Object.keys(process.env)
+    .map((name) => {
+      if (!name.startsWith(prefix)) return null;
+      const suffix = name.slice(prefix.length);
+      if (!/^\d+$/.test(suffix)) return null;
+      return { name, idx: Number(suffix) };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.idx - b.idx || a.name.localeCompare(b.name))
+    .map(({ name }) => process.env[name] || "");
+}
+
 function keyRotatorRuntimeSummary() {
   const primary = LLM_MODEL || "";
   const fallbackModels = String(process.env.LLM_FALLBACK_MODELS || "")
@@ -662,7 +688,12 @@ function keyRotatorRuntimeSummary() {
       model,
       provider: modelProviderToRotatorProvider(model),
     }));
-  return { primary, routes };
+  return {
+    enabled: isKeyRotatorEnabled(),
+    mode: isKeyRotatorEnabled() ? "huggingclaw-preload" : "openclaw-native",
+    primary,
+    routes,
+  };
 }
 
 function providerKeySummary() {
@@ -700,14 +731,15 @@ function providerKeySummary() {
     { name: "synthetic", env: ["SYNTHETIC_API_KEYS", "SYNTHETIC_API_KEY"] },
   ];
   return providers.map((p) => {
-    const names = [...p.env, ...(p.aliases || [])];
+    const names = [...p.env, ...(p.aliases || [])].filter(Boolean);
     const keys = [];
     const seen = new Set();
     const used = [];
     for (const name of names) {
       const vals = splitKeyPool(process.env[name]);
-      if (vals.length) used.push(name);
-      for (const val of vals) if (!seen.has(val)) { seen.add(val); keys.push(val); }
+      const numberedVals = numberedEnvValues(name).flatMap(splitKeyPool);
+      if (vals.length || numberedVals.length) used.push(name);
+      for (const val of [...vals, ...numberedVals]) if (!seen.has(val)) { seen.add(val); keys.push(val); }
     }
     // Keep /key-rotator aligned with multi-provider-key-rotator.cjs: show
     // LLM_API_KEY fallback only for providers on the active OpenClaw route
@@ -984,6 +1016,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (pathname === "/key-rotator" || pathname === "/key-rotator/") {
+    if (!isKeyRotatorEnabled()) {
+      res.writeHead(404, { "Content-Type": "text/plain", "Cache-Control": "no-store" });
+      return res.end("Key rotator manager is disabled. Set ROTATOR=on to enable HuggingClaw key rotation.");
+    }
     if (isDirectHfSpaceRequest) {
       res.writeHead(200, { "Content-Type": "text/html", "Cache-Control": "no-store" });
       return res.end(renderPrivateRedirect(HF_SPACE_URL));
@@ -994,6 +1030,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (pathname === "/api/key-rotator/logs") {
+    if (!isKeyRotatorEnabled()) {
+      res.writeHead(404, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+      return res.end(JSON.stringify({ enabled: false, mode: "openclaw-native", message: "Key rotator API is disabled. Set ROTATOR=on to enable HuggingClaw key rotation." }));
+    }
     if (!requireJsonAuth(req, res)) return;
     const parsed = parseRequestUrl(req.url);
     const limit = Math.max(1, Math.min(2000, Number.parseInt(parsed.searchParams.get("limit") || "500", 10) || 500));
