@@ -9,6 +9,7 @@ HF_USERNAME = os.environ.get("HF_USERNAME", "").strip() or os.environ.get("SPACE
 DATASET_NAME = os.environ.get("DEVDATA_DATASET_NAME", "").strip() or "huggingclaw-devdata"
 BACKUP_DATASET_NAME = os.environ.get("BACKUP_DATASET_NAME", "").strip() or os.environ.get("BACKUP_DATASET", "").strip() or "huggingclaw-backup"
 JUPYTER_ROOT = Path(os.environ.get("JUPYTER_ROOT_DIR", "/home/node")).resolve()
+JUPYTER_PORT = int((os.environ.get("JUPYTER_PORT", "").strip() or "8888"))
 INTERVAL = int((os.environ.get("DEVDATA_SYNC_INTERVAL", "").strip() or "180"))
 # BUG FIX #5: Respect max file size so giant files don't stall uploads.
 # Matches the 50 MB ceiling in openclaw-sync.py; override with DEVDATA_MAX_FILE_BYTES.
@@ -438,7 +439,7 @@ if __name__ == "__main__":
 
     # Normal background sync mode — no restore; go straight to upload loop.
     validate_jupyter_paths()
-    if is_jupyter_running():
+    if is_jupyter_running(JUPYTER_PORT):
         print("DevData: background sync started (JupyterLab is live, restore already done by --restore).")
     else:
         # Fallback: JupyterLab not detected.  Should not normally happen
@@ -446,6 +447,6 @@ if __name__ == "__main__":
         # waits for the gateway before launching this background process.
         # Log a warning and proceed to sync; do NOT restore to avoid racing
         # with a JupyterLab that may be in the middle of starting up.
-        print("DevData: WARNING — JupyterLab not detected on port 8888. Skipping restore to be safe; starting sync loop.")
+        print(f"DevData: WARNING — JupyterLab not detected on port {JUPYTER_PORT}. Skipping restore to be safe; starting sync loop.")
 
     sync_loop(api, rid)

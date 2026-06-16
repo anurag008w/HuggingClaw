@@ -263,7 +263,22 @@ function escapeHtml(v) {
 
 function parseCookies(req) {
   const h = req.headers.cookie || "";
-  return Object.fromEntries(h.split(";").map(c => c.trim().split("=")).filter(p => p.length >= 2).map(([k, ...v]) => [k.trim(), decodeURIComponent(v.join("=").trim())]));
+  const cookies = {};
+  for (const rawCookie of h.split(";")) {
+    const parts = rawCookie.trim().split("=");
+    if (parts.length < 2) continue;
+    const key = parts.shift().trim();
+    if (!key) continue;
+    const rawValue = parts.join("=").trim();
+    try {
+      cookies[key] = decodeURIComponent(rawValue);
+    } catch {
+      // Browsers and crawlers can send malformed percent-encoded cookie values.
+      // Treat that single cookie as unusable instead of letting URIError crash
+      // the dashboard/auth reverse proxy.
+    }
+  }
+  return cookies;
 }
 
 // Constant-time comparison using crypto — prevent timing attacks
@@ -1119,6 +1134,7 @@ server.on("upgrade", (req, socket, head) => {
       const header = req.rawHeaders[i];
       const lower = header.toLowerCase();
       if (["host", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-forwarded-prefix"].includes(lower)) continue;
+      if (lower === "authorization" && isApp && bridgeGatewayAuth && GATEWAY_TOKEN) continue;
       ps.write(`${header}: ${req.rawHeaders[i + 1]}\r\n`);
     }
     ps.write("\r\n");

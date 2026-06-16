@@ -34,6 +34,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     procps \
     python3 \
     python3-pip \
+    python3-venv \
     p7zip-full \
     chromium \
     libnss3 \
@@ -60,16 +61,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pip3 install --no-cache-dir --break-system-packages huggingface_hub hf_transfer && \
     rm -rf /var/lib/apt/lists/*
 
-# Install JupyterLab only when DEV_MODE is enabled (build-time)
-# This avoids installing large packages when terminal is not needed
-RUN if [ "${DEV_MODE}" = "true" ] || [ "${DEV_MODE}" = "1" ] || [ "${DEV_MODE}" = "yes" ] || [ "${DEV_MODE}" = "on" ]; then \
-      pip3 install --no-cache-dir --break-system-packages \
-        jupyterlab==4.5.7 \
-        tornado==6.5.5 \
-        ipywidgets==8.1.8 && \
-      # Copy login template into jupyter_server templates dir
-      python3 -c "from pathlib import Path; import shutil, jupyter_server; d=Path(jupyter_server.__file__).parent/'templates'; d.mkdir(parents=True,exist_ok=True); shutil.copyfile('/home/node/app/login.html', d/'login.html')" || true; \
-    fi
+# Install JupyterLab at build time because start.sh can auto-enable the
+# terminal at runtime when GATEWAY_TOKEN is present. If the dependency is only
+# installed when the build arg DEV_MODE=true, the documented default path
+# starts a terminal process that cannot import jupyterlab.
+RUN pip3 install --no-cache-dir --break-system-packages \
+      jupyterlab==4.5.7 \
+      tornado==6.5.5 \
+      ipywidgets==8.1.8
 
 # Reuse existing node user (UID 1000). Allow passwordless package-manager
 # commands only so runtime apt installs can be replayed after HF Space restarts.
@@ -110,7 +109,7 @@ COPY --chown=1000:1000 env-builder.html /home/node/app/env-builder.html
 COPY --chown=1000:1000 env-builder.js /home/node/app/env-builder.js
 COPY --chown=1000:1000 key-rotator-manager.html /home/node/app/key-rotator-manager.html
 COPY --chown=1000:1000 jupyter-devdata-sync.py /home/node/app/jupyter-devdata-sync.py
-# login.html template is now copied inside the DEV_MODE install block above
+RUN python3 -c "from pathlib import Path; import shutil, jupyter_server; d=Path(jupyter_server.__file__).parent/'templates'; d.mkdir(parents=True,exist_ok=True); shutil.copyfile('/home/node/app/login.html', d/'login.html')"
 RUN chmod +x /home/node/app/start.sh \
               /home/node/app/cloudflare-proxy-setup.py \
               /home/node/app/cloudflare-keepalive-setup.py \
@@ -122,6 +121,8 @@ USER node
 
 ENV HOME=/home/node \
     OPENCLAW_VERSION=${OPENCLAW_VERSION} \
+    PIP_BREAK_SYSTEM_PACKAGES=1 \
+    PYTHONUSERBASE=/home/node/.local \
     PATH=/home/node/.local/bin:/usr/local/bin:$PATH \
     NODE_PATH=/home/node/browser-deps/node_modules \
     NODE_OPTIONS="--require /opt/cloudflare-proxy.js"

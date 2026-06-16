@@ -504,6 +504,13 @@ chmod 700 /home/node/.openclaw/credentials
 export NPM_CONFIG_PREFIX="${NPM_CONFIG_PREFIX:-/home/node/.local}"
 export npm_config_prefix="$NPM_CONFIG_PREFIX"
 export PYTHONUSERBASE="${PYTHONUSERBASE:-/home/node/.local}"
+# Debian/Ubuntu images mark system Python as externally managed (PEP 668).
+# JupyterLab's PyPI extension manager runs pip from the server process, so it
+# does not see the interactive shell wrappers below. Allow that non-interactive
+# pip to install into node's user site instead of failing with
+# "externally-managed-environment".
+export PIP_BREAK_SYSTEM_PACKAGES="${PIP_BREAK_SYSTEM_PACKAGES:-1}"
+export PIP_USER="${PIP_USER:-1}"
 export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
 # Show current working directory in terminal prompt (JupyterLab terminals can
 # otherwise display only "$" when PS1 is unset/minimal).
@@ -1665,8 +1672,13 @@ start_jupyter_once() {
   echo "Terminal  : starting (root: $JUPYTER_ROOT_DIR)"
   JUPYTER_LOG_FILE="/tmp/jupyterlab.log"
   
-  # Use explicit Python to avoid PATH issues; set memory-friendly limits
+  # Use explicit Python to avoid PATH issues; set memory-friendly limits.
+  # Keep pip user-site defaults in this process so JupyterLab's PyPI Manager
+  # can install extensions/packages under /home/node/.local on PEP 668 images.
   export PYTHONPATH=""
+  export PYTHONUSERBASE="${PYTHONUSERBASE:-/home/node/.local}"
+  export PIP_BREAK_SYSTEM_PACKAGES="${PIP_BREAK_SYSTEM_PACKAGES:-1}"
+  export PIP_USER="${PIP_USER:-1}"
   hc_env_without_gateway_preloads python3 -m jupyterlab \
       --ip 127.0.0.1 \
       --port "$JUPYTER_PORT" \
@@ -1740,6 +1752,13 @@ export PATH="/home/node/.local/bin:$PATH"
 export NPM_CONFIG_PREFIX="${NPM_CONFIG_PREFIX:-/home/node/.local}"
 export npm_config_prefix="$NPM_CONFIG_PREFIX"
 export PYTHONUSERBASE="${PYTHONUSERBASE:-/home/node/.local}"
+# Debian/Ubuntu images mark system Python as externally managed (PEP 668).
+# JupyterLab's PyPI extension manager runs pip from the server process, so it
+# does not see the interactive shell wrappers below. Allow that non-interactive
+# pip to install into node's user site instead of failing with
+# "externally-managed-environment".
+export PIP_BREAK_SYSTEM_PACKAGES="${PIP_BREAK_SYSTEM_PACKAGES:-1}"
+export PIP_USER="${PIP_USER:-1}"
 export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
 export HISTFILE="${HISTFILE:-/home/node/.bash_history}"
 export HISTSIZE="${HISTSIZE:-50000}"
@@ -1958,6 +1977,8 @@ sudo() {
 pip() {
   if [ "${1:-}" = "install" ] && [ -z "${VIRTUAL_ENV:-}" ] && ! _hc_has_arg --user "$@" && ! _hc_has_arg --prefix "$@"; then
     command pip install --user --break-system-packages "${@:2}"
+  elif [ -n "${VIRTUAL_ENV:-}" ]; then
+    env -u PIP_USER pip "$@"
   else
     command pip "$@"
   fi
@@ -1973,6 +1994,8 @@ pip() {
 pip3() {
   if [ "${1:-}" = "install" ] && [ -z "${VIRTUAL_ENV:-}" ] && ! _hc_has_arg --user "$@" && ! _hc_has_arg --prefix "$@"; then
     command pip3 install --user --break-system-packages "${@:2}"
+  elif [ -n "${VIRTUAL_ENV:-}" ]; then
+    env -u PIP_USER pip3 "$@"
   else
     command pip3 "$@"
   fi
@@ -1987,6 +2010,8 @@ pip3() {
 python() {
   if [ "${1:-}" = "-m" ] && [ "${2:-}" = "pip" ] && [ "${3:-}" = "install" ] && [ -z "${VIRTUAL_ENV:-}" ] && ! _hc_has_arg --user "${@:3}" && ! _hc_has_arg --prefix "${@:3}"; then
     command python -m pip install --user --break-system-packages "${@:4}"
+  elif [ "${1:-}" = "-m" ] && [ "${2:-}" = "pip" ] && [ -n "${VIRTUAL_ENV:-}" ]; then
+    env -u PIP_USER python "$@"
   else
     command python "$@"
   fi
@@ -2001,6 +2026,8 @@ python() {
 python3() {
   if [ "${1:-}" = "-m" ] && [ "${2:-}" = "pip" ] && [ "${3:-}" = "install" ] && [ -z "${VIRTUAL_ENV:-}" ] && ! _hc_has_arg --user "${@:3}" && ! _hc_has_arg --prefix "${@:3}"; then
     command python3 -m pip install --user --break-system-packages "${@:4}"
+  elif [ "${1:-}" = "-m" ] && [ "${2:-}" = "pip" ] && [ -n "${VIRTUAL_ENV:-}" ]; then
+    env -u PIP_USER python3 "$@"
   else
     command python3 "$@"
   fi
