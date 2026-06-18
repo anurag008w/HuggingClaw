@@ -210,6 +210,8 @@ Example:
 ```bash
 HUGGINGCLAW_RUN="""
 set -e
+# In HUGGINGCLAW_RUN use normal startup commands. For apt packages,
+# HUGGINGCLAW_APT_PACKAGES=ffmpeg is preferred; sudo also works here.
 sudo apt-get update
 sudo apt-get install -y ffmpeg
 python3 -m pip install --user pandas requests
@@ -241,7 +243,9 @@ Advanced/backward-compatible variables still work if you prefer package-specific
 
 
 > [!IMPORTANT]
-> `sudo` is available for package-manager commands only (`apt`, `apt-get`, and `dpkg`) and is not unrestricted root access. In terminal shells, common user-space commands (for example `sudo unzip`, `sudo tar`, `sudo curl`, `sudo pip`) are passed through and run without escalation for convenience. Apt-installed packages still disappear on Space restart, so put them in `HUGGINGCLAW_RUN` or let the shell wrapper record the command in `startup.sh`.
+> Terminal shells are admin-convenient but not unrestricted root shells. You normally do **not** need to type `sudo` for package installs in the Jupyter/OpenClaw terminal: `apt install ...` and `apt-get install ...` are wrapped to use the image's passwordless package-manager sudo internally, while `pip`, `python -m pip`, `npm`, and related user-space tools install into HuggingClaw's writable runtime prefix. Direct `sudo` remains limited to `apt`, `apt-get`, and `dpkg`; common user-space commands such as `sudo unzip`, `sudo tar`, `sudo curl`, and `sudo pip` are passed through without escalation for convenience. Apt-installed packages still disappear on Space restart, so put them in `HUGGINGCLAW_APT_PACKAGES`/`HUGGINGCLAW_RUN` or let the shell wrapper record the command in `startup.sh`.
+
+If you really need an unrestricted root-capable Jupyter terminal for a private Space, rebuild the image with `--build-arg HUGGINGCLAW_FULL_SUDO=true` (setting this only as a runtime/env-builder variable is not enough). This changes the Docker sudoers file to `node ALL=(root) NOPASSWD: ALL`, so anyone who can access the Jupyter token can become root inside the container. Keep this disabled on public/shared Spaces.
 
 ## 💓 Staying Alive *(Recommended on Free HF Spaces)*
 

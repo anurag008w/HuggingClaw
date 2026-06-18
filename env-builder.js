@@ -790,6 +790,24 @@ const FIELDS = [
   },
 {
     "g": "Startup",
+    "icon": "🔐",
+    "k": "HUGGINGCLAW_FULL_SUDO",
+    "lbl": "Full sudo for Jupyter terminal (Docker build arg only; private Spaces only)",
+    "type": "toggle",
+    "ph": "false",
+    "tag": "build"
+  },
+{
+    "g": "Runtime",
+    "icon": "⚙️",
+    "k": "HUGGINGCLAW_WRITABLE_BASE",
+    "lbl": "Writable runtime base (blank = /data, HOME fallback, then /tmp)",
+    "type": "text",
+    "ph": "/data",
+    "tag": "advanced"
+  },
+{
+    "g": "Startup",
     "icon": "🩺",
     "k": "AUTO_DOCTOR",
     "lbl": "Auto-fix config on boot (openclaw doctor --fix)",

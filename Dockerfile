@@ -15,6 +15,7 @@ FROM ghcr.io/openclaw/openclaw:${OPENCLAW_VERSION} AS openclaw
 FROM node:22-slim
 ARG OPENCLAW_VERSION=latest
 ARG DEV_MODE=false
+ARG HUGGINGCLAW_FULL_SUDO=false
 # DEV_MODE intentionally not baked into runtime ENV — defaults to unset so
 # start.sh can auto-enable terminal when GATEWAY_TOKEN is present. Users can
 # override by setting DEV_MODE=false as an HF Space Variable to opt out.
@@ -70,16 +71,25 @@ RUN pip3 install --no-cache-dir --break-system-packages \
       tornado==6.5.5 \
       ipywidgets==8.1.8
 
-# Reuse existing node user (UID 1000). Allow passwordless package-manager
-# commands only so runtime apt installs can be replayed after HF Space restarts.
+# Reuse existing node user (UID 1000). By default, allow passwordless
+# package-manager commands only so runtime apt installs can be replayed after
+# HF Space restarts without granting unrestricted root. Private Spaces can opt
+# into full passwordless sudo at build time with HUGGINGCLAW_FULL_SUDO=true.
 RUN mkdir -p /home/node/app /home/node/.openclaw && \
     chown -R 1000:1000 /home/node && \
-    printf '%s\n' \
-      'Cmnd_Alias HUGGINGCLAW_APT = /usr/bin/apt, /usr/bin/apt-get, /usr/bin/dpkg' \
-      'node ALL=(root) NOPASSWD: HUGGINGCLAW_APT' \
-      > /etc/sudoers.d/huggingclaw-apt && \
-    chmod 0440 /etc/sudoers.d/huggingclaw-apt && \
-    visudo -cf /etc/sudoers.d/huggingclaw-apt
+    case "$(printf '%s' "${HUGGINGCLAW_FULL_SUDO}" | tr '[:upper:]' '[:lower:]')" in \
+      1|true|yes|on) \
+      printf '%s\n' \
+        'node ALL=(root) NOPASSWD: ALL' \
+        > /etc/sudoers.d/huggingclaw ;; \
+      *) \
+      printf '%s\n' \
+        'Cmnd_Alias HUGGINGCLAW_APT = /usr/bin/apt, /usr/bin/apt-get, /usr/bin/dpkg' \
+        'node ALL=(root) NOPASSWD: HUGGINGCLAW_APT' \
+        > /etc/sudoers.d/huggingclaw ;; \
+    esac && \
+    chmod 0440 /etc/sudoers.d/huggingclaw && \
+    visudo -cf /etc/sudoers.d/huggingclaw
 
 # Copy pre-built OpenClaw (skips npm install entirely — much faster!)
 COPY --from=openclaw --chown=1000:1000 /app /home/node/.openclaw/openclaw-app
@@ -121,6 +131,7 @@ USER node
 
 ENV HOME=/home/node \
     OPENCLAW_VERSION=${OPENCLAW_VERSION} \
+    HUGGINGCLAW_FULL_SUDO_BUILT=${HUGGINGCLAW_FULL_SUDO} \
     PIP_BREAK_SYSTEM_PACKAGES=1 \
     PYTHONUSERBASE=/home/node/.local \
     PATH=/home/node/.local/bin:/usr/local/bin:$PATH \

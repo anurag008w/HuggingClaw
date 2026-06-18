@@ -228,6 +228,12 @@ echo ""
 echo "  ╔══════════════════════════════════════╗"
 echo "  ║     🦞 HuggingClaw + 💻 JupyterLab     ║"
 echo "  ╚══════════════════════════════════════╝"
+if hc_is_true "${HUGGINGCLAW_FULL_SUDO_BUILT:-false}"; then
+  echo "WARNING: full passwordless sudo was enabled at image build time. JupyterLab terminal users have root access."
+elif hc_is_true "${HUGGINGCLAW_FULL_SUDO:-false}"; then
+  echo "WARNING: HUGGINGCLAW_FULL_SUDO=true was set at runtime, but full sudo requires rebuilding with --build-arg HUGGINGCLAW_FULL_SUDO=true."
+fi
+
 echo ""
 
 # ── Validate required secrets ──
@@ -247,6 +253,29 @@ if [ -n "$ERRORS" ]; then
   echo "Add them in HF Spaces → Settings → Secrets"
   exit 1
 fi
+
+# ── Runtime-writable locations ──
+# Hugging Face Docker Spaces only guarantee persistent writable storage under
+# /data when persistent storage is attached.  HOME can vary by base image and
+# system/env Jupyter prefixes can be read-only, so pick one writable root once
+# and point Python, npm, and JupyterLab user-writable state there.
+hc_choose_writable_base() {
+  local candidate
+  for candidate in "${HUGGINGCLAW_WRITABLE_BASE:-}" /data "${HOME:-}/.huggingclaw-runtime" /tmp/huggingclaw-runtime; do
+    [ -n "$candidate" ] || continue
+    if mkdir -p "$candidate" 2>/dev/null && [ -w "$candidate" ]; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+HC_WRITABLE_BASE="$(hc_choose_writable_base)" || {
+  echo "ERROR: no writable runtime directory found for Jupyter/Python/npm state." >&2
+  exit 1
+}
+export HC_WRITABLE_BASE
 
 # Resolve the actual bundled OpenClaw version so the banner reflects what is
 # inside the image, not just the requested tag.
@@ -288,14 +317,14 @@ if [ "$_do_runtime_upgrade" = "true" ]; then
   _upgrade_pkg="openclaw"
   [ "$_requested_ver" != "latest" ] && _upgrade_pkg="openclaw@${_requested_ver}"
 
-  # npm install -g respects NPM_CONFIG_PREFIX which is set later in start.sh,
-  # so use the user-writable prefix explicitly to avoid needing sudo.
-  _npm_prefix="${NPM_CONFIG_PREFIX:-/home/node/.local}"
+  # npm install -g respects NPM_CONFIG_PREFIX; use the selected writable
+  # prefix explicitly to avoid needing sudo or writing into a read-only HOME.
+  _npm_prefix="${NPM_CONFIG_PREFIX:-$HC_WRITABLE_BASE/.local}"
   if NPM_CONFIG_PREFIX="$_npm_prefix" npm install -g "$_upgrade_pkg" --prefer-online 2>/tmp/openclaw-upgrade.log; then
     # Re-read version from the installed package under the explicit prefix
     _new_ver=$(node -p "require('${_npm_prefix}/lib/node_modules/openclaw/package.json').version" 2>/dev/null || true)
-    # PATH already has /home/node/.local/bin before /usr/local/bin (set in
-    # Dockerfile ENV), so the newly installed binary is picked up automatically
+    # PATH is updated below to prefer the selected writable prefix, so the
+    # newly installed binary is picked up automatically
     # by 'command openclaw' without needing to update /usr/local/bin/openclaw.
     echo "OpenClaw : upgraded to ${_new_ver:-${_requested_ver}} ✓"
     OPENCLAW_RUNTIME_VERSION="${_new_ver:-$OPENCLAW_RUNTIME_VERSION}"
@@ -493,7 +522,8 @@ mkdir -p /home/node/.openclaw/credentials
 mkdir -p /home/node/.openclaw/memory
 mkdir -p /home/node/.openclaw/extensions
 mkdir -p /home/node/.openclaw/workspace
-mkdir -p /home/node/.local/bin /home/node/.local/lib /home/node/.npm-global
+mkdir -p "$HC_WRITABLE_BASE/.local/bin" "$HC_WRITABLE_BASE/.local/lib" "$HC_WRITABLE_BASE/.npm-global"
+mkdir -p "$HC_WRITABLE_BASE/.jupyter" "$HC_WRITABLE_BASE/.local/share/jupyter" "$HC_WRITABLE_BASE/.local/share/jupyter/runtime" "$HC_WRITABLE_BASE/.local/share/jupyter/lab"
 chmod 700 /home/node/.openclaw
 chmod 700 /home/node/.openclaw/credentials
 
@@ -501,9 +531,17 @@ chmod 700 /home/node/.openclaw/credentials
 # npm/pip installs in user-writable locations, make apt noninteractive,
 # and persist only a tiny replay script in the synced workspace so packages
 # are re-installed after restart.
-export NPM_CONFIG_PREFIX="${NPM_CONFIG_PREFIX:-/home/node/.local}"
+if [ -z "${NPM_CONFIG_PREFIX:-}" ] || [ "${NPM_CONFIG_PREFIX:-}" = "/home/node/.local" ]; then
+  export NPM_CONFIG_PREFIX="$HC_WRITABLE_BASE/.local"
+else
+  export NPM_CONFIG_PREFIX
+fi
 export npm_config_prefix="$NPM_CONFIG_PREFIX"
-export PYTHONUSERBASE="${PYTHONUSERBASE:-/home/node/.local}"
+if [ -z "${PYTHONUSERBASE:-}" ] || [ "${PYTHONUSERBASE:-}" = "/home/node/.local" ]; then
+  export PYTHONUSERBASE="$HC_WRITABLE_BASE/.local"
+else
+  export PYTHONUSERBASE
+fi
 # Debian/Ubuntu images mark system Python as externally managed (PEP 668).
 # JupyterLab's PyPI extension manager runs pip from the server process, so it
 # does not see the interactive shell wrappers below. Allow that non-interactive
@@ -511,6 +549,13 @@ export PYTHONUSERBASE="${PYTHONUSERBASE:-/home/node/.local}"
 # "externally-managed-environment".
 export PIP_BREAK_SYSTEM_PACKAGES="${PIP_BREAK_SYSTEM_PACKAGES:-1}"
 export PIP_USER="${PIP_USER:-1}"
+export JUPYTER_CONFIG_DIR="${JUPYTER_CONFIG_DIR:-$HC_WRITABLE_BASE/.jupyter}"
+export JUPYTER_DATA_DIR="${JUPYTER_DATA_DIR:-$HC_WRITABLE_BASE/.local/share/jupyter}"
+export JUPYTER_RUNTIME_DIR="${JUPYTER_RUNTIME_DIR:-$HC_WRITABLE_BASE/.local/share/jupyter/runtime}"
+export JUPYTERLAB_DIR="${JUPYTERLAB_DIR:-$HC_WRITABLE_BASE/.local/share/jupyter/lab}"
+export JUPYTERLAB_SETTINGS_DIR="${JUPYTERLAB_SETTINGS_DIR:-$JUPYTER_CONFIG_DIR/lab/user-settings}"
+export JUPYTERLAB_WORKSPACES_DIR="${JUPYTERLAB_WORKSPACES_DIR:-$JUPYTER_CONFIG_DIR/lab/workspaces}"
+export JUPYTER_PREFER_ENV_PATH="${JUPYTER_PREFER_ENV_PATH:-0}"
 export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
 # Show current working directory in terminal prompt (JupyterLab terminals can
 # otherwise display only "$" when PS1 is unset/minimal).
@@ -1461,7 +1506,7 @@ else
   RUNTIME_JUPYTER_ENABLED="$DEV_MODE_ENABLED"
 fi
 # Add user bin to PATH for jupyter-lab (installed in Dockerfile when DEV_MODE=true)
-export PATH="$HOME/.local/bin:$PATH"
+export PATH="$HC_WRITABLE_BASE/.local/bin:$HOME/.local/bin:$PATH"
 
 # Runtime install fallback: only attempt if DEV_MODE is enabled but install failed during build
 if [ "$DEV_MODE_ENABLED" = "true" ] && ! python3 -c "import jupyterlab" >/dev/null 2>&1; then
@@ -1667,18 +1712,29 @@ start_jupyter_once() {
   fi
 
   # Pre-create runtime directory
-  mkdir -p "$JUPYTER_ROOT_DIR/.jupyter"
+  mkdir -p "$JUPYTER_ROOT_DIR/.jupyter" "$JUPYTER_CONFIG_DIR" "$JUPYTER_DATA_DIR" "$JUPYTER_RUNTIME_DIR" "$JUPYTERLAB_DIR" "$JUPYTERLAB_SETTINGS_DIR" "$JUPYTERLAB_WORKSPACES_DIR"
 
   echo "Terminal  : starting (root: $JUPYTER_ROOT_DIR)"
   JUPYTER_LOG_FILE="/tmp/jupyterlab.log"
   
   # Use explicit Python to avoid PATH issues; set memory-friendly limits.
   # Keep pip user-site defaults in this process so JupyterLab's PyPI Manager
-  # can install extensions/packages under /home/node/.local on PEP 668 images.
+  # can install extensions/packages under the selected writable base on PEP 668 images.
   export PYTHONPATH=""
-  export PYTHONUSERBASE="${PYTHONUSERBASE:-/home/node/.local}"
+  if [ -z "${PYTHONUSERBASE:-}" ] || [ "${PYTHONUSERBASE:-}" = "/home/node/.local" ]; then
+    export PYTHONUSERBASE="$HC_WRITABLE_BASE/.local"
+  else
+    export PYTHONUSERBASE
+  fi
   export PIP_BREAK_SYSTEM_PACKAGES="${PIP_BREAK_SYSTEM_PACKAGES:-1}"
   export PIP_USER="${PIP_USER:-1}"
+  export JUPYTER_CONFIG_DIR="${JUPYTER_CONFIG_DIR:-$HC_WRITABLE_BASE/.jupyter}"
+  export JUPYTER_DATA_DIR="${JUPYTER_DATA_DIR:-$HC_WRITABLE_BASE/.local/share/jupyter}"
+  export JUPYTER_RUNTIME_DIR="${JUPYTER_RUNTIME_DIR:-$HC_WRITABLE_BASE/.local/share/jupyter/runtime}"
+  export JUPYTERLAB_DIR="${JUPYTERLAB_DIR:-$HC_WRITABLE_BASE/.local/share/jupyter/lab}"
+  export JUPYTERLAB_SETTINGS_DIR="${JUPYTERLAB_SETTINGS_DIR:-$JUPYTER_CONFIG_DIR/lab/user-settings}"
+  export JUPYTERLAB_WORKSPACES_DIR="${JUPYTERLAB_WORKSPACES_DIR:-$JUPYTER_CONFIG_DIR/lab/workspaces}"
+  export JUPYTER_PREFER_ENV_PATH="${JUPYTER_PREFER_ENV_PATH:-0}"
   hc_env_without_gateway_preloads python3 -m jupyterlab \
       --ip 127.0.0.1 \
       --port "$JUPYTER_PORT" \
@@ -1748,10 +1804,11 @@ if [ ! -f "$STARTUP_FILE" ]; then
   echo "Created workspace/startup.sh"
 fi
 cat > /home/node/.bashrc << 'BASHRC'
-export PATH="/home/node/.local/bin:$PATH"
-export NPM_CONFIG_PREFIX="${NPM_CONFIG_PREFIX:-/home/node/.local}"
+export HC_WRITABLE_BASE="${HC_WRITABLE_BASE:-/tmp/huggingclaw-runtime}"
+export PATH="$HC_WRITABLE_BASE/.local/bin:/home/node/.local/bin:$PATH"
+export NPM_CONFIG_PREFIX="${NPM_CONFIG_PREFIX:-$HC_WRITABLE_BASE/.local}"
 export npm_config_prefix="$NPM_CONFIG_PREFIX"
-export PYTHONUSERBASE="${PYTHONUSERBASE:-/home/node/.local}"
+export PYTHONUSERBASE="${PYTHONUSERBASE:-$HC_WRITABLE_BASE/.local}"
 # Debian/Ubuntu images mark system Python as externally managed (PEP 668).
 # JupyterLab's PyPI extension manager runs pip from the server process, so it
 # does not see the interactive shell wrappers below. Allow that non-interactive
@@ -1759,6 +1816,13 @@ export PYTHONUSERBASE="${PYTHONUSERBASE:-/home/node/.local}"
 # "externally-managed-environment".
 export PIP_BREAK_SYSTEM_PACKAGES="${PIP_BREAK_SYSTEM_PACKAGES:-1}"
 export PIP_USER="${PIP_USER:-1}"
+export JUPYTER_CONFIG_DIR="${JUPYTER_CONFIG_DIR:-$HC_WRITABLE_BASE/.jupyter}"
+export JUPYTER_DATA_DIR="${JUPYTER_DATA_DIR:-$HC_WRITABLE_BASE/.local/share/jupyter}"
+export JUPYTER_RUNTIME_DIR="${JUPYTER_RUNTIME_DIR:-$HC_WRITABLE_BASE/.local/share/jupyter/runtime}"
+export JUPYTERLAB_DIR="${JUPYTERLAB_DIR:-$HC_WRITABLE_BASE/.local/share/jupyter/lab}"
+export JUPYTERLAB_SETTINGS_DIR="${JUPYTERLAB_SETTINGS_DIR:-$JUPYTER_CONFIG_DIR/lab/user-settings}"
+export JUPYTERLAB_WORKSPACES_DIR="${JUPYTERLAB_WORKSPACES_DIR:-$JUPYTER_CONFIG_DIR/lab/workspaces}"
+export JUPYTER_PREFER_ENV_PATH="${JUPYTER_PREFER_ENV_PATH:-0}"
 export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
 export HISTFILE="${HISTFILE:-/home/node/.bash_history}"
 export HISTSIZE="${HISTSIZE:-50000}"
