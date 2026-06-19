@@ -228,22 +228,45 @@ echo ""
 echo "  ╔══════════════════════════════════════╗"
 echo "  ║     🦞 HuggingClaw + 💻 JupyterLab     ║"
 echo "  ╚══════════════════════════════════════╝"
+# Track whether full passwordless sudo is active in THIS container boot.
+# Set true by:  (a) build arg HUGGINGCLAW_FULL_SUDO=true, OR
+#              (b) runtime env HUGGINGCLAW_FULL_SUDO=true (applied below
+#                  via the baked-in /usr/local/bin/hc-apply-full-sudo hook).
+HC_FULL_SUDO_ACTIVE=false
 if hc_is_true "${HUGGINGCLAW_FULL_SUDO_BUILT:-false}"; then
+  HC_FULL_SUDO_ACTIVE=true
   echo "WARNING: full passwordless sudo was enabled at image build time. JupyterLab terminal users have root access."
 elif hc_is_true "${HUGGINGCLAW_FULL_SUDO:-false}"; then
-  echo "WARNING: HUGGINGCLAW_FULL_SUDO=true was set at runtime, but full sudo requires rebuilding with --build-arg HUGGINGCLAW_FULL_SUDO=true."
+  # Runtime opt-in. A non-root process cannot grant itself new privileges, so
+  # the image bakes a single root-owned, non-writable helper that the default
+  # sudoers rule lets `node` invoke. Calling it flips the sudoers file to the
+  # unrestricted rule for this container. Requires an image that includes the
+  # helper; older images fall back to the rebuild warning.
+  if [ -x /usr/local/bin/hc-apply-full-sudo ] && command -v sudo >/dev/null 2>&1; then
+    if sudo -n /usr/local/bin/hc-apply-full-sudo 2>/dev/null; then
+      HC_FULL_SUDO_ACTIVE=true
+      export HUGGINGCLAW_FULL_SUDO=true
+      echo "WARNING: HUGGINGCLAW_FULL_SUDO=true applied at runtime. JupyterLab terminal users now have root access."
+    else
+      echo "WARNING: HUGGINGCLAW_FULL_SUDO=true was set, but the runtime escalation hook failed. Rebuild the image so it includes /usr/local/bin/hc-apply-full-sudo, or rebuild with --build-arg HUGGINGCLAW_FULL_SUDO=true."
+    fi
+  else
+    echo "WARNING: HUGGINGCLAW_FULL_SUDO=true was set, but this image predates the runtime-escalation hook. Rebuild the image (which adds the hook), or rebuild with --build-arg HUGGINGCLAW_FULL_SUDO=true."
+  fi
 fi
+export HC_FULL_SUDO_ACTIVE
 
 echo ""
 
 # ── Validate required secrets ──
+# GATEWAY_TOKEN is the only truly hard requirement: it secures both the Control
+# UI and the JupyterLab terminal (it doubles as JUPYTER_TOKEN). Without it the
+# Space would be an open shell, so we still fail fast.
+# LLM_API_KEY and LLM_MODEL are OPTIONAL. A user may want to boot the Space and
+# finish setup from the JupyterLab terminal (edit /home/node/.openclaw/openclaw.json
+# or export env vars) before chatting. The gateway starts fine with an unset
+# primary model; AI calls simply fail until the user configures one.
 ERRORS=""
-if [ -z "$LLM_API_KEY" ]; then
-  ERRORS="${ERRORS}  - LLM_API_KEY is not set\n"
-fi
-if [ -z "$LLM_MODEL" ]; then
-  ERRORS="${ERRORS}  - LLM_MODEL is not set (e.g. google/gemini-3.5-flash, anthropic/claude-sonnet-4-6, openai/gpt-5.4)\n"
-fi
 if [ -z "$GATEWAY_TOKEN" ]; then
   ERRORS="${ERRORS}  - GATEWAY_TOKEN is not set (generate: openssl rand -hex 32)\n"
 fi
@@ -253,6 +276,22 @@ if [ -n "$ERRORS" ]; then
   echo "Add them in HF Spaces → Settings → Secrets"
   exit 1
 fi
+
+# Warn (but do NOT exit) when the LLM provider is not configured yet.
+HC_LLM_CONFIGURED=true
+if [ -z "$LLM_API_KEY" ] || [ -z "$LLM_MODEL" ]; then
+  HC_LLM_CONFIGURED=false
+  echo "⚠️  LLM not configured yet:"
+  [ -z "$LLM_API_KEY" ] && echo "   - LLM_API_KEY is not set"
+  [ -z "$LLM_MODEL" ]   && echo "   - LLM_MODEL is not set (e.g. google/gemini-3.5-flash, anthropic/claude-sonnet-4-6, openai/gpt-5.4)"
+  echo "   The Space will boot anyway so you can finish setup from the terminal:"
+  echo "     • Open /terminal/ (auth = GATEWAY_TOKEN)"
+  echo "     • Edit /home/node/.openclaw/openclaw.json, OR"
+  echo "     • Add LLM_API_KEY + LLM_MODEL in HF Spaces → Settings → Secrets, then restart."
+  echo "   AI chat will return errors until a model + key are configured."
+  echo ""
+fi
+export HC_LLM_CONFIGURED
 
 # ── Runtime-writable locations ──
 # Hugging Face Docker Spaces only guarantee persistent writable storage under
@@ -372,6 +411,11 @@ fi
 # Map provider prefix to the correct API key environment variable
 # Based on OpenClaw provider system: /usr/local/lib/node_modules/openclaw/docs/concepts/model-providers.md
 # Note: OpenClaw normalizes some prefixes (z-ai → zai, z.ai → zai, etc.)
+# Skip entirely when no model is configured yet (LLM_MODEL optional since the
+# Space can boot and be configured later from the terminal). Without this guard,
+# an empty prefix falls into the `*)` branch and exports an empty
+# ANTHROPIC_API_KEY plus a misleading "Unknown provider prefix ''" warning.
+if [ -n "$LLM_PROVIDER" ] && [ -n "$LLM_API_KEY" ]; then
 case "$LLM_PROVIDER" in
   # ── Core Providers ──
   anthropic)                    export ANTHROPIC_API_KEY="$LLM_API_KEY" ;;
@@ -422,6 +466,7 @@ case "$LLM_PROVIDER" in
     export ANTHROPIC_API_KEY="$LLM_API_KEY"
     ;;
 esac
+fi
 
 # Ensure OpenClaw provider discovery can see per-provider keys even when users
 # configure only *_API_KEYS pools. Mirror first pool key into singular env.
@@ -1771,7 +1816,10 @@ if [ "$RUNTIME_JUPYTER_ENABLED" = "true" ] && \
    [ -f "/home/node/app/jupyter-devdata-sync.py" ] && \
    [ "${DEVDATA_DATASET_NAME:-huggingclaw-devdata}" != "${BACKUP_DATASET_NAME:-huggingclaw-backup}" ]; then
   echo "DevData   : restoring workspace..."
-  python3 /home/node/app/jupyter-devdata-sync.py --restore 2>/dev/null || \
+  # Do NOT swallow stderr: hiding restore errors made a real bug
+  # (removed huggingface_hub kwarg) invisible for a long time. Keep startup
+  # non-fatal but surface what actually went wrong.
+  python3 /home/node/app/jupyter-devdata-sync.py --restore || \
     echo "DevData   : restore warning (non-fatal); continuing startup."
 fi
 
@@ -2012,7 +2060,22 @@ apt() {
 }
 
 sudo() {
-  # Keep privilege boundary strict: only apt/apt-get/dpkg may escalate.
+  # Full passwordless sudo mode (build arg OR runtime env via the helper hook):
+  # pass EVERY command through to real sudo so the terminal behaves like a real
+  # root shell. This only runs after start.sh set HC_FULL_SUDO_ACTIVE=true, which
+  # the user explicitly opted into (documented as: anyone with the Jupyter token
+  # becomes root).
+  if [ "${HC_FULL_SUDO_ACTIVE:-false}" = "true" ]; then
+    if [ "${#}" -gt 0 ]; then
+      command sudo "$@"
+    else
+      echo "usage: sudo <command> [args...]" >&2
+      return 1
+    fi
+    return $?
+  fi
+
+  # Default: keep privilege boundary strict — only apt/apt-get/dpkg may escalate.
   # For common user-space commands, transparently run without sudo so users
   # who habitually type "sudo <cmd>" do not hit unnecessary failures.
   local cmd="${1:-}"

@@ -287,7 +287,13 @@ def restore_once(api, rid: str):
     from huggingface_hub.errors import RepositoryNotFoundError
     tmp = Path(tempfile.mkdtemp(prefix="devdata-restore-"))
     try:
-        snapshot_download(repo_id=rid, repo_type="dataset", local_dir=str(tmp), local_dir_use_symlinks=False, token=HF_TOKEN)
+        # NOTE: `local_dir_use_symlinks` was removed in huggingface_hub >= 1.0
+        # (downloads always copy into local_dir now). Passing it on a current
+        # build raises TypeError, which start.sh swallows as a "non-fatal"
+        # warning (stderr is redirected) — so the DevData restore silently never
+        # happened and user Jupyter settings/files never came back after a
+        # restart. Drop the kwarg; it has been a no-op default for a long time.
+        snapshot_download(repo_id=rid, repo_type="dataset", local_dir=str(tmp), token=HF_TOKEN)
         for p in tmp.rglob("*"):
             rel = p.relative_to(tmp)
             if str(rel) == ".gitattributes":

@@ -74,7 +74,9 @@ RUN pip3 install --no-cache-dir --break-system-packages \
 # Reuse existing node user (UID 1000). By default, allow passwordless
 # package-manager commands only so runtime apt installs can be replayed after
 # HF Space restarts without granting unrestricted root. Private Spaces can opt
-# into full passwordless sudo at build time with HUGGINGCLAW_FULL_SUDO=true.
+# into full passwordless sudo either at build time (HUGGINGCLAW_FULL_SUDO=true
+# build arg) OR at runtime (HUGGINGCLAW_FULL_SUDO=true env var), via the
+# locked-down hc-apply-full-sudo helper below.
 RUN mkdir -p /home/node/app /home/node/.openclaw && \
     chown -R 1000:1000 /home/node && \
     case "$(printf '%s' "${HUGGINGCLAW_FULL_SUDO}" | tr '[:upper:]' '[:lower:]')" in \
@@ -85,11 +87,49 @@ RUN mkdir -p /home/node/app /home/node/.openclaw && \
       *) \
       printf '%s\n' \
         'Cmnd_Alias HUGGINGCLAW_APT = /usr/bin/apt, /usr/bin/apt-get, /usr/bin/dpkg' \
-        'node ALL=(root) NOPASSWD: HUGGINGCLAW_APT' \
+        'node ALL=(root) NOPASSWD: HUGGINGCLAW_APT, /usr/local/bin/hc-apply-full-sudo' \
         > /etc/sudoers.d/huggingclaw ;; \
     esac && \
     chmod 0440 /etc/sudoers.d/huggingclaw && \
     visudo -cf /etc/sudoers.d/huggingclaw
+
+# Runtime full-sudo enablement helper.
+# A non-root process cannot grant itself new privileges at runtime, so the image
+# bakes in ONE root-owned, non-writable (by node) script that the sudoers rule
+# above lets `node` invoke without a password. start.sh calls it when
+# HUGGINGCLAW_FULL_SUDO=true is set as a runtime env var, so a single image can
+# toggle full sudo per Space without rebuilding. The script is intentionally
+# trivial and locked down: it only rewrites /etc/sudoers.d/huggingclaw to the
+# unrestricted rule. Do NOT make it accept arguments or paths.
+RUN printf '%s\n' \
+      '#!/bin/sh' \
+      'set -eu' \
+      '# Locked full-sudo escalation hook (root-owned, not writable by node).' \
+      '# Invoked only by start.sh when HUGGINGCLAW_FULL_SUDO=true.' \
+      'umask 022' \
+      'tmp="$(mktemp /etc/sudoers.d/huggingclaw.XXXXXX)"' \
+      'printf "%s\n" "node ALL=(root) NOPASSWD: ALL" > "$tmp"' \
+      'chmod 0440 "$tmp"' \
+      '# Resolve visudo from the known locations (/usr/sbin on Debian/Ubuntu).' \
+      'VISUDO=""; for c in /usr/sbin/visudo /sbin/visudo visudo; do' \
+      '  command -v "$c" >/dev/null 2>&1 && { VISUDO="$c"; break; }' \
+      'done' \
+      'if [ -z "$VISUDO" ]; then' \
+      '  rm -f "$tmp"' \
+      '  echo "hc-apply-full-sudo: visudo not found; aborting." >&2' \
+      '  exit 1' \
+      'fi' \
+      'if "$VISUDO" -cf "$tmp" >/dev/null 2>&1; then' \
+      '  mv "$tmp" /etc/sudoers.d/huggingclaw' \
+      'else' \
+      '  rm -f "$tmp"' \
+      '  echo "hc-apply-full-sudo: generated sudoers file failed validation; aborting." >&2' \
+      '  exit 1' \
+      'fi' \
+      'echo "hc-apply-full-sudo: full passwordless sudo enabled." >&2' \
+    > /usr/local/bin/hc-apply-full-sudo && \
+    chmod 0755 /usr/local/bin/hc-apply-full-sudo && \
+    chown root:root /usr/local/bin/hc-apply-full-sudo
 
 # Copy pre-built OpenClaw (skips npm install entirely — much faster!)
 COPY --from=openclaw --chown=1000:1000 /app /home/node/.openclaw/openclaw-app

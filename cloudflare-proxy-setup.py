@@ -48,11 +48,18 @@ DEFAULT_ALLOWED = [
     "google.com",
     "googleusercontent.com",
     "gstatic.com",
-    # NOTE: AI-provider domains (api.openai.com, api.anthropic.com, etc.) are
-    # intentionally NOT included here. Proxying AI calls routes API keys through
-    # the Cloudflare Worker without an explicit opt-in. Users who need AI API
-    # calls proxied (e.g. geo-restricted regions) can add specific domains via
-    # the CLOUDFLARE_PROXY_DOMAINS environment variable.
+    # AI providers routed through the Worker BY DEFAULT (must stay in sync with
+    # DEFAULT_PROXY_DOMAINS in cloudflare-proxy.js). Google Gemini/Vertex, NVIDIA
+    # and OpenRouter apply per-IP rate limits; HF Spaces share an egress IP, so
+    # proxying them through the Worker gives a dedicated Cloudflare edge IP and
+    # stops keys being throttled/exhausted as if all came from one source.
+    "generativelanguage.googleapis.com",
+    "aiplatform.googleapis.com",
+    "openrouter.ai",
+    "integrate.api.nvidia.com",
+    "api.nvidia.com",
+    # NOTE: api.openai.com, api.anthropic.com, api.deepseek.com, etc. are still
+    # NOT proxied by default. Add them via CLOUDFLARE_PROXY_DOMAINS if needed.
 ]
 
 

@@ -140,8 +140,8 @@ const ERROR_BODY_WAIT_MS = Math.max(
   Math.min(10_000, parseInt(process.env.KEY_ERROR_BODY_WAIT_MS || '', 10) || 1500),
 );
 
-const USE_SUSPENDED_KEY_AS_LAST_RESORT = !/^(0|false|no|off)$/i.test(
-  String(process.env.KEY_USE_SUSPENDED_AS_LAST_RESORT || 'true').trim(),
+const USE_SUSPENDED_KEY_AS_LAST_RESORT = /^(1|true|yes|on)$/i.test(
+  String(process.env.KEY_USE_SUSPENDED_AS_LAST_RESORT || 'false').trim(),
 );
 
 // Sticky mode keeps one key assigned to the same provider/model bucket until
@@ -1194,17 +1194,9 @@ function nextKey(p, model) {
     return { key: bestPick.key, waitMs: 0 };
   }
 
-  // All keys are sitting out — default to best-effort progress by reusing
-  // the soonest-recovering key, unless explicitly disabled.
-  if (!USE_SUSPENDED_KEY_AS_LAST_RESORT) {
-    warn(`[key-rotator] ${p.name}: all ${total} key(s) suspended — withholding key until cooldown expires (last-resort disabled)`);
-    emitEvent('all_suspended_withheld', p, null, { model, total });
-    return { key: null, waitMs: 0 };
-  }
-
-  // FIX: scan from p.idx (same round-robin start as normal path) so ties in
-  // expiry are broken by position — every key gets equal turns even when all
-  // are suspended with the same blacklistedUntil timestamp.
+  // All keys are sitting out. Compute the soonest-recovering key's expiry so we
+  // can tell the caller how long to wait, regardless of whether we hand out a
+  // key (last-resort mode) or withhold it (new production-safe default).
   // For perModelLimits providers, use the effective (max of global + model) expiry.
   let bestIdx = -1, bestExpiry = Infinity;
   for (let offset = 0; offset < total; offset++) {
@@ -1212,12 +1204,22 @@ function nextKey(p, model) {
     const exp = getKeyExpiry(p, p.keys[i], model);
     if (exp < bestExpiry) { bestIdx = i; bestExpiry = exp; }
   }
+  const waitMs = Math.max(0, bestExpiry - Date.now());
+
+  if (!USE_SUSPENDED_KEY_AS_LAST_RESORT) {
+    // Production-safe default: do NOT fire a request at a key that just 429'd.
+    // Hand back no key plus the real cooldown wait so the caller sleeps until a
+    // key recovers instead of busy-looping with `waitMs: 0` (which previously
+    // caused spin/hang when every key was suspended).
+    warn(`[key-rotator] ${p.name}: all ${total} key(s) suspended — withholding key, retry in ${Math.round(waitMs / 1000)}s${model ? ` (model=${model})` : ''}`);
+    emitEvent('all_suspended_withheld', p, null, { model, total, waitMs });
+    return { key: null, waitMs };
+  }
+
+  // Opt-in last-resort mode: reuse the soonest-recovering key anyway.
   const chosenKey = p.keys[bestIdx];
   p.idx = (bestIdx + 1) % total; // advance for next call
 
-  // Real-cycle: tell the caller how long to wait before using this key.
-  // This avoids firing into a guaranteed 429 and wasting a request slot.
-  const waitMs = Math.max(0, bestExpiry - Date.now());
   if (waitMs > 0)
     warn(`[key-rotator] ${p.name}: all ${total} key(s) suspended — soonest key ${keySlot(p, chosenKey)}${keyMask(chosenKey)} recovers in ${Math.round(waitMs / 1000)}s${model ? ` (model=${model})` : ''}`);
   else

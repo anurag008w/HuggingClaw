@@ -792,7 +792,7 @@ const FIELDS = [
     "g": "Startup",
     "icon": "🔐",
     "k": "HUGGINGCLAW_FULL_SUDO",
-    "lbl": "Full sudo for Jupyter terminal (Docker build arg only; private Spaces only)",
+    "lbl": "Full sudo for Jupyter terminal (private Spaces only; needs one image rebuild to add the runtime hook)",
     "type": "toggle",
     "ph": "false",
     "tag": "build"
