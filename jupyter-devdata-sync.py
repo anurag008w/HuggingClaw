@@ -314,7 +314,7 @@ def snapshot(src: Path, dst: Path) -> tuple[bool, set[str]]:
     had_copy_failures = False
     protected_large_files: set[str] = set()
 
-    def _copy_one(p: Path, target: Path) -> None:
+    def _copy_one(p: Path, target: Path, base: Path) -> None:
         nonlocal had_copy_failures
         if p.is_dir():
             # Keep parent directories for files copied later in this snapshot.
@@ -326,23 +326,23 @@ def snapshot(src: Path, dst: Path) -> tuple[bool, set[str]]:
             # BUG FIX #5: Skip files that exceed the size limit.
             try:
                 if p.stat().st_size > MAX_FILE_SIZE_BYTES:
-                    protected_large_files.add(p.relative_to(src).as_posix())
+                    protected_large_files.add(p.relative_to(base).as_posix())
                     return
             except OSError:
                 had_copy_failures = True
-                protected_large_files.add(p.relative_to(src).as_posix())
+                protected_large_files.add(p.relative_to(base).as_posix())
                 return
             target.parent.mkdir(parents=True, exist_ok=True)
             try:
                 shutil.copy2(p, target)
             except OSError:
                 had_copy_failures = True
-                protected_large_files.add(p.relative_to(src).as_posix())
+                protected_large_files.add(p.relative_to(base).as_posix())
 
     # 1) JUPYTER_ROOT contents (notebooks, workspace files, etc.) — top level.
     for p in iter_sync_tree(src):
         rel = p.relative_to(src)
-        _copy_one(p, dst / rel)
+        _copy_one(p, dst / rel, src)
 
     # 2) Jupyter settings dirs that now live OUTSIDE JUPYTER_ROOT (under
     # HC_WRITABLE_BASE since d085e58). Snapshot them under a stable virtual
@@ -350,11 +350,11 @@ def snapshot(src: Path, dst: Path) -> tuple[bool, set[str]]:
     for tag, root in SETTINGS_ROOTS:
         for p in _walk_settings_root(root):
             rel = Path(tag) / p.relative_to(root)
-            _copy_one(p, dst / rel)
+            _copy_one(p, dst / rel, root)
     return had_copy_failures, protected_large_files
 
 def is_jupyter_running(port: int = 8888) -> bool:
-    """Return True if JupyterLab is already listening on *port*.
+
 
     BUG FIX #2 (safety net): restore_once() must never run while JupyterLab
     is active.  Overwriting files under JUPYTER_ROOT (runtime/ sockets, lab/
