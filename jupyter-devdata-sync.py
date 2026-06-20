@@ -235,6 +235,22 @@ def iter_sync_tree(root: Path):
     if not root.exists():
         return
 
+    # If HC_WRITABLE_BASE (which now holds the real Jupyter settings + pip/npm
+    # packages) is nested inside JUPYTER_ROOT, do NOT walk into it here: the
+    # settings are snapshotted separately under stable tags by snapshot(), and
+    # everything else under the writable base (site-packages, npm-global, ...)
+    # is runtime junk that must never be persisted. Prune the whole subtree so
+    # we don't duplicate settings AND don't leak package files into the dataset.
+    _writable_base = HC_WRITABLE_BASE
+    _skip_abs: set[Path] = set()
+    if _writable_base:
+        _wb = Path(_writable_base).resolve()
+        try:
+            _wb.relative_to(root.resolve())
+            _skip_abs.add(_wb)
+        except ValueError:
+            pass  # writable base lives outside JUPYTER_ROOT — nothing to prune
+
     for dirpath, dirnames, filenames in os.walk(root):
         dir_path = Path(dirpath)
         try:
@@ -246,6 +262,9 @@ def iter_sync_tree(root: Path):
         for dirname in sorted(dirnames):
             rel = dir_rel / dirname
             child = dir_path / dirname
+            # Never descend into the writable-base subtree (when nested in root).
+            if _skip_abs and child.resolve() in _skip_abs:
+                continue
             rel_parts = rel.parts
             # Do not prune ancestors of explicitly allowed Jupyter settings
             # paths. should_skip(.local/share/jupyter) is true by design for
