@@ -354,7 +354,7 @@ def snapshot(src: Path, dst: Path) -> tuple[bool, set[str]]:
     return had_copy_failures, protected_large_files
 
 def is_jupyter_running(port: int = 8888) -> bool:
-
+    """Probe whether JupyterLab is listening on the given port.
 
     BUG FIX #2 (safety net): restore_once() must never run while JupyterLab
     is active.  Overwriting files under JUPYTER_ROOT (runtime/ sockets, lab/
