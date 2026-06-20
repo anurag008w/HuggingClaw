@@ -755,7 +755,7 @@ const FIELDS = [
     "g": "Plugins",
     "icon": "🔄",
     "k": "KEY_USE_SUSPENDED_AS_LAST_RESORT",
-    "lbl": "Use suspended key as last resort — when all keys are blocked, reuse the soonest-recovering key rather than returning nothing (recommended: on)",
+    "lbl": "Use suspended key as last resort — when all keys are blocked, reuse the soonest-recovering key rather than returning nothing (default: off)",
     "type": "toggle",
     "ph": "true",
     "tag": "advanced"

@@ -582,7 +582,7 @@ chmod 700 /home/node/.openclaw
 # The ongoing round-trip (new settings persist across restart) is handled by
 # jupyter-devdata-sync.py reading/writing settings at HC_WRITABLE_BASE directly.
 hc_migrate_jupyter_state() {
-  local legacy_new dest src _migrated=0
+  local legacy dest src _migrated=0
   for pair in \
     "/home/node/.jupyter:$HC_WRITABLE_BASE/.jupyter" \
     "/home/node/.local/share/jupyter:$HC_WRITABLE_BASE/.local/share/jupyter"; do
