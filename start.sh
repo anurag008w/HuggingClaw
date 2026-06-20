@@ -570,6 +570,49 @@ mkdir -p /home/node/.openclaw/workspace
 mkdir -p "$HC_WRITABLE_BASE/.local/bin" "$HC_WRITABLE_BASE/.local/lib" "$HC_WRITABLE_BASE/.npm-global"
 mkdir -p "$HC_WRITABLE_BASE/.jupyter" "$HC_WRITABLE_BASE/.local/share/jupyter" "$HC_WRITABLE_BASE/.local/share/jupyter/runtime" "$HC_WRITABLE_BASE/.local/share/jupyter/lab"
 chmod 700 /home/node/.openclaw
+
+# ── One-time Jupyter settings migration (legacy → writable base) ──────────────
+# d085e58 redirected JUPYTER_CONFIG_DIR / JUPYTER_DATA_DIR into HC_WRITABLE_BASE
+# so settings stay writable on read-only-HOME base images. But users upgrading
+# from older builds already have their settings under the legacy /home/node
+# locations, and devdata --restore also writes there. JupyterLab now reads from
+# HC_WRITABLE_BASE, so without this merge those existing settings are invisible
+# (Jupyter looks "reset"). Copy legacy settings into the writable base ONCE,
+# no-clobber so we never overwrite anything the user already wrote there.
+# The ongoing round-trip (new settings persist across restart) is handled by
+# jupyter-devdata-sync.py reading/writing settings at HC_WRITABLE_BASE directly.
+hc_migrate_jupyter_state() {
+  local legacy_new dest src _migrated=0
+  for pair in \
+    "/home/node/.jupyter:$HC_WRITABLE_BASE/.jupyter" \
+    "/home/node/.local/share/jupyter:$HC_WRITABLE_BASE/.local/share/jupyter"; do
+    legacy="${pair%%:*}"
+    dest="${pair##*:}"
+    [ -d "$legacy" ] || continue
+    [ -d "$dest" ] || mkdir -p "$dest" 2>/dev/null || continue
+    # Walk the legacy tree, copying settings files that don't yet exist in dest.
+    # Skip transient/non-setting subtrees (runtime/, nbconfig/) the same way
+    # jupyter-devdata-sync.py does.
+    while IFS= read -r -d '' src; do
+      [ -f "$src" ] || continue
+      case "$src" in
+        */runtime/*) continue ;;        # sockets, connection files — never settings
+        */nbconfig/*) continue ;;       # compiled/transient notebook config cache
+      esac
+      local rel="${src#"$legacy"/}"
+      local target="$dest/$rel"
+      [ -e "$target" ] && continue     # no-clobber: keep dest if it already exists
+      mkdir -p "${target%/*}" 2>/dev/null || continue
+      if cp -a "$src" "$target" 2>/dev/null; then
+        _migrated=1
+      fi
+    done < <(find "$legacy" -type f -print0 2>/dev/null)
+  done
+  if [ "$_migrated" = "1" ]; then
+    echo "Jupyter  : migrated existing settings from /home/node → $HC_WRITABLE_BASE"
+  fi
+  return 0
+}
 chmod 700 /home/node/.openclaw/credentials
 
 # User-installed packages are intentionally ephemeral in the container. Keep
@@ -1835,6 +1878,10 @@ fi
 # 10.5. Start JupyterLab Terminal on internal port 8888 (DEV_MODE only)
 # Accessible via /terminal/ path through the health-server proxy
 if [ "$RUNTIME_JUPYTER_ENABLED" = "true" ]; then
+  # Merge any Jupyter settings that landed under the legacy /home/node locations
+  # (from older builds, or just restored by devdata --restore above) into the
+  # writable base JupyterLab actually reads from. No-clobber, best-effort.
+  hc_migrate_jupyter_state 2>/dev/null || true
   start_jupyter_once
 fi
 
