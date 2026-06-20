@@ -570,6 +570,7 @@ mkdir -p /home/node/.openclaw/workspace
 mkdir -p "$HC_WRITABLE_BASE/.local/bin" "$HC_WRITABLE_BASE/.local/lib" "$HC_WRITABLE_BASE/.npm-global"
 mkdir -p "$HC_WRITABLE_BASE/.jupyter" "$HC_WRITABLE_BASE/.local/share/jupyter" "$HC_WRITABLE_BASE/.local/share/jupyter/runtime" "$HC_WRITABLE_BASE/.local/share/jupyter/lab"
 chmod 700 /home/node/.openclaw
+chmod 700 /home/node/.openclaw/credentials
 
 # ── One-time Jupyter settings migration (legacy → writable base) ──────────────
 # d085e58 redirected JUPYTER_CONFIG_DIR / JUPYTER_DATA_DIR into HC_WRITABLE_BASE
@@ -613,11 +614,10 @@ hc_migrate_jupyter_state() {
   fi
   return 0
 }
-chmod 700 /home/node/.openclaw/credentials
 
 # User-installed packages are intentionally ephemeral in the container. Keep
 # npm/pip installs in user-writable locations, make apt noninteractive,
-# and persist only a tiny replay script in the synced workspace so packages
+
 # are re-installed after restart.
 if [ -z "${NPM_CONFIG_PREFIX:-}" ] || [ "${NPM_CONFIG_PREFIX:-}" = "/home/node/.local" ]; then
   export NPM_CONFIG_PREFIX="$HC_WRITABLE_BASE/.local"
