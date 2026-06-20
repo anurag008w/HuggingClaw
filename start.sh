@@ -568,7 +568,7 @@ mkdir -p /home/node/.openclaw/memory
 mkdir -p /home/node/.openclaw/extensions
 mkdir -p /home/node/.openclaw/workspace
 mkdir -p "$HC_WRITABLE_BASE/.local/bin" "$HC_WRITABLE_BASE/.local/lib" "$HC_WRITABLE_BASE/.npm-global"
-mkdir -p "$HC_WRITABLE_BASE/.jupyter" "$HC_WRITABLE_BASE/.local/share/jupyter" "$HC_WRITABLE_BASE/.local/share/jupyter/runtime" "$HC_WRITABLE_BASE/.local/share/jupyter/lab"
+mkdir -p "$HC_WRITABLE_BASE/.jupyter" "$HC_WRITABLE_BASE/.local/share/jupyter" "$HC_WRITABLE_BASE/.local/share/jupyter/runtime"
 chmod 700 /home/node/.openclaw
 chmod 700 /home/node/.openclaw/credentials
 
@@ -640,7 +640,12 @@ export PIP_USER="${PIP_USER:-1}"
 export JUPYTER_CONFIG_DIR="${JUPYTER_CONFIG_DIR:-$HC_WRITABLE_BASE/.jupyter}"
 export JUPYTER_DATA_DIR="${JUPYTER_DATA_DIR:-$HC_WRITABLE_BASE/.local/share/jupyter}"
 export JUPYTER_RUNTIME_DIR="${JUPYTER_RUNTIME_DIR:-$HC_WRITABLE_BASE/.local/share/jupyter/runtime}"
-export JUPYTERLAB_DIR="${JUPYTERLAB_DIR:-$HC_WRITABLE_BASE/.local/share/jupyter/lab}"
+# NOTE: JUPYTERLAB_DIR must stay unset — it is JupyterLab's prebuilt application
+# assets dir (shipped with the pip package), not a settings dir. Overriding it
+# (as d085e58 did) breaks the UI with "application assets not found".
+# Explicitly unset so an inherited value (old bashrc, runtime injection) can't
+# break asset loading.
+unset JUPYTERLAB_DIR
 export JUPYTERLAB_SETTINGS_DIR="${JUPYTERLAB_SETTINGS_DIR:-$JUPYTER_CONFIG_DIR/lab/user-settings}"
 export JUPYTERLAB_WORKSPACES_DIR="${JUPYTERLAB_WORKSPACES_DIR:-$JUPYTER_CONFIG_DIR/lab/workspaces}"
 export JUPYTER_PREFER_ENV_PATH="${JUPYTER_PREFER_ENV_PATH:-0}"
@@ -1799,8 +1804,9 @@ start_jupyter_once() {
     fi
   fi
 
-  # Pre-create runtime directory
-  mkdir -p "$JUPYTER_ROOT_DIR/.jupyter" "$JUPYTER_CONFIG_DIR" "$JUPYTER_DATA_DIR" "$JUPYTER_RUNTIME_DIR" "$JUPYTERLAB_DIR" "$JUPYTERLAB_SETTINGS_DIR" "$JUPYTERLAB_WORKSPACES_DIR"
+  # Pre-create runtime directory. JUPYTERLAB_DIR is intentionally absent — it
+  # is the system prebuilt assets dir, owned by the package, not user-writable.
+  mkdir -p "$JUPYTER_ROOT_DIR/.jupyter" "$JUPYTER_CONFIG_DIR" "$JUPYTER_DATA_DIR" "$JUPYTER_RUNTIME_DIR" "$JUPYTERLAB_SETTINGS_DIR" "$JUPYTERLAB_WORKSPACES_DIR"
 
   echo "Terminal  : starting (root: $JUPYTER_ROOT_DIR)"
   JUPYTER_LOG_FILE="/tmp/jupyterlab.log"
@@ -1819,7 +1825,8 @@ start_jupyter_once() {
   export JUPYTER_CONFIG_DIR="${JUPYTER_CONFIG_DIR:-$HC_WRITABLE_BASE/.jupyter}"
   export JUPYTER_DATA_DIR="${JUPYTER_DATA_DIR:-$HC_WRITABLE_BASE/.local/share/jupyter}"
   export JUPYTER_RUNTIME_DIR="${JUPYTER_RUNTIME_DIR:-$HC_WRITABLE_BASE/.local/share/jupyter/runtime}"
-  export JUPYTERLAB_DIR="${JUPYTERLAB_DIR:-$HC_WRITABLE_BASE/.local/share/jupyter/lab}"
+  # JUPYTERLAB_DIR intentionally unset — see top-level env block.
+  unset JUPYTERLAB_DIR
   export JUPYTERLAB_SETTINGS_DIR="${JUPYTERLAB_SETTINGS_DIR:-$JUPYTER_CONFIG_DIR/lab/user-settings}"
   export JUPYTERLAB_WORKSPACES_DIR="${JUPYTERLAB_WORKSPACES_DIR:-$JUPYTER_CONFIG_DIR/lab/workspaces}"
   export JUPYTER_PREFER_ENV_PATH="${JUPYTER_PREFER_ENV_PATH:-0}"
@@ -1914,7 +1921,8 @@ export PIP_USER="${PIP_USER:-1}"
 export JUPYTER_CONFIG_DIR="${JUPYTER_CONFIG_DIR:-$HC_WRITABLE_BASE/.jupyter}"
 export JUPYTER_DATA_DIR="${JUPYTER_DATA_DIR:-$HC_WRITABLE_BASE/.local/share/jupyter}"
 export JUPYTER_RUNTIME_DIR="${JUPYTER_RUNTIME_DIR:-$HC_WRITABLE_BASE/.local/share/jupyter/runtime}"
-export JUPYTERLAB_DIR="${JUPYTERLAB_DIR:-$HC_WRITABLE_BASE/.local/share/jupyter/lab}"
+# Do NOT override JUPYTERLAB_DIR — see top-level env block for the reason.
+unset JUPYTERLAB_DIR
 export JUPYTERLAB_SETTINGS_DIR="${JUPYTERLAB_SETTINGS_DIR:-$JUPYTER_CONFIG_DIR/lab/user-settings}"
 export JUPYTERLAB_WORKSPACES_DIR="${JUPYTERLAB_WORKSPACES_DIR:-$JUPYTER_CONFIG_DIR/lab/workspaces}"
 export JUPYTER_PREFER_ENV_PATH="${JUPYTER_PREFER_ENV_PATH:-0}"
