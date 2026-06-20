@@ -41,23 +41,34 @@ const DEFAULT_PROXY_DOMAINS = [
   "api.resend.com", "api.sendgrid.com", "api.mailgun.net",
   // Google services
   "googleapis.com", "google.com", "googleusercontent.com", "gstatic.com",
-  // NOTE: AI-provider domains (api.openai.com, api.anthropic.com, etc.) are
-  // intentionally NOT included here. Proxying AI calls routes your API keys
-  // through the Cloudflare Worker without an explicit opt-in. Users who need
-  // AI API calls proxied (e.g. geo-restricted regions) can add specific
-  // domains via the CLOUDFLARE_PROXY_DOMAINS environment variable.
+  // ── AI providers routed through the Worker BY DEFAULT ──────────────────────
+  // Google Gemini/Vertex, NVIDIA and OpenRouter apply rate limits per-IP (not
+  // only per-key). HuggingFace Spaces share an egress IP range, so requests from
+  // every Space (and every key) collide on the same throttled IP, exhausting
+  // keys far faster than their per-key quota would suggest. Routing these
+  // through the Cloudflare Worker gives them a dedicated Cloudflare edge IP and
+  // stops the per-IP throttling, so multi-key rotation actually buys you more
+  // throughput. The Worker only forwards to an allow-list (see
+  // cloudflare-proxy-setup.py) and the shared secret is attached, so the API key
+  // is still only seen by Cloudflare's network, not stored there.
+  "generativelanguage.googleapis.com",
+  "aiplatform.googleapis.com",
+  "openrouter.ai",
+  "integrate.api.nvidia.com",
+  "api.nvidia.com",
+  // NOTE: api.openai.com, api.anthropic.com, api.deepseek.com, etc. are still
+  // NOT proxied by default. Add them via CLOUDFLARE_PROXY_DOMAINS if you want
+  // those routed through the Worker too.
 ];
 const PROXY_DOMAINS_RAW = (process.env.CLOUDFLARE_PROXY_DOMAINS || "").trim();
 const PROXY_ALL = PROXY_DOMAINS_RAW === "*";
 const EXTRA_PROXY_DOMAINS = PROXY_DOMAINS_RAW.split(",").map((d) => d.trim()).filter(Boolean);
 const AI_PROVIDER_DOMAINS = [
-  // googleapis.com is proxied by default for non-AI Google services, but these
-  // Gemini/Vertex hosts carry API keys and should stay direct unless explicitly
-  // listed in CLOUDFLARE_PROXY_DOMAINS (or wildcard mode is used).
-  "generativelanguage.googleapis.com",
-  "aiplatform.googleapis.com",
-  // Hugging Face inference/router calls may also carry HF tokens. Keep them
-  // direct by default, but allow explicit proxy opt-in for blocked deployments.
+  // AI-provider hosts that still default to direct (NOT proxied) unless the
+  // operator opts in via CLOUDFLARE_PROXY_DOMAINS or wildcard mode. Google
+  // Gemini/Vertex, NVIDIA and OpenRouter were moved to DEFAULT_PROXY_DOMAINS
+  // above (they throttle per-IP and benefit most from the Worker), so they are
+  // intentionally NOT listed here anymore.
   "huggingface.co",
   "router.huggingface.co",
   "api-inference.huggingface.co",

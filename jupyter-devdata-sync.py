@@ -9,7 +9,39 @@ HF_USERNAME = os.environ.get("HF_USERNAME", "").strip() or os.environ.get("SPACE
 DATASET_NAME = os.environ.get("DEVDATA_DATASET_NAME", "").strip() or "huggingclaw-devdata"
 BACKUP_DATASET_NAME = os.environ.get("BACKUP_DATASET_NAME", "").strip() or os.environ.get("BACKUP_DATASET", "").strip() or "huggingclaw-backup"
 JUPYTER_ROOT = Path(os.environ.get("JUPYTER_ROOT_DIR", "/home/node")).resolve()
+JUPYTER_PORT = int((os.environ.get("JUPYTER_PORT", "").strip() or "8888"))
 INTERVAL = int((os.environ.get("DEVDATA_SYNC_INTERVAL", "").strip() or "180"))
+# JupyterLab settings dirs (JUPYTER_CONFIG_DIR / JUPYTER_DATA_DIR) were redirected
+# into HC_WRITABLE_BASE by d085e58 (so settings stay writable on read-only-HOME
+# images). devdata --restore wrote them back under JUPYTER_ROOT (legacy), so they
+# never reached the dir JupyterLab actually reads from → settings looked "reset"
+# and new settings never got synced. Fix: snapshot/restore the REAL settings dirs
+# directly, wherever they live now. Falls back to the legacy JUPYTER_ROOT paths so
+# existing datasets keep restoring correctly on older setups.
+HC_WRITABLE_BASE = os.environ.get("HC_WRITABLE_BASE", "").strip()
+JUPYTER_CONFIG_DIR = os.environ.get("JUPYTER_CONFIG_DIR", "").strip()
+JUPYTER_DATA_DIR = os.environ.get("JUPYTER_DATA_DIR", "").strip()
+# Resolve the settings dirs we must persist. Prefer the explicit dirs JupyterLab
+# is actually using (which since d085e58 live under HC_WRITABLE_BASE, NOT under
+# JUPYTER_ROOT); keep the legacy /home/node locations as fallback. Each entry is
+# (stable_tag, absolute_path): the tag is the virtual top-level folder name used
+# in the dataset, so a dataset stays portable across base images and writable
+# roots. JUPYTER_ROOT itself is NOT included here — it is snapshotted at the top
+# level by snapshot()/restore_once().
+SETTINGS_ROOTS: list[tuple[str, Path]] = []
+_seen_roots: set[Path] = set()
+for _tag, _cand in (
+    ("jupyter-config", JUPYTER_CONFIG_DIR or "/home/node/.jupyter"),
+    ("jupyter-data", JUPYTER_DATA_DIR or "/home/node/.local/share/jupyter"),
+):
+    if not _cand:
+        continue
+    _p = Path(_cand).resolve()
+    if _p == JUPYTER_ROOT or _p in _seen_roots:
+        continue
+    _seen_roots.add(_p)
+    SETTINGS_ROOTS.append((_tag, _p))
+del _seen_roots, _tag, _cand
 # BUG FIX #5: Respect max file size so giant files don't stall uploads.
 # Matches the 50 MB ceiling in openclaw-sync.py; override with DEVDATA_MAX_FILE_BYTES.
 MAX_FILE_SIZE_BYTES = int(
@@ -88,17 +120,22 @@ def enabled():
     return ENABLE and dev and bool(HF_TOKEN) and separate_dataset
 
 def validate_jupyter_paths() -> None:
-    # JupyterLab theme/settings live under ~/.jupyter and ~/.local/share/jupyter.
-    # If these are not writable, settings can appear to "reset" every restart.
-    for required in (JUPYTER_ROOT, Path("/home/node/.jupyter"), Path("/home/node/.local/share/jupyter")):
+    # JupyterLab settings now live under HC_WRITABLE_BASE (via JUPYTER_CONFIG_DIR
+    # / JUPYTER_DATA_DIR), NOT under /home/node. Validate the dirs we actually
+    # write to during restore; if any is not writable, settings will appear to
+    # "reset" every restart. JUPYTER_ROOT is still needed for notebooks.
+    required = [JUPYTER_ROOT]
+    for _tag, root in SETTINGS_ROOTS:
+        required.append(root)
+    for d in required:
         try:
-            required.mkdir(parents=True, exist_ok=True)
-            probe = required / ".devdata-write-check"
+            d.mkdir(parents=True, exist_ok=True)
+            probe = d / ".devdata-write-check"
             probe.write_text("ok", encoding="utf-8")
             probe.unlink(missing_ok=True)
         except Exception as exc:
             kind = classify_error(exc)
-            print(f"DevData warning [{kind}]: {required} is not writable; Jupyter settings may not persist ({exc})")
+            print(f"DevData warning [{kind}]: {d} is not writable; Jupyter settings may not persist ({exc})")
 
 def repo_id(api) -> str:
     ns = HF_USERNAME
@@ -198,6 +235,22 @@ def iter_sync_tree(root: Path):
     if not root.exists():
         return
 
+    # If HC_WRITABLE_BASE (which now holds the real Jupyter settings + pip/npm
+    # packages) is nested inside JUPYTER_ROOT, do NOT walk into it here: the
+    # settings are snapshotted separately under stable tags by snapshot(), and
+    # everything else under the writable base (site-packages, npm-global, ...)
+    # is runtime junk that must never be persisted. Prune the whole subtree so
+    # we don't duplicate settings AND don't leak package files into the dataset.
+    _writable_base = HC_WRITABLE_BASE
+    _skip_abs: set[Path] = set()
+    if _writable_base:
+        _wb = Path(_writable_base).resolve()
+        try:
+            _wb.relative_to(root.resolve())
+            _skip_abs.add(_wb)
+        except ValueError:
+            pass  # writable base lives outside JUPYTER_ROOT — nothing to prune
+
     for dirpath, dirnames, filenames in os.walk(root):
         dir_path = Path(dirpath)
         try:
@@ -209,6 +262,9 @@ def iter_sync_tree(root: Path):
         for dirname in sorted(dirnames):
             rel = dir_rel / dirname
             child = dir_path / dirname
+            # Never descend into the writable-base subtree (when nested in root).
+            if _skip_abs and child.resolve() in _skip_abs:
+                continue
             rel_parts = rel.parts
             # Do not prune ancestors of explicitly allowed Jupyter settings
             # paths. should_skip(.local/share/jupyter) is true by design for
@@ -233,12 +289,33 @@ def iter_sync_tree(root: Path):
             yield child
 
 
+def _walk_settings_root(src: Path):
+    """Yield syncable files from a settings dir (JUPYTER_CONFIG_DIR etc.).
+
+    These dirs live OUTSIDE JUPYTER_ROOT now (under HC_WRITABLE_BASE), so the
+    JUPYTER_ROOT-rooted SKIP/EXCLUDE filters do not apply. We still skip the
+    same transient trees that JupyterLab regenerates on every boot: runtime/,
+    nbconfig/, __pycache__/, node_modules/, and site-packages.
+    """
+    if not src.exists():
+        return
+    SKIP_NAMES = {"runtime", "nbconfig", "__pycache__", "node_modules", "site-packages"}
+    for dirpath, dirnames, filenames in os.walk(src):
+        dir_path = Path(dirpath)
+        dirnames[:] = [d for d in sorted(dirnames) if d not in SKIP_NAMES]
+        for filename in sorted(filenames):
+            child = dir_path / filename
+            if child.is_symlink():
+                continue
+            yield child
+
+
 def snapshot(src: Path, dst: Path) -> tuple[bool, set[str]]:
     had_copy_failures = False
     protected_large_files: set[str] = set()
-    for p in iter_sync_tree(src):
-        rel = p.relative_to(src)
-        target = dst / rel
+
+    def _copy_one(p: Path, target: Path, base: Path) -> None:
+        nonlocal had_copy_failures
         if p.is_dir():
             # Keep parent directories for files copied later in this snapshot.
             # Empty folders are intentionally not represented in the git-backed
@@ -249,22 +326,35 @@ def snapshot(src: Path, dst: Path) -> tuple[bool, set[str]]:
             # BUG FIX #5: Skip files that exceed the size limit.
             try:
                 if p.stat().st_size > MAX_FILE_SIZE_BYTES:
-                    protected_large_files.add(rel.as_posix())
-                    continue
+                    protected_large_files.add(p.relative_to(base).as_posix())
+                    return
             except OSError:
                 had_copy_failures = True
-                protected_large_files.add(rel.as_posix())
-                continue
+                protected_large_files.add(p.relative_to(base).as_posix())
+                return
             target.parent.mkdir(parents=True, exist_ok=True)
             try:
                 shutil.copy2(p, target)
             except OSError:
                 had_copy_failures = True
-                protected_large_files.add(rel.as_posix())
+                protected_large_files.add(p.relative_to(base).as_posix())
+
+    # 1) JUPYTER_ROOT contents (notebooks, workspace files, etc.) — top level.
+    for p in iter_sync_tree(src):
+        rel = p.relative_to(src)
+        _copy_one(p, dst / rel, src)
+
+    # 2) Jupyter settings dirs that now live OUTSIDE JUPYTER_ROOT (under
+    # HC_WRITABLE_BASE since d085e58). Snapshot them under a stable virtual
+    # prefix (the tag) so restore maps them back to their real location.
+    for tag, root in SETTINGS_ROOTS:
+        for p in _walk_settings_root(root):
+            rel = Path(tag) / p.relative_to(root)
+            _copy_one(p, dst / rel, root)
     return had_copy_failures, protected_large_files
 
 def is_jupyter_running(port: int = 8888) -> bool:
-    """Return True if JupyterLab is already listening on *port*.
+
 
     BUG FIX #2 (safety net): restore_once() must never run while JupyterLab
     is active.  Overwriting files under JUPYTER_ROOT (runtime/ sockets, lab/
@@ -286,14 +376,30 @@ def restore_once(api, rid: str):
     from huggingface_hub.errors import RepositoryNotFoundError
     tmp = Path(tempfile.mkdtemp(prefix="devdata-restore-"))
     try:
-        snapshot_download(repo_id=rid, repo_type="dataset", local_dir=str(tmp), local_dir_use_symlinks=False, token=HF_TOKEN)
+        # NOTE: `local_dir_use_symlinks` was removed in huggingface_hub >= 1.0
+        # (downloads always copy into local_dir now). Passing it on a current
+        # build raises TypeError, which start.sh swallows as a "non-fatal"
+        # warning (stderr is redirected) — so the DevData restore silently never
+        # happened and user Jupyter settings/files never came back after a
+        # restart. Drop the kwarg; it has been a no-op default for a long time.
+        snapshot_download(repo_id=rid, repo_type="dataset", local_dir=str(tmp), token=HF_TOKEN)
+        # Map the stable virtual tags (written by snapshot()) back to the real
+        # settings dirs JupyterLab reads from. Falls back to JUPYTER_ROOT for any
+        # path that isn't under a known tag (keeps old datasets working: their
+        # .jupyter / .local/share/jupyter were stored as plain top-level paths).
+        _restore_map: dict[str, Path] = {tag: root for tag, root in SETTINGS_ROOTS}
         for p in tmp.rglob("*"):
             rel = p.relative_to(tmp)
             if str(rel) == ".gitattributes":
                 continue
             if should_skip(rel):
                 continue
-            target = JUPYTER_ROOT / rel
+            # Tagged settings (jupyter-config/..., jupyter-data/...) → real dir.
+            top = rel.parts[0] if rel.parts else ""
+            if top in _restore_map:
+                target = _restore_map[top] / Path(*rel.parts[1:])
+            else:
+                target = JUPYTER_ROOT / rel
             if p.is_dir():
                 target.mkdir(parents=True, exist_ok=True)
             elif p.is_file():
@@ -438,7 +544,7 @@ if __name__ == "__main__":
 
     # Normal background sync mode — no restore; go straight to upload loop.
     validate_jupyter_paths()
-    if is_jupyter_running():
+    if is_jupyter_running(JUPYTER_PORT):
         print("DevData: background sync started (JupyterLab is live, restore already done by --restore).")
     else:
         # Fallback: JupyterLab not detected.  Should not normally happen
@@ -446,6 +552,6 @@ if __name__ == "__main__":
         # waits for the gateway before launching this background process.
         # Log a warning and proceed to sync; do NOT restore to avoid racing
         # with a JupyterLab that may be in the middle of starting up.
-        print("DevData: WARNING — JupyterLab not detected on port 8888. Skipping restore to be safe; starting sync loop.")
+        print(f"DevData: WARNING — JupyterLab not detected on port {JUPYTER_PORT}. Skipping restore to be safe; starting sync loop.")
 
     sync_loop(api, rid)

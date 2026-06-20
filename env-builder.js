@@ -755,7 +755,7 @@ const FIELDS = [
     "g": "Plugins",
     "icon": "🔄",
     "k": "KEY_USE_SUSPENDED_AS_LAST_RESORT",
-    "lbl": "Use suspended key as last resort — when all keys are blocked, reuse the soonest-recovering key rather than returning nothing (recommended: on)",
+    "lbl": "Use suspended key as last resort — when all keys are blocked, reuse the soonest-recovering key rather than returning nothing (default: off)",
     "type": "toggle",
     "ph": "true",
     "tag": "advanced"
@@ -787,6 +787,24 @@ const FIELDS = [
     "ph": "false",
     "common": 1,
     "tag": "build"
+  },
+{
+    "g": "Startup",
+    "icon": "🔐",
+    "k": "HUGGINGCLAW_FULL_SUDO",
+    "lbl": "Full sudo for Jupyter terminal (private Spaces only; needs one image rebuild to add the runtime hook)",
+    "type": "toggle",
+    "ph": "false",
+    "tag": "build"
+  },
+{
+    "g": "Runtime",
+    "icon": "⚙️",
+    "k": "HUGGINGCLAW_WRITABLE_BASE",
+    "lbl": "Writable runtime base (blank = /data, HOME fallback, then /tmp)",
+    "type": "text",
+    "ph": "/data",
+    "tag": "advanced"
   },
 {
     "g": "Startup",

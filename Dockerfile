@@ -15,6 +15,7 @@ FROM ghcr.io/openclaw/openclaw:${OPENCLAW_VERSION} AS openclaw
 FROM node:22-slim
 ARG OPENCLAW_VERSION=latest
 ARG DEV_MODE=false
+ARG HUGGINGCLAW_FULL_SUDO=false
 # DEV_MODE intentionally not baked into runtime ENV — defaults to unset so
 # start.sh can auto-enable terminal when GATEWAY_TOKEN is present. Users can
 # override by setting DEV_MODE=false as an HF Space Variable to opt out.
@@ -34,6 +35,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     procps \
     python3 \
     python3-pip \
+    python3-venv \
     p7zip-full \
     chromium \
     libnss3 \
@@ -60,27 +62,74 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pip3 install --no-cache-dir --break-system-packages huggingface_hub hf_transfer && \
     rm -rf /var/lib/apt/lists/*
 
-# Install JupyterLab only when DEV_MODE is enabled (build-time)
-# This avoids installing large packages when terminal is not needed
-RUN if [ "${DEV_MODE}" = "true" ] || [ "${DEV_MODE}" = "1" ] || [ "${DEV_MODE}" = "yes" ] || [ "${DEV_MODE}" = "on" ]; then \
-      pip3 install --no-cache-dir --break-system-packages \
-        jupyterlab==4.5.7 \
-        tornado==6.5.5 \
-        ipywidgets==8.1.8 && \
-      # Copy login template into jupyter_server templates dir
-      python3 -c "from pathlib import Path; import shutil, jupyter_server; d=Path(jupyter_server.__file__).parent/'templates'; d.mkdir(parents=True,exist_ok=True); shutil.copyfile('/home/node/app/login.html', d/'login.html')" || true; \
-    fi
+# Install JupyterLab at build time because start.sh can auto-enable the
+# terminal at runtime when GATEWAY_TOKEN is present. If the dependency is only
+# installed when the build arg DEV_MODE=true, the documented default path
+# starts a terminal process that cannot import jupyterlab.
+RUN pip3 install --no-cache-dir --break-system-packages \
+      jupyterlab==4.5.7 \
+      tornado==6.5.5 \
+      ipywidgets==8.1.8
 
-# Reuse existing node user (UID 1000). Allow passwordless package-manager
-# commands only so runtime apt installs can be replayed after HF Space restarts.
+# Reuse existing node user (UID 1000). By default, allow passwordless
+# package-manager commands only so runtime apt installs can be replayed after
+# HF Space restarts without granting unrestricted root. Private Spaces can opt
+# into full passwordless sudo either at build time (HUGGINGCLAW_FULL_SUDO=true
+# build arg) OR at runtime (HUGGINGCLAW_FULL_SUDO=true env var), via the
+# locked-down hc-apply-full-sudo helper below.
 RUN mkdir -p /home/node/app /home/node/.openclaw && \
     chown -R 1000:1000 /home/node && \
-    printf '%s\n' \
-      'Cmnd_Alias HUGGINGCLAW_APT = /usr/bin/apt, /usr/bin/apt-get, /usr/bin/dpkg' \
-      'node ALL=(root) NOPASSWD: HUGGINGCLAW_APT' \
-      > /etc/sudoers.d/huggingclaw-apt && \
-    chmod 0440 /etc/sudoers.d/huggingclaw-apt && \
-    visudo -cf /etc/sudoers.d/huggingclaw-apt
+    case "$(printf '%s' "${HUGGINGCLAW_FULL_SUDO}" | tr '[:upper:]' '[:lower:]')" in \
+      1|true|yes|on) \
+      printf '%s\n' \
+        'node ALL=(root) NOPASSWD: ALL' \
+        > /etc/sudoers.d/huggingclaw ;; \
+      *) \
+      printf '%s\n' \
+        'Cmnd_Alias HUGGINGCLAW_APT = /usr/bin/apt, /usr/bin/apt-get, /usr/bin/dpkg' \
+        'node ALL=(root) NOPASSWD: HUGGINGCLAW_APT, /usr/local/bin/hc-apply-full-sudo' \
+        > /etc/sudoers.d/huggingclaw ;; \
+    esac && \
+    chmod 0440 /etc/sudoers.d/huggingclaw && \
+    visudo -cf /etc/sudoers.d/huggingclaw
+
+# Runtime full-sudo enablement helper.
+# A non-root process cannot grant itself new privileges at runtime, so the image
+# bakes in ONE root-owned, non-writable (by node) script that the sudoers rule
+# above lets `node` invoke without a password. start.sh calls it when
+# HUGGINGCLAW_FULL_SUDO=true is set as a runtime env var, so a single image can
+# toggle full sudo per Space without rebuilding. The script is intentionally
+# trivial and locked down: it only rewrites /etc/sudoers.d/huggingclaw to the
+# unrestricted rule. Do NOT make it accept arguments or paths.
+RUN printf '%s\n' \
+      '#!/bin/sh' \
+      'set -eu' \
+      '# Locked full-sudo escalation hook (root-owned, not writable by node).' \
+      '# Invoked only by start.sh when HUGGINGCLAW_FULL_SUDO=true.' \
+      'umask 022' \
+      'tmp="$(mktemp /etc/sudoers.d/huggingclaw.XXXXXX)"' \
+      'printf "%s\n" "node ALL=(root) NOPASSWD: ALL" > "$tmp"' \
+      'chmod 0440 "$tmp"' \
+      '# Resolve visudo from the known locations (/usr/sbin on Debian/Ubuntu).' \
+      'VISUDO=""; for c in /usr/sbin/visudo /sbin/visudo visudo; do' \
+      '  command -v "$c" >/dev/null 2>&1 && { VISUDO="$c"; break; }' \
+      'done' \
+      'if [ -z "$VISUDO" ]; then' \
+      '  rm -f "$tmp"' \
+      '  echo "hc-apply-full-sudo: visudo not found; aborting." >&2' \
+      '  exit 1' \
+      'fi' \
+      'if "$VISUDO" -cf "$tmp" >/dev/null 2>&1; then' \
+      '  mv "$tmp" /etc/sudoers.d/huggingclaw' \
+      'else' \
+      '  rm -f "$tmp"' \
+      '  echo "hc-apply-full-sudo: generated sudoers file failed validation; aborting." >&2' \
+      '  exit 1' \
+      'fi' \
+      'echo "hc-apply-full-sudo: full passwordless sudo enabled." >&2' \
+    > /usr/local/bin/hc-apply-full-sudo && \
+    chmod 0755 /usr/local/bin/hc-apply-full-sudo && \
+    chown root:root /usr/local/bin/hc-apply-full-sudo
 
 # Copy pre-built OpenClaw (skips npm install entirely — much faster!)
 COPY --from=openclaw --chown=1000:1000 /app /home/node/.openclaw/openclaw-app
@@ -110,7 +159,7 @@ COPY --chown=1000:1000 env-builder.html /home/node/app/env-builder.html
 COPY --chown=1000:1000 env-builder.js /home/node/app/env-builder.js
 COPY --chown=1000:1000 key-rotator-manager.html /home/node/app/key-rotator-manager.html
 COPY --chown=1000:1000 jupyter-devdata-sync.py /home/node/app/jupyter-devdata-sync.py
-# login.html template is now copied inside the DEV_MODE install block above
+RUN python3 -c "from pathlib import Path; import shutil, jupyter_server; d=Path(jupyter_server.__file__).parent/'templates'; d.mkdir(parents=True,exist_ok=True); shutil.copyfile('/home/node/app/login.html', d/'login.html')"
 RUN chmod +x /home/node/app/start.sh \
               /home/node/app/cloudflare-proxy-setup.py \
               /home/node/app/cloudflare-keepalive-setup.py \
@@ -122,6 +171,9 @@ USER node
 
 ENV HOME=/home/node \
     OPENCLAW_VERSION=${OPENCLAW_VERSION} \
+    HUGGINGCLAW_FULL_SUDO_BUILT=${HUGGINGCLAW_FULL_SUDO} \
+    PIP_BREAK_SYSTEM_PACKAGES=1 \
+    PYTHONUSERBASE=/home/node/.local \
     PATH=/home/node/.local/bin:/usr/local/bin:$PATH \
     NODE_PATH=/home/node/browser-deps/node_modules \
     NODE_OPTIONS="--require /opt/cloudflare-proxy.js"

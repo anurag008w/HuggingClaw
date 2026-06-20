@@ -228,16 +228,45 @@ echo ""
 echo "  ╔══════════════════════════════════════╗"
 echo "  ║     🦞 HuggingClaw + 💻 JupyterLab     ║"
 echo "  ╚══════════════════════════════════════╝"
+# Track whether full passwordless sudo is active in THIS container boot.
+# Set true by:  (a) build arg HUGGINGCLAW_FULL_SUDO=true, OR
+#              (b) runtime env HUGGINGCLAW_FULL_SUDO=true (applied below
+#                  via the baked-in /usr/local/bin/hc-apply-full-sudo hook).
+HC_FULL_SUDO_ACTIVE=false
+if hc_is_true "${HUGGINGCLAW_FULL_SUDO_BUILT:-false}"; then
+  HC_FULL_SUDO_ACTIVE=true
+  echo "WARNING: full passwordless sudo was enabled at image build time. JupyterLab terminal users have root access."
+elif hc_is_true "${HUGGINGCLAW_FULL_SUDO:-false}"; then
+  # Runtime opt-in. A non-root process cannot grant itself new privileges, so
+  # the image bakes a single root-owned, non-writable helper that the default
+  # sudoers rule lets `node` invoke. Calling it flips the sudoers file to the
+  # unrestricted rule for this container. Requires an image that includes the
+  # helper; older images fall back to the rebuild warning.
+  if [ -x /usr/local/bin/hc-apply-full-sudo ] && command -v sudo >/dev/null 2>&1; then
+    if sudo -n /usr/local/bin/hc-apply-full-sudo 2>/dev/null; then
+      HC_FULL_SUDO_ACTIVE=true
+      export HUGGINGCLAW_FULL_SUDO=true
+      echo "WARNING: HUGGINGCLAW_FULL_SUDO=true applied at runtime. JupyterLab terminal users now have root access."
+    else
+      echo "WARNING: HUGGINGCLAW_FULL_SUDO=true was set, but the runtime escalation hook failed. Rebuild the image so it includes /usr/local/bin/hc-apply-full-sudo, or rebuild with --build-arg HUGGINGCLAW_FULL_SUDO=true."
+    fi
+  else
+    echo "WARNING: HUGGINGCLAW_FULL_SUDO=true was set, but this image predates the runtime-escalation hook. Rebuild the image (which adds the hook), or rebuild with --build-arg HUGGINGCLAW_FULL_SUDO=true."
+  fi
+fi
+export HC_FULL_SUDO_ACTIVE
+
 echo ""
 
 # ── Validate required secrets ──
+# GATEWAY_TOKEN is the only truly hard requirement: it secures both the Control
+# UI and the JupyterLab terminal (it doubles as JUPYTER_TOKEN). Without it the
+# Space would be an open shell, so we still fail fast.
+# LLM_API_KEY and LLM_MODEL are OPTIONAL. A user may want to boot the Space and
+# finish setup from the JupyterLab terminal (edit /home/node/.openclaw/openclaw.json
+# or export env vars) before chatting. The gateway starts fine with an unset
+# primary model; AI calls simply fail until the user configures one.
 ERRORS=""
-if [ -z "$LLM_API_KEY" ]; then
-  ERRORS="${ERRORS}  - LLM_API_KEY is not set\n"
-fi
-if [ -z "$LLM_MODEL" ]; then
-  ERRORS="${ERRORS}  - LLM_MODEL is not set (e.g. google/gemini-3.5-flash, anthropic/claude-sonnet-4-6, openai/gpt-5.4)\n"
-fi
 if [ -z "$GATEWAY_TOKEN" ]; then
   ERRORS="${ERRORS}  - GATEWAY_TOKEN is not set (generate: openssl rand -hex 32)\n"
 fi
@@ -247,6 +276,45 @@ if [ -n "$ERRORS" ]; then
   echo "Add them in HF Spaces → Settings → Secrets"
   exit 1
 fi
+
+# Warn (but do NOT exit) when the LLM provider is not configured yet.
+HC_LLM_CONFIGURED=true
+if [ -z "$LLM_API_KEY" ] || [ -z "$LLM_MODEL" ]; then
+  HC_LLM_CONFIGURED=false
+  echo "⚠️  LLM not configured yet:"
+  [ -z "$LLM_API_KEY" ] && echo "   - LLM_API_KEY is not set"
+  [ -z "$LLM_MODEL" ]   && echo "   - LLM_MODEL is not set (e.g. google/gemini-3.5-flash, anthropic/claude-sonnet-4-6, openai/gpt-5.4)"
+  echo "   The Space will boot anyway so you can finish setup from the terminal:"
+  echo "     • Open /terminal/ (auth = GATEWAY_TOKEN)"
+  echo "     • Edit /home/node/.openclaw/openclaw.json, OR"
+  echo "     • Add LLM_API_KEY + LLM_MODEL in HF Spaces → Settings → Secrets, then restart."
+  echo "   AI chat will return errors until a model + key are configured."
+  echo ""
+fi
+export HC_LLM_CONFIGURED
+
+# ── Runtime-writable locations ──
+# Hugging Face Docker Spaces only guarantee persistent writable storage under
+# /data when persistent storage is attached.  HOME can vary by base image and
+# system/env Jupyter prefixes can be read-only, so pick one writable root once
+# and point Python, npm, and JupyterLab user-writable state there.
+hc_choose_writable_base() {
+  local candidate
+  for candidate in "${HUGGINGCLAW_WRITABLE_BASE:-}" /data "${HOME:-}/.huggingclaw-runtime" /tmp/huggingclaw-runtime; do
+    [ -n "$candidate" ] || continue
+    if mkdir -p "$candidate" 2>/dev/null && [ -w "$candidate" ]; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+HC_WRITABLE_BASE="$(hc_choose_writable_base)" || {
+  echo "ERROR: no writable runtime directory found for Jupyter/Python/npm state." >&2
+  exit 1
+}
+export HC_WRITABLE_BASE
 
 # Resolve the actual bundled OpenClaw version so the banner reflects what is
 # inside the image, not just the requested tag.
@@ -288,14 +356,14 @@ if [ "$_do_runtime_upgrade" = "true" ]; then
   _upgrade_pkg="openclaw"
   [ "$_requested_ver" != "latest" ] && _upgrade_pkg="openclaw@${_requested_ver}"
 
-  # npm install -g respects NPM_CONFIG_PREFIX which is set later in start.sh,
-  # so use the user-writable prefix explicitly to avoid needing sudo.
-  _npm_prefix="${NPM_CONFIG_PREFIX:-/home/node/.local}"
+  # npm install -g respects NPM_CONFIG_PREFIX; use the selected writable
+  # prefix explicitly to avoid needing sudo or writing into a read-only HOME.
+  _npm_prefix="${NPM_CONFIG_PREFIX:-$HC_WRITABLE_BASE/.local}"
   if NPM_CONFIG_PREFIX="$_npm_prefix" npm install -g "$_upgrade_pkg" --prefer-online 2>/tmp/openclaw-upgrade.log; then
     # Re-read version from the installed package under the explicit prefix
     _new_ver=$(node -p "require('${_npm_prefix}/lib/node_modules/openclaw/package.json').version" 2>/dev/null || true)
-    # PATH already has /home/node/.local/bin before /usr/local/bin (set in
-    # Dockerfile ENV), so the newly installed binary is picked up automatically
+    # PATH is updated below to prefer the selected writable prefix, so the
+    # newly installed binary is picked up automatically
     # by 'command openclaw' without needing to update /usr/local/bin/openclaw.
     echo "OpenClaw : upgraded to ${_new_ver:-${_requested_ver}} ✓"
     OPENCLAW_RUNTIME_VERSION="${_new_ver:-$OPENCLAW_RUNTIME_VERSION}"
@@ -343,6 +411,11 @@ fi
 # Map provider prefix to the correct API key environment variable
 # Based on OpenClaw provider system: /usr/local/lib/node_modules/openclaw/docs/concepts/model-providers.md
 # Note: OpenClaw normalizes some prefixes (z-ai → zai, z.ai → zai, etc.)
+# Skip entirely when no model is configured yet (LLM_MODEL optional since the
+# Space can boot and be configured later from the terminal). Without this guard,
+# an empty prefix falls into the `*)` branch and exports an empty
+# ANTHROPIC_API_KEY plus a misleading "Unknown provider prefix ''" warning.
+if [ -n "$LLM_PROVIDER" ] && [ -n "$LLM_API_KEY" ]; then
 case "$LLM_PROVIDER" in
   # ── Core Providers ──
   anthropic)                    export ANTHROPIC_API_KEY="$LLM_API_KEY" ;;
@@ -393,6 +466,7 @@ case "$LLM_PROVIDER" in
     export ANTHROPIC_API_KEY="$LLM_API_KEY"
     ;;
 esac
+fi
 
 # Ensure OpenClaw provider discovery can see per-provider keys even when users
 # configure only *_API_KEYS pools. Mirror first pool key into singular env.
@@ -493,17 +567,83 @@ mkdir -p /home/node/.openclaw/credentials
 mkdir -p /home/node/.openclaw/memory
 mkdir -p /home/node/.openclaw/extensions
 mkdir -p /home/node/.openclaw/workspace
-mkdir -p /home/node/.local/bin /home/node/.local/lib /home/node/.npm-global
+mkdir -p "$HC_WRITABLE_BASE/.local/bin" "$HC_WRITABLE_BASE/.local/lib" "$HC_WRITABLE_BASE/.npm-global"
+mkdir -p "$HC_WRITABLE_BASE/.jupyter" "$HC_WRITABLE_BASE/.local/share/jupyter" "$HC_WRITABLE_BASE/.local/share/jupyter/runtime" "$HC_WRITABLE_BASE/.local/share/jupyter/lab"
 chmod 700 /home/node/.openclaw
 chmod 700 /home/node/.openclaw/credentials
 
+# ── One-time Jupyter settings migration (legacy → writable base) ──────────────
+# d085e58 redirected JUPYTER_CONFIG_DIR / JUPYTER_DATA_DIR into HC_WRITABLE_BASE
+# so settings stay writable on read-only-HOME base images. But users upgrading
+# from older builds already have their settings under the legacy /home/node
+# locations, and devdata --restore also writes there. JupyterLab now reads from
+# HC_WRITABLE_BASE, so without this merge those existing settings are invisible
+# (Jupyter looks "reset"). Copy legacy settings into the writable base ONCE,
+# no-clobber so we never overwrite anything the user already wrote there.
+# The ongoing round-trip (new settings persist across restart) is handled by
+# jupyter-devdata-sync.py reading/writing settings at HC_WRITABLE_BASE directly.
+hc_migrate_jupyter_state() {
+  local legacy dest src _migrated=0
+  for pair in \
+    "/home/node/.jupyter:$HC_WRITABLE_BASE/.jupyter" \
+    "/home/node/.local/share/jupyter:$HC_WRITABLE_BASE/.local/share/jupyter"; do
+    legacy="${pair%%:*}"
+    dest="${pair##*:}"
+    [ -d "$legacy" ] || continue
+    [ -d "$dest" ] || mkdir -p "$dest" 2>/dev/null || continue
+    # Walk the legacy tree, copying settings files that don't yet exist in dest.
+    # Skip transient/non-setting subtrees (runtime/, nbconfig/) the same way
+    # jupyter-devdata-sync.py does.
+    while IFS= read -r -d '' src; do
+      [ -f "$src" ] || continue
+      case "$src" in
+        */runtime/*) continue ;;        # sockets, connection files — never settings
+        */nbconfig/*) continue ;;       # compiled/transient notebook config cache
+      esac
+      local rel="${src#"$legacy"/}"
+      local target="$dest/$rel"
+      [ -e "$target" ] && continue     # no-clobber: keep dest if it already exists
+      mkdir -p "${target%/*}" 2>/dev/null || continue
+      if cp -a "$src" "$target" 2>/dev/null; then
+        _migrated=1
+      fi
+    done < <(find "$legacy" -type f -print0 2>/dev/null)
+  done
+  if [ "$_migrated" = "1" ]; then
+    echo "Jupyter  : migrated existing settings from /home/node → $HC_WRITABLE_BASE"
+  fi
+  return 0
+}
+
 # User-installed packages are intentionally ephemeral in the container. Keep
 # npm/pip installs in user-writable locations, make apt noninteractive,
-# and persist only a tiny replay script in the synced workspace so packages
+
 # are re-installed after restart.
-export NPM_CONFIG_PREFIX="${NPM_CONFIG_PREFIX:-/home/node/.local}"
+if [ -z "${NPM_CONFIG_PREFIX:-}" ] || [ "${NPM_CONFIG_PREFIX:-}" = "/home/node/.local" ]; then
+  export NPM_CONFIG_PREFIX="$HC_WRITABLE_BASE/.local"
+else
+  export NPM_CONFIG_PREFIX
+fi
 export npm_config_prefix="$NPM_CONFIG_PREFIX"
-export PYTHONUSERBASE="${PYTHONUSERBASE:-/home/node/.local}"
+if [ -z "${PYTHONUSERBASE:-}" ] || [ "${PYTHONUSERBASE:-}" = "/home/node/.local" ]; then
+  export PYTHONUSERBASE="$HC_WRITABLE_BASE/.local"
+else
+  export PYTHONUSERBASE
+fi
+# Debian/Ubuntu images mark system Python as externally managed (PEP 668).
+# JupyterLab's PyPI extension manager runs pip from the server process, so it
+# does not see the interactive shell wrappers below. Allow that non-interactive
+# pip to install into node's user site instead of failing with
+# "externally-managed-environment".
+export PIP_BREAK_SYSTEM_PACKAGES="${PIP_BREAK_SYSTEM_PACKAGES:-1}"
+export PIP_USER="${PIP_USER:-1}"
+export JUPYTER_CONFIG_DIR="${JUPYTER_CONFIG_DIR:-$HC_WRITABLE_BASE/.jupyter}"
+export JUPYTER_DATA_DIR="${JUPYTER_DATA_DIR:-$HC_WRITABLE_BASE/.local/share/jupyter}"
+export JUPYTER_RUNTIME_DIR="${JUPYTER_RUNTIME_DIR:-$HC_WRITABLE_BASE/.local/share/jupyter/runtime}"
+export JUPYTERLAB_DIR="${JUPYTERLAB_DIR:-$HC_WRITABLE_BASE/.local/share/jupyter/lab}"
+export JUPYTERLAB_SETTINGS_DIR="${JUPYTERLAB_SETTINGS_DIR:-$JUPYTER_CONFIG_DIR/lab/user-settings}"
+export JUPYTERLAB_WORKSPACES_DIR="${JUPYTERLAB_WORKSPACES_DIR:-$JUPYTER_CONFIG_DIR/lab/workspaces}"
+export JUPYTER_PREFER_ENV_PATH="${JUPYTER_PREFER_ENV_PATH:-0}"
 export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
 # Show current working directory in terminal prompt (JupyterLab terminals can
 # otherwise display only "$" when PS1 is unset/minimal).
@@ -1454,7 +1594,7 @@ else
   RUNTIME_JUPYTER_ENABLED="$DEV_MODE_ENABLED"
 fi
 # Add user bin to PATH for jupyter-lab (installed in Dockerfile when DEV_MODE=true)
-export PATH="$HOME/.local/bin:$PATH"
+export PATH="$HC_WRITABLE_BASE/.local/bin:$HOME/.local/bin:$PATH"
 
 # Runtime install fallback: only attempt if DEV_MODE is enabled but install failed during build
 if [ "$DEV_MODE_ENABLED" = "true" ] && ! python3 -c "import jupyterlab" >/dev/null 2>&1; then
@@ -1660,13 +1800,29 @@ start_jupyter_once() {
   fi
 
   # Pre-create runtime directory
-  mkdir -p "$JUPYTER_ROOT_DIR/.jupyter"
+  mkdir -p "$JUPYTER_ROOT_DIR/.jupyter" "$JUPYTER_CONFIG_DIR" "$JUPYTER_DATA_DIR" "$JUPYTER_RUNTIME_DIR" "$JUPYTERLAB_DIR" "$JUPYTERLAB_SETTINGS_DIR" "$JUPYTERLAB_WORKSPACES_DIR"
 
   echo "Terminal  : starting (root: $JUPYTER_ROOT_DIR)"
   JUPYTER_LOG_FILE="/tmp/jupyterlab.log"
   
-  # Use explicit Python to avoid PATH issues; set memory-friendly limits
+  # Use explicit Python to avoid PATH issues; set memory-friendly limits.
+  # Keep pip user-site defaults in this process so JupyterLab's PyPI Manager
+  # can install extensions/packages under the selected writable base on PEP 668 images.
   export PYTHONPATH=""
+  if [ -z "${PYTHONUSERBASE:-}" ] || [ "${PYTHONUSERBASE:-}" = "/home/node/.local" ]; then
+    export PYTHONUSERBASE="$HC_WRITABLE_BASE/.local"
+  else
+    export PYTHONUSERBASE
+  fi
+  export PIP_BREAK_SYSTEM_PACKAGES="${PIP_BREAK_SYSTEM_PACKAGES:-1}"
+  export PIP_USER="${PIP_USER:-1}"
+  export JUPYTER_CONFIG_DIR="${JUPYTER_CONFIG_DIR:-$HC_WRITABLE_BASE/.jupyter}"
+  export JUPYTER_DATA_DIR="${JUPYTER_DATA_DIR:-$HC_WRITABLE_BASE/.local/share/jupyter}"
+  export JUPYTER_RUNTIME_DIR="${JUPYTER_RUNTIME_DIR:-$HC_WRITABLE_BASE/.local/share/jupyter/runtime}"
+  export JUPYTERLAB_DIR="${JUPYTERLAB_DIR:-$HC_WRITABLE_BASE/.local/share/jupyter/lab}"
+  export JUPYTERLAB_SETTINGS_DIR="${JUPYTERLAB_SETTINGS_DIR:-$JUPYTER_CONFIG_DIR/lab/user-settings}"
+  export JUPYTERLAB_WORKSPACES_DIR="${JUPYTERLAB_WORKSPACES_DIR:-$JUPYTER_CONFIG_DIR/lab/workspaces}"
+  export JUPYTER_PREFER_ENV_PATH="${JUPYTER_PREFER_ENV_PATH:-0}"
   hc_env_without_gateway_preloads python3 -m jupyterlab \
       --ip 127.0.0.1 \
       --port "$JUPYTER_PORT" \
@@ -1703,7 +1859,10 @@ if [ "$RUNTIME_JUPYTER_ENABLED" = "true" ] && \
    [ -f "/home/node/app/jupyter-devdata-sync.py" ] && \
    [ "${DEVDATA_DATASET_NAME:-huggingclaw-devdata}" != "${BACKUP_DATASET_NAME:-huggingclaw-backup}" ]; then
   echo "DevData   : restoring workspace..."
-  python3 /home/node/app/jupyter-devdata-sync.py --restore 2>/dev/null || \
+  # Do NOT swallow stderr: hiding restore errors made a real bug
+  # (removed huggingface_hub kwarg) invisible for a long time. Keep startup
+  # non-fatal but surface what actually went wrong.
+  python3 /home/node/app/jupyter-devdata-sync.py --restore || \
     echo "DevData   : restore warning (non-fatal); continuing startup."
 fi
 
@@ -1719,6 +1878,10 @@ fi
 # 10.5. Start JupyterLab Terminal on internal port 8888 (DEV_MODE only)
 # Accessible via /terminal/ path through the health-server proxy
 if [ "$RUNTIME_JUPYTER_ENABLED" = "true" ]; then
+  # Merge any Jupyter settings that landed under the legacy /home/node locations
+  # (from older builds, or just restored by devdata --restore above) into the
+  # writable base JupyterLab actually reads from. No-clobber, best-effort.
+  hc_migrate_jupyter_state 2>/dev/null || true
   start_jupyter_once
 fi
 
@@ -1736,10 +1899,25 @@ if [ ! -f "$STARTUP_FILE" ]; then
   echo "Created workspace/startup.sh"
 fi
 cat > /home/node/.bashrc << 'BASHRC'
-export PATH="/home/node/.local/bin:$PATH"
-export NPM_CONFIG_PREFIX="${NPM_CONFIG_PREFIX:-/home/node/.local}"
+export HC_WRITABLE_BASE="${HC_WRITABLE_BASE:-/tmp/huggingclaw-runtime}"
+export PATH="$HC_WRITABLE_BASE/.local/bin:/home/node/.local/bin:$PATH"
+export NPM_CONFIG_PREFIX="${NPM_CONFIG_PREFIX:-$HC_WRITABLE_BASE/.local}"
 export npm_config_prefix="$NPM_CONFIG_PREFIX"
-export PYTHONUSERBASE="${PYTHONUSERBASE:-/home/node/.local}"
+export PYTHONUSERBASE="${PYTHONUSERBASE:-$HC_WRITABLE_BASE/.local}"
+# Debian/Ubuntu images mark system Python as externally managed (PEP 668).
+# JupyterLab's PyPI extension manager runs pip from the server process, so it
+# does not see the interactive shell wrappers below. Allow that non-interactive
+# pip to install into node's user site instead of failing with
+# "externally-managed-environment".
+export PIP_BREAK_SYSTEM_PACKAGES="${PIP_BREAK_SYSTEM_PACKAGES:-1}"
+export PIP_USER="${PIP_USER:-1}"
+export JUPYTER_CONFIG_DIR="${JUPYTER_CONFIG_DIR:-$HC_WRITABLE_BASE/.jupyter}"
+export JUPYTER_DATA_DIR="${JUPYTER_DATA_DIR:-$HC_WRITABLE_BASE/.local/share/jupyter}"
+export JUPYTER_RUNTIME_DIR="${JUPYTER_RUNTIME_DIR:-$HC_WRITABLE_BASE/.local/share/jupyter/runtime}"
+export JUPYTERLAB_DIR="${JUPYTERLAB_DIR:-$HC_WRITABLE_BASE/.local/share/jupyter/lab}"
+export JUPYTERLAB_SETTINGS_DIR="${JUPYTERLAB_SETTINGS_DIR:-$JUPYTER_CONFIG_DIR/lab/user-settings}"
+export JUPYTERLAB_WORKSPACES_DIR="${JUPYTERLAB_WORKSPACES_DIR:-$JUPYTER_CONFIG_DIR/lab/workspaces}"
+export JUPYTER_PREFER_ENV_PATH="${JUPYTER_PREFER_ENV_PATH:-0}"
 export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
 export HISTFILE="${HISTFILE:-/home/node/.bash_history}"
 export HISTSIZE="${HISTSIZE:-50000}"
@@ -1929,7 +2107,22 @@ apt() {
 }
 
 sudo() {
-  # Keep privilege boundary strict: only apt/apt-get/dpkg may escalate.
+  # Full passwordless sudo mode (build arg OR runtime env via the helper hook):
+  # pass EVERY command through to real sudo so the terminal behaves like a real
+  # root shell. This only runs after start.sh set HC_FULL_SUDO_ACTIVE=true, which
+  # the user explicitly opted into (documented as: anyone with the Jupyter token
+  # becomes root).
+  if [ "${HC_FULL_SUDO_ACTIVE:-false}" = "true" ]; then
+    if [ "${#}" -gt 0 ]; then
+      command sudo "$@"
+    else
+      echo "usage: sudo <command> [args...]" >&2
+      return 1
+    fi
+    return $?
+  fi
+
+  # Default: keep privilege boundary strict — only apt/apt-get/dpkg may escalate.
   # For common user-space commands, transparently run without sudo so users
   # who habitually type "sudo <cmd>" do not hit unnecessary failures.
   local cmd="${1:-}"
@@ -1958,6 +2151,8 @@ sudo() {
 pip() {
   if [ "${1:-}" = "install" ] && [ -z "${VIRTUAL_ENV:-}" ] && ! _hc_has_arg --user "$@" && ! _hc_has_arg --prefix "$@"; then
     command pip install --user --break-system-packages "${@:2}"
+  elif [ -n "${VIRTUAL_ENV:-}" ]; then
+    env -u PIP_USER pip "$@"
   else
     command pip "$@"
   fi
@@ -1973,6 +2168,8 @@ pip() {
 pip3() {
   if [ "${1:-}" = "install" ] && [ -z "${VIRTUAL_ENV:-}" ] && ! _hc_has_arg --user "$@" && ! _hc_has_arg --prefix "$@"; then
     command pip3 install --user --break-system-packages "${@:2}"
+  elif [ -n "${VIRTUAL_ENV:-}" ]; then
+    env -u PIP_USER pip3 "$@"
   else
     command pip3 "$@"
   fi
@@ -1987,6 +2184,8 @@ pip3() {
 python() {
   if [ "${1:-}" = "-m" ] && [ "${2:-}" = "pip" ] && [ "${3:-}" = "install" ] && [ -z "${VIRTUAL_ENV:-}" ] && ! _hc_has_arg --user "${@:3}" && ! _hc_has_arg --prefix "${@:3}"; then
     command python -m pip install --user --break-system-packages "${@:4}"
+  elif [ "${1:-}" = "-m" ] && [ "${2:-}" = "pip" ] && [ -n "${VIRTUAL_ENV:-}" ]; then
+    env -u PIP_USER python "$@"
   else
     command python "$@"
   fi
@@ -2001,6 +2200,8 @@ python() {
 python3() {
   if [ "${1:-}" = "-m" ] && [ "${2:-}" = "pip" ] && [ "${3:-}" = "install" ] && [ -z "${VIRTUAL_ENV:-}" ] && ! _hc_has_arg --user "${@:3}" && ! _hc_has_arg --prefix "${@:3}"; then
     command python3 -m pip install --user --break-system-packages "${@:4}"
+  elif [ "${1:-}" = "-m" ] && [ "${2:-}" = "pip" ] && [ -n "${VIRTUAL_ENV:-}" ]; then
+    env -u PIP_USER python3 "$@"
   else
     command python3 "$@"
   fi
