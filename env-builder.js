@@ -1134,7 +1134,7 @@ const FIELDS = [
     "k": "CLOUDFLARE_KEEPALIVE_ENABLED",
     "lbl": "Enable keep-awake worker",
     "type": "toggle",
-    "ph": "true",
+    "ph": "false",
     "tag": "feature"
   },
 {
