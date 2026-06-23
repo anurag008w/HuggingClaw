@@ -1892,9 +1892,11 @@ if [ "$RUNTIME_JUPYTER_ENABLED" = "true" ]; then
   start_jupyter_once
 fi
 
-if [ -n "${CLOUDFLARE_WORKERS_TOKEN:-}" ]; then
+if [ "$(printf '%s' "${CLOUDFLARE_KEEPALIVE_ENABLED:-false}" | tr '[:upper:]' '[:lower:]')" = "true" ] && [ -n "${CLOUDFLARE_WORKERS_TOKEN:-}" ]; then
   echo "Setting up Cloudflare KeepAlive monitor..."
   python3 /home/node/app/cloudflare-keepalive-setup.py || true
+else
+  python3 /home/node/app/cloudflare-keepalive-setup.py >/dev/null 2>&1 || true
 fi
 
 # ── Write shell capture wrappers to .bashrc ──

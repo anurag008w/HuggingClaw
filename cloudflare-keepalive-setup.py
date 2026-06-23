@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import ssl
 import sys
 import time
 import urllib.request
@@ -17,27 +18,40 @@ KEEPALIVE_STATUS_FILE = Path("/tmp/huggingclaw-cloudflare-keepalive-status.json"
 
 
 def cf_request(method: str, path: str, token: str, body: bytes | None = None, content_type: str = "application/json"):
-    req = urllib.request.Request(
-        f"{API_BASE}{path}",
-        data=body,
-        method=method,
-        headers={"Authorization": f"Bearer {token}", "Content-Type": content_type},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
+    last_error: Exception | None = None
+    for attempt in range(1, 4):
+        req = urllib.request.Request(
+            f"{API_BASE}{path}",
+            data=body,
+            method=method,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": content_type},
+        )
         try:
-            error_body = json.loads(e.read().decode("utf-8"))
-            errors = error_body.get("errors") or [{"message": "Unknown error"}]
-            error_msg = errors[0].get("message", "Unknown error") if errors else "Unknown error"
-        except:
-            error_msg = f"HTTP {e.code}: {e.reason}"
-        raise RuntimeError(f"Cloudflare API {e.code}: {error_msg}")
-    if not payload.get("success"):
-        errors = payload.get("errors") or [{"message": "Unknown Cloudflare API error"}]
-        raise RuntimeError(errors[0].get("message", "Unknown Cloudflare API error"))
-    return payload["result"]
+            with urllib.request.urlopen(req, timeout=30) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            if not payload.get("success"):
+                errors = payload.get("errors") or [{"message": "Unknown Cloudflare API error"}]
+                raise RuntimeError(errors[0].get("message", "Unknown Cloudflare API error"))
+            return payload["result"]
+        except urllib.error.HTTPError as e:
+            try:
+                error_body = json.loads(e.read().decode("utf-8"))
+                errors = error_body.get("errors") or [{"message": "Unknown error"}]
+                error_msg = errors[0].get("message", "Unknown error") if errors else "Unknown error"
+            except Exception:
+                error_msg = f"HTTP {e.code}: {e.reason}"
+            raise RuntimeError(f"Cloudflare API {e.code}: {error_msg}")
+        except (urllib.error.URLError, TimeoutError, ssl.SSLError, ConnectionError) as error:
+            last_error = error
+            if attempt == 3:
+                break
+            print(
+                f"Cloudflare API request {method} {path} failed transiently "
+                f"({error}); retrying {attempt}/2...",
+                file=sys.stderr,
+            )
+            time.sleep(1.5 * attempt)
+    raise RuntimeError(f"Cloudflare API request failed after retries: {last_error}")
 
 
 def slugify(value: str) -> str:
@@ -152,7 +166,7 @@ def resolve_account_and_subdomain(api_token: str) -> tuple[str, str]:
 
 
 def setup_keepalive_worker(api_token: str, account_id: str, subdomain: str) -> None:
-    enabled = os.environ.get("CLOUDFLARE_KEEPALIVE_ENABLED", "true").strip().lower()
+    enabled = os.environ.get("CLOUDFLARE_KEEPALIVE_ENABLED", "false").strip().lower()
     if enabled in {"0", "false", "no", "off"}:
         write_keepalive_status({"configured": False, "status": "disabled", "message": "Cloudflare keep-awake is disabled."})
         return
@@ -204,6 +218,11 @@ def setup_keepalive_worker(api_token: str, account_id: str, subdomain: str) -> N
 
 def main() -> int:
     api_token = os.environ.get("CLOUDFLARE_WORKERS_TOKEN", "").strip()
+    enabled = os.environ.get("CLOUDFLARE_KEEPALIVE_ENABLED", "false").strip().lower()
+
+    if enabled not in {"1", "true", "yes", "on"}:
+        write_keepalive_status({"configured": False, "status": "disabled", "message": "Cloudflare keep-awake is disabled by default. Set CLOUDFLARE_KEEPALIVE_ENABLED=true to enable it."})
+        return 0
 
     if not api_token:
         return 0

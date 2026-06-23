@@ -4,7 +4,9 @@ import json
 import os
 import re
 import secrets
+import ssl
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -64,21 +66,37 @@ DEFAULT_ALLOWED = [
 
 
 def cf_request(method: str, path: str, token: str, body: bytes | None = None, content_type: str = "application/json"):
-    req = urllib.request.Request(
-        f"{API_BASE}{path}",
-        data=body,
-        method=method,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": content_type,
-        },
-    )
-    with urllib.request.urlopen(req, timeout=30) as response:
-        payload = json.loads(response.read().decode("utf-8"))
-    if not payload.get("success"):
-        errors = payload.get("errors") or [{"message": "Unknown Cloudflare API error"}]
-        raise RuntimeError(errors[0].get("message", "Unknown Cloudflare API error"))
-    return payload["result"]
+    last_error: Exception | None = None
+    for attempt in range(1, 4):
+        req = urllib.request.Request(
+            f"{API_BASE}{path}",
+            data=body,
+            method=method,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": content_type,
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            if not payload.get("success"):
+                errors = payload.get("errors") or [{"message": "Unknown Cloudflare API error"}]
+                raise RuntimeError(errors[0].get("message", "Unknown Cloudflare API error"))
+            return payload["result"]
+        except urllib.error.HTTPError:
+            raise
+        except (urllib.error.URLError, TimeoutError, ssl.SSLError, ConnectionError) as error:
+            last_error = error
+            if attempt == 3:
+                break
+            print(
+                f"Cloudflare API request {method} {path} failed transiently "
+                f"({error}); retrying {attempt}/2...",
+                file=sys.stderr,
+            )
+            time.sleep(1.5 * attempt)
+    raise RuntimeError(f"Cloudflare API request failed after retries: {last_error}")
 
 
 def slugify(value: str) -> str:
