@@ -152,7 +152,7 @@ def resolve_account_and_subdomain(api_token: str) -> tuple[str, str]:
 
 
 def setup_keepalive_worker(api_token: str, account_id: str, subdomain: str) -> None:
-    enabled = os.environ.get("CLOUDFLARE_KEEPALIVE_ENABLED", "true").strip().lower()
+    enabled = os.environ.get("CLOUDFLARE_KEEPALIVE_ENABLED", "false").strip().lower()
     if enabled in {"0", "false", "no", "off"}:
         write_keepalive_status({"configured": False, "status": "disabled", "message": "Cloudflare keep-awake is disabled."})
         return
@@ -204,6 +204,11 @@ def setup_keepalive_worker(api_token: str, account_id: str, subdomain: str) -> N
 
 def main() -> int:
     api_token = os.environ.get("CLOUDFLARE_WORKERS_TOKEN", "").strip()
+    enabled = os.environ.get("CLOUDFLARE_KEEPALIVE_ENABLED", "false").strip().lower()
+
+    if enabled not in {"1", "true", "yes", "on"}:
+        write_keepalive_status({"configured": False, "status": "disabled", "message": "Cloudflare keep-awake is disabled by default. Set CLOUDFLARE_KEEPALIVE_ENABLED=true to enable it."})
+        return 0
 
     if not api_token:
         return 0

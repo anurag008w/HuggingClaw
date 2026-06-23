@@ -410,8 +410,14 @@ function renderDashboard(data) {
   const syncStatus = String(data.sync?.status || "unknown");
   const syncTone = ["success","restored","synced","configured"].includes(syncStatus) ? "ok" : syncStatus === "disabled" ? "warn" : syncStatus === "error" ? "off" : "neutral";
   const kaConf = data.keepalive?.configured === true;
-  const kaStatus = String(data.keepalive?.status || (process.env.CLOUDFLARE_WORKERS_TOKEN ? "pending" : "not configured"));
-  const kaTone = kaConf ? "ok" : process.env.CLOUDFLARE_WORKERS_TOKEN ? "warn" : "neutral";
+  const kaEnabled = isTrue(process.env.CLOUDFLARE_KEEPALIVE_ENABLED);
+  const kaStatus = String(data.keepalive?.status || (kaEnabled && process.env.CLOUDFLARE_WORKERS_TOKEN ? "pending" : "disabled"));
+  const kaTone = kaConf ? "ok" : kaEnabled && process.env.CLOUDFLARE_WORKERS_TOKEN ? "warn" : "neutral";
+  const kaDetail = kaConf
+    ? `Pinging <code>${escapeHtml(data.keepalive?.targetUrl || "/health")}</code>`
+    : kaEnabled && process.env.CLOUDFLARE_WORKERS_TOKEN
+      ? "Worker pending or failed"
+      : "Cloudflare keep-awake is off by default";
 
   const tiles = [
     tile({ title: "Gateway", value: badge(data.gatewayReady ? "Online" : "Offline", data.gatewayReady ? "ok" : "off"), detail: `OpenClaw on internal port ${GATEWAY_PORT}`, tone: data.gatewayReady ? "ok" : "off" }),
@@ -423,7 +429,7 @@ function renderDashboard(data) {
 
   tiles.push(
     tile({ title: "Backup", value: badge(syncStatus.toUpperCase(), syncTone), detail: escapeHtml(data.sync?.message || "No status yet"), tone: syncTone, meta: data.sync?.timestamp ? `<span class="local-time" data-iso="${data.sync.timestamp}"></span>` : "" }),
-    tile({ title: "Keep Awake", value: badge(kaConf ? "CF Cron" : kaStatus.toUpperCase(), kaTone), detail: kaConf ? `Pinging <code>${escapeHtml(data.keepalive?.targetUrl || "/health")}</code>` : process.env.CLOUDFLARE_WORKERS_TOKEN ? "Worker pending or failed" : "Not configured", tone: kaTone }),
+    tile({ title: "Keep Awake", value: badge(kaConf ? "CF Cron" : kaStatus.toUpperCase(), kaTone), detail: kaDetail, tone: kaTone }),
   );
 
   if (JUPYTER_ENABLED) {
@@ -451,6 +457,10 @@ function renderDashboard(data) {
     .btn-row{display:flex;gap:12px;margin:24px 0 20px}
     .hero-action{display:flex;flex:1;min-height:46px;align-items:center;justify-content:center;border-radius:8px;background:#fff;color:#000;text-decoration:none;font-weight:850;font-size:.98rem;transition:opacity .15s}
     .hero-action:hover{opacity:.9}.hero-action.terminal{background:#1e1e2e;color:#cdd6f4;border:1px solid #45475a}.hero-action.env{background:#312e81;color:#eef2ff;border:1px solid #6366f1}.hero-action.keys{background:#0f766e;color:#ecfeff;border:1px solid #2dd4bf}
+    .keepawake-panel{border:1px solid var(--line);background:#0d0c18;border-radius:11px;padding:14px 16px;margin:0 0 10px;color:var(--soft);line-height:1.45}
+    .keepawake-panel strong{color:var(--text)}.keepawake-panel p{margin:0 0 10px}.keepawake-actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+    .mini-btn{border:1px solid #6366f1;background:#312e81;color:#eef2ff;border-radius:8px;padding:9px 12px;font-weight:850;cursor:pointer;text-decoration:none;font-size:.82rem}.mini-btn:hover{opacity:.9}.mini-btn.secondary{background:#171624;color:var(--soft);border-color:var(--line)}
+    .keepawake-status{color:var(--muted);font-size:.78rem}
     .overview{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-bottom:10px}
     .tile{border:1px solid var(--line);background:var(--panel);border-radius:11px;padding:18px;min-height:124px;display:flex;flex-direction:column;gap:10px}
     .tile.ok{border-color:rgba(34,197,94,.22)}.tile.warn{border-color:rgba(245,197,66,.24)}.tile.off{border-color:rgba(251,113,133,.28)}
@@ -476,6 +486,14 @@ function renderDashboard(data) {
     <a class="hero-action env" data-space-link="env-builder" href="/env-builder">⚙️ Env Builder →</a>
     <a class="hero-action keys" data-space-link="key-rotator" href="/key-rotator">🔑 Key Rotator →</a>
   </div>
+  <section class="keepawake-panel" aria-label="Browser keep-awake helper">
+    <p><strong>Browser Keep Awake:</strong> Cloudflare Worker jo kaam karta hai woh external cron se <code>/health</code> ping karta hai. Ye button wahi ping browser se karta rahega, isliye tab open rehna zaroori hai.</p>
+    <div class="keepawake-actions">
+      <button type="button" id="browser-keepawake" class="mini-btn">▶ Start browser keep-awake</button>
+      <a class="mini-btn secondary" href="/health" target="_blank" rel="noopener noreferrer">Open /health ping</a>
+      <span id="browser-keepawake-status" class="keepawake-status">Off</span>
+    </div>
+  </section>
   <section class="overview">${tilesHtml}</section>
   <footer>Built by <a href="https://github.com/somratpro" target="_blank" rel="noopener noreferrer" style="color:inherit;text-decoration:none">@somratpro</a>${JUPYTER_ENABLED ? " · Terminal by JupyterLab" : ""} · Contributions by <a href="https://github.com/anurag008w" target="_blank" rel="noopener noreferrer" style="color:inherit;text-decoration:none">@anurag008w</a></footer>
   </main>
@@ -503,6 +521,40 @@ function renderDashboard(data) {
   }
 
   applyLinkTargets();
+
+  const keepawakeButton = document.getElementById('browser-keepawake');
+  const keepawakeStatus = document.getElementById('browser-keepawake-status');
+  let keepawakeTimer = null;
+
+  function setKeepawakeStatus(text) {
+    if (keepawakeStatus) keepawakeStatus.textContent = text;
+  }
+
+  function pingFromBrowser() {
+    setKeepawakeStatus('Pinging /health…');
+    return fetch('/health?source=browser-keepawake&t=' + Date.now(), { cache: 'no-store' })
+      .then(r => {
+        setKeepawakeStatus(r.ok ? 'On · last ping ' + new Date().toLocaleTimeString() : 'On · ping HTTP ' + r.status);
+      })
+      .catch(err => {
+        setKeepawakeStatus('On · ping failed: ' + (err && err.message ? err.message : 'network error'));
+      });
+  }
+
+  if (keepawakeButton) {
+    keepawakeButton.addEventListener('click', () => {
+      if (keepawakeTimer) {
+        clearInterval(keepawakeTimer);
+        keepawakeTimer = null;
+        keepawakeButton.textContent = '▶ Start browser keep-awake';
+        setKeepawakeStatus('Off');
+        return;
+      }
+      keepawakeButton.textContent = '■ Stop browser keep-awake';
+      pingFromBrowser();
+      keepawakeTimer = setInterval(pingFromBrowser, 4 * 60 * 1000);
+    });
+  }
 
   // Always re-fetch the live privacy status from the server to handle:
   // 1. Startup race condition where server rendered before API detection finished
